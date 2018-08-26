@@ -1,4 +1,23 @@
 [[package]]
+name = "atoms"
+version = "2.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+dependencies = [
+ "unescape 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
 name = "safelisprs"
 version = "0.1.0"
+dependencies = [
+ "atoms 2.2.3 (registry+https://github.com/rust-lang/crates.io-index)",
+]
 
+[[package]]
+name = "unescape"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+
+[metadata]
+"checksum atoms 2.2.3 (registry+https://github.com/rust-lang/crates.io-index)" = "159f9c3fa6c8eeff49500c4c011782f14bdb96281bc41947e455653d62228213"
+"checksum unescape 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)" = "ccb97dac3243214f8d8507998906ca3e2e0b900bf9bf4870477f125b82e68f6e"
