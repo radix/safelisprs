@@ -1,0 +1,6 @@
+[package]
+name = "safelisprs"
+version = "0.1.0"
+authors = ["Christopher Armstrong <radix@twistedmatrix.com>"]
+
+[dependencies]
