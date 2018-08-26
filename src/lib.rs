@@ -18,12 +18,16 @@ pub enum SLVal {
     Function(String, Vec<String>, Expr),
 }
 
-// pub enum AST {
-//     Let(Variable, AST),
-//     Call(Expr, Vec<Expr>),
-//     Variable(String),
-//     Int, Float, String, List,
-// }
+
+// TODO: Using s-expressions for the interpreter sucks. We should parse the
+// s-expressions into a higher-level AST, like this:
+//
+//     pub enum AST {
+//         Let(Variable, AST),
+//         Call(Expr, Vec<Expr>),
+//         Variable(String),
+//         Int, Float, String, List,
+//     }
 
 pub fn eval(form: &Expr, env: &mut Env) -> Result<Rc<SLVal>, String> {
     match form {
@@ -41,6 +45,11 @@ pub fn eval(form: &Expr, env: &mut Env) -> Result<Rc<SLVal>, String> {
                 _ => {
                     let val = env.get(s).ok_or_else(|| format!("Unknown invocation: {}", s))?.clone();
                     if let SLVal::Function(_, _, ref body) = *val {
+                        // TODO: this is totally fake.
+                        // 1. make `env` into a stack data structure, not just a flat hashmap.
+                        // 2. push a frame here
+                        // 3. bind parameters into that frame
+                        // 4. *then* eval the body.
                         eval(body, env)
                     } else {
                         Err(format!("{} is not a function", s))
