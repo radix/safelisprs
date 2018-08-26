@@ -38,7 +38,14 @@ pub fn eval(form: &Expr, env: &mut Env) -> Result<Rc<SLVal>, String> {
             AValue::Symbol(ref s) => match s.as_ref() {
                 "let" => special_let(right, env),
                 "fn" => special_fn(right, env),
-                _ => Err("Unknown special form".to_string()),
+                _ => {
+                    let val = env.get(s).ok_or_else(|| format!("Unknown invocation: {}", s))?.clone();
+                    if let SLVal::Function(_, _, ref body) = *val {
+                        eval(body, env)
+                    } else {
+                        Err(format!("{} is not a function", s))
+                    }
+                }
             },
             _ => Err("callables must be symbols for now".to_string()),
         },
@@ -77,7 +84,8 @@ fn special_fn(right: &Box<Expr>, env: &mut Env) -> Result<Rc<SLVal>, String> {
                                 }
                             }
                             let func = SLVal::Function(name.clone(), params_vec, *body.clone());
-                            return Ok(Rc::new(func));
+                            env.insert(name.clone(), Rc::new(func));
+                            return Ok(Rc::new(SLVal::Void));
                         }
                         _ => Err("bad `fn`".to_string()),
                     }
@@ -166,6 +174,7 @@ mod test {
     fn functions() {
         let mut env = HashMap::new();
         eval(&form("(fn hello-world () 5)"), &mut env).unwrap();
+        println!("{:?}", env);
         assert_eq!(
             eval(&form("(hello-world)"), &mut env).unwrap(),
             Rc::new(SLVal::Int(5))
