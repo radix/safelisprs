@@ -48,7 +48,7 @@ pub fn eval(form: &Expr, env: &mut Env) -> Result<Rc<SLVal>, String> {
                                     _ => Err("`let` must have two arguments.".to_string()),
                                 }
                             }
-                            _ => Err("`let` must have two arguments.".to_string()),
+                            _ => Err("`let` must have two arguments. Don't use a dot.".to_string()),
                         },
                         _ => Err("first argument to `let` must be a symbol".to_string()),
                     },
@@ -56,7 +56,7 @@ pub fn eval(form: &Expr, env: &mut Env) -> Result<Rc<SLVal>, String> {
                         "`let` must have two arguments, a symbol and an expression.".to_string()
                     ),
                 },
-                _ => Err("Bad special form".to_string()),
+                _ => Err("Unknown special form".to_string()),
             },
             _ => Err("callables must be symbols for now".to_string()),
         },
@@ -78,16 +78,16 @@ mod test {
     fn atoms() {
         let mut empty = HashMap::new();
 
-        let form = form("\"foo\"");
         assert_eq!(
-            eval(&form, &mut empty).unwrap(),
+            eval(&form("\"foo\""), &mut empty).unwrap(),
             Rc::new(SLVal::String("foo".to_string()))
         );
-        let form = Parser::new(&"64").parse_basic().unwrap();
-        assert_eq!(eval(&form, &mut empty).unwrap(), Rc::new(SLVal::Int(64)));
-        let form = Parser::new(&"64.0").parse_basic().unwrap();
         assert_eq!(
-            eval(&form, &mut empty).unwrap(),
+            eval(&form("64"), &mut empty).unwrap(),
+            Rc::new(SLVal::Int(64))
+        );
+        assert_eq!(
+            eval(&form("64.0"), &mut empty).unwrap(),
             Rc::new(SLVal::Float(64.0))
         );
     }
@@ -99,9 +99,8 @@ mod test {
             "myvar".to_string(),
             Rc::new(SLVal::String("my value".to_string())),
         );
-        let form = form("myvar");
         assert_eq!(
-            eval(&form, &mut env).unwrap(),
+            eval(&form("myvar"), &mut env).unwrap(),
             Rc::new(SLVal::String("my value".to_string()))
         );
     }
@@ -113,8 +112,8 @@ mod test {
             "myvar".to_string(),
             Rc::new(SLVal::String("my value".to_string())),
         );
-        let form = form("(let x 5)");
-        eval(&form, &mut env).unwrap();
+        eval(&form("(let x 5)"), &mut env).unwrap();
         assert_eq!(env.get("x").unwrap(), &Rc::new(SLVal::Int(5)));
+        assert_eq!(eval(&form("x"), &mut env).unwrap(), Rc::new(SLVal::Int(5)));
     }
 }
