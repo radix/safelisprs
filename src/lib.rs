@@ -15,6 +15,7 @@ pub enum SLVal {
     Symbol(String),
     List(Vec<SLVal>),
     Void,
+    Function(String, Vec<String>, Expr),
 }
 
 // pub enum AST {
@@ -36,6 +37,7 @@ pub fn eval(form: &Expr, env: &mut Env) -> Result<Rc<SLVal>, String> {
         AValue::Cons(left, right) => match **left {
             AValue::Symbol(ref s) => match s.as_ref() {
                 "let" => special_let(right, env),
+                "fn" => special_fn(right, env),
                 _ => Err("Unknown special form".to_string()),
             },
             _ => Err("callables must be symbols for now".to_string()),
@@ -44,8 +46,54 @@ pub fn eval(form: &Expr, env: &mut Env) -> Result<Rc<SLVal>, String> {
     }
 }
 
+fn flatten_list(mut cons: &AValue<String>) -> Result<Vec<AValue<String>>, String> {
+    let mut result = vec![];
+    loop {
+        match cons {
+            AValue::Cons(l, r) => {
+                result.push(*l.clone());
+                cons = &**r;
+            }
+            AValue::Nil => return Ok(result),
+            _ => return Err("Attempted to flatten a non-cons".to_string()),
+        }
+    }
+}
+
+fn special_fn(right: &Box<Expr>, env: &mut Env) -> Result<Rc<SLVal>, String> {
+    match **right {
+        AValue::Cons(ref name, ref box_cons_params_and_body) => match **name {
+            AValue::Symbol(ref name) => match **box_cons_params_and_body {
+                AValue::Cons(ref params, ref box_cons_body_and_nil) => {
+                    match **box_cons_body_and_nil {
+                        AValue::Cons(ref body, _) => {
+                            let flattened_params = flatten_list(params)?;
+                            let mut params_vec = vec![];
+                            for param_expr in flattened_params {
+                                if let AValue::Symbol(p) = param_expr {
+                                    params_vec.push(p);
+                                } else {
+                                    return Err("Parameters must be symbols".to_string());
+                                }
+                            }
+                            let func = SLVal::Function(name.clone(), params_vec, *body.clone());
+                            return Ok(Rc::new(func));
+                        }
+                        _ => Err("bad `fn`".to_string()),
+                    }
+                }
+                _ => Err("`fn` must take parameters after the name.".to_string()),
+            },
+            _ => Err("`fn` first argument must be a symbol.".to_string()),
+        },
+        _ => Err("`fn` must take parameters. And don't use a dot.".to_string()),
+    }
+}
+
 // why is this box a reference
 fn special_let(right: &Box<Expr>, env: &mut Env) -> Result<Rc<SLVal>, String> {
+    // Would if_chain! help here? It would mean we would have less specific
+    // error messages. I probably need a custom pattern-matcher.
     match **right {
         AValue::Cons(ref var, ref box_cons_expr) => match **var {
             AValue::Symbol(ref variable_name) => match **box_cons_expr {
@@ -109,12 +157,18 @@ mod test {
     #[test]
     fn let_var() {
         let mut env = HashMap::new();
-        env.insert(
-            "myvar".to_string(),
-            Rc::new(SLVal::String("my value".to_string())),
-        );
         eval(&form("(let x 5)"), &mut env).unwrap();
         assert_eq!(env.get("x").unwrap(), &Rc::new(SLVal::Int(5)));
         assert_eq!(eval(&form("x"), &mut env).unwrap(), Rc::new(SLVal::Int(5)));
+    }
+
+    #[test]
+    fn functions() {
+        let mut env = HashMap::new();
+        eval(&form("(fn hello-world () 5)"), &mut env).unwrap();
+        assert_eq!(
+            eval(&form("(hello-world)"), &mut env).unwrap(),
+            Rc::new(SLVal::Int(5))
+        );
     }
 }
