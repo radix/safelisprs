@@ -52,11 +52,49 @@ pub fn compile_from_source(s: &str) -> Result<Module, String> {
 }
 
 fn compile_function(f: &parser::Function) -> Result<Function, String> {
+  let mut num_locals = f.params.len() as u16;
+  /// Map of local-name to local-index
+  let mut locals = HashMap::new();
+  for (idx, param) in f.params.iter().enumerate() {
+    locals.insert(param.clone(), idx as u16);
+  }
+  let mut instructions = vec![];
+  for ast in &f.code {
+    instructions.extend(compile_expr(ast, &mut num_locals, &mut locals)?);
+  }
+  instructions.push(Instruction::Return);
   Ok(Function {
-    num_params: 0,
-    num_locals: 0,
-    instructions: vec![],
+    num_params: f.params.len() as u16,
+    num_locals: num_locals as u16,
+    instructions: instructions,
   })
+}
+
+fn compile_expr(ast: &AST, num_locals: &mut u16, locals: &mut HashMap<String, u16>) -> Result<Vec<Instruction>, String> {
+  let mut instructions = vec![];
+  match ast {
+    AST::Let(name, box_expr) => {
+      if !locals.contains_key(name) {
+        locals.insert(name.clone(), *num_locals);
+        *num_locals += 1;
+      }
+      instructions.extend(compile_expr(&box_expr, num_locals, locals)?);
+      instructions.push(Instruction::SetLocal(locals[name]))
+    }
+    AST::DefineFn(func) => {}
+    AST::Call(box_expr, arg_exprs) => {}
+    AST::Variable(name) => {
+      if !locals.contains_key(name) {
+        return Err(format!("Function accesses unbound variable {}", name))
+      }
+      instructions.push(Instruction::LoadLocal(locals[name]));
+    }
+    AST::Int(i) => {}
+    AST::Float(f) => {}
+    AST::String(s) => {}
+  }
+  Ok(instructions)
+
 }
 
 #[cfg(test)]
@@ -68,14 +106,14 @@ mod test {
     let func = parser::Function {
       name: "id".to_string(),
       params: vec!["a".to_string()],
-      code: Box::new(AST::Variable("a".to_string())),
+      code: vec![AST::Variable("a".to_string())],
     };
     let code = compile_function(&func).unwrap();
     assert_eq!(
       code,
       Function {
-        num_params: 0,
-        num_locals: 0,
+        num_params: 1,
+        num_locals: 1,
         instructions: vec![Instruction::LoadLocal(0), Instruction::Return],
       }
     );
@@ -89,7 +127,7 @@ mod test {
       Module {
         functions: hashmap!{
         "id".to_string() =>
-            Function { num_params: 1, num_locals: 1, instructions: vec![Instruction::Return]}},
+            Function { num_params: 1, num_locals: 1, instructions: vec![]}},
       }
     )
   }

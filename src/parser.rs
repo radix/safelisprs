@@ -17,7 +17,7 @@ pub enum AST {
 pub struct Function {
   pub name: String,
   pub params: Vec<String>,
-  pub code: Box<AST>,
+  pub code: Vec<AST>,
 }
 
 pub fn read_multiple(s: &str) -> Result<Vec<AST>, String> {
@@ -86,25 +86,24 @@ fn parse_fn(right: &Box<Expr>) -> Result<AST, String> {
   match **right {
     AValue::Cons(ref name, ref box_cons_params_and_body) => match **name {
       AValue::Symbol(ref name) => match **box_cons_params_and_body {
-        AValue::Cons(ref params, ref box_cons_body_and_nil) => match **box_cons_body_and_nil {
-          AValue::Cons(ref body, _) => {
-            let flattened_params = flatten_list(params)?;
-            let mut params_vec = vec![];
-            for param_expr in flattened_params {
-              if let AValue::Symbol(p) = param_expr {
-                params_vec.push(p);
-              } else {
-                return Err("Parameters must be symbols".to_string());
-              }
+        AValue::Cons(ref params, ref box_body) => {
+          let flattened_params = flatten_list(params)?;
+          let mut params_vec = vec![];
+          for param_expr in flattened_params {
+            if let AValue::Symbol(p) = param_expr {
+              params_vec.push(p);
+            } else {
+              return Err("Parameters must be symbols".to_string());
             }
-            Ok(AST::DefineFn(Function {
-              name: name.clone(),
-              params: params_vec,
-              code: Box::new(AST::from_atoms(body)?),
-            }))
           }
-          _ => Err("bad `fn`".to_string()),
-        },
+          let body_forms = flatten_list(&*box_body)?;
+          let body_asts: Result<Vec<AST>, _> = body_forms.iter().map(AST::from_atoms).collect();
+          Ok(AST::DefineFn(Function {
+            name: name.clone(),
+            params: params_vec,
+            code: body_asts?,
+          }))
+        }
         _ => Err("`fn` must take parameters after the name.".to_string()),
       },
       _ => Err("`fn` first argument must be a symbol.".to_string()),
