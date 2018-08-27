@@ -70,7 +70,11 @@ fn compile_function(f: &parser::Function) -> Result<Function, String> {
   })
 }
 
-fn compile_expr(ast: &AST, num_locals: &mut u16, locals: &mut HashMap<String, u16>) -> Result<Vec<Instruction>, String> {
+fn compile_expr(
+  ast: &AST,
+  num_locals: &mut u16,
+  locals: &mut HashMap<String, u16>,
+) -> Result<Vec<Instruction>, String> {
   let mut instructions = vec![];
   match ast {
     AST::Let(name, box_expr) => {
@@ -85,7 +89,7 @@ fn compile_expr(ast: &AST, num_locals: &mut u16, locals: &mut HashMap<String, u1
     AST::Call(box_expr, arg_exprs) => {}
     AST::Variable(name) => {
       if !locals.contains_key(name) {
-        return Err(format!("Function accesses unbound variable {}", name))
+        return Err(format!("Function accesses unbound variable {}", name));
       }
       instructions.push(Instruction::LoadLocal(locals[name]));
     }
@@ -94,7 +98,6 @@ fn compile_expr(ast: &AST, num_locals: &mut u16, locals: &mut HashMap<String, u1
     AST::String(s) => {}
   }
   Ok(instructions)
-
 }
 
 #[cfg(test)]
