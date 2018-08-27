@@ -6,14 +6,6 @@ use std::rc::Rc; // TODO: use Manishearth/rust-gc
 
 type Expr = AValue<String>;
 
-fn first(val: Expr) -> Result<Expr, String> {
-    if let AValue::Cons(first, _) = val {
-        Ok(*first)
-    } else  {
-        Err("This ain't a Cons".to_string())
-    }
-}
-
 #[derive(Debug)]
 pub struct Env {
     frames: Vec<Frame>,
@@ -21,30 +13,41 @@ pub struct Env {
 
 impl Env {
     pub fn new() -> Self {
-        Env {frames: vec![Frame::new()]}
+        Env {
+            frames: vec![Frame::new()],
+        }
     }
 
     pub fn get(&self, name: &str) -> Option<Rc<SLVal>> {
         for frame in self.frames.iter().rev() {
             let v = frame.bindings.get(name).map(|x| x.clone());
-            if v.is_some() { return v; }
+            if v.is_some() {
+                return v;
+            }
         }
         return None;
     }
 
     pub fn set(&mut self, name: String, val: Rc<SLVal>) {
-        self.frames.last_mut().expect("Invariant failed: No frame found!").bindings.insert(name, val);
+        self.frames
+            .last_mut()
+            .expect("Invariant failed: No frame found!")
+            .bindings
+            .insert(name, val);
     }
 
-    pub fn push(&mut self) {
+    fn push(&mut self) {
         self.frames.push(Frame::new())
     }
 
-    pub fn pop(&mut self) -> Result<Frame, String> {
+    fn pop(&mut self) -> Result<Frame, String> {
         if self.frames.len() == 1 {
             Err("Can't pop last frame".to_string())
         } else {
-            Ok(self.frames.pop().expect("Invariant failed: no last frame found"))
+            Ok(self
+                .frames
+                .pop()
+                .expect("Invariant failed: no last frame found"))
         }
     }
 }
@@ -56,7 +59,9 @@ struct Frame {
 
 impl Frame {
     fn new() -> Self {
-        Frame { bindings: HashMap::new() }
+        Frame {
+            bindings: HashMap::new(),
+        }
     }
 }
 
@@ -72,12 +77,11 @@ pub enum SLVal {
 }
 
 #[derive(Debug, PartialEq)]
-struct Function {
+pub struct Function {
     name: String,
     params: Vec<String>,
     body: Expr,
 }
-
 
 // TODO: Using s-expressions for the interpreter sucks. We should parse the
 // s-expressions into a higher-level AST, like this:
@@ -98,25 +102,40 @@ pub fn eval(form: &Expr, env: &mut Env) -> Result<Rc<SLVal>, String> {
             .get(s)
             .ok_or_else(|| "Variable not found".to_string())?
             .clone()),
-        AValue::Cons(left, right) => match **left {
-            AValue::Symbol(ref s) => match s.as_ref() {
-                "let" => special_let(right, env),
-                "fn" => special_fn(right, env),
-            },
-            _ => {
-                let func = first(**left)?;
-                let params_unevaled = flatten_list(rest(**left)?)?;
-                call_fn(func, params_unevaled, env)
+        AValue::Cons(left, right) => {
+            match **left {
+                AValue::Symbol(ref s) => match s.as_ref() {
+                    "let" => return special_let(right, env),
+                    "fn" => return special_fn(right, env),
+                    _ => {}
+                },
+                _ => {}
             }
-        },
+            let func = eval(left, env)?;
+            if let SLVal::Function(ref func) = *func {
+                let args_unevaled = flatten_list(right)?;
+                call_fn(func, args_unevaled, env)
+            } else {
+                Err(format!("Tried to call a non-function: {:?}", func))
+            }
+        }
         _ => Err("Sorry unimplement".to_string()),
     }
 }
 
-fn call_fn(func: Rc<Function>, params: Vec<Expr>, env: &mut Env) {
-    // 3. bind parameters into that frame
+fn call_fn(func: &Function, args: Vec<Expr>, env: &mut Env) -> Result<Rc<SLVal>, String> {
+    if args.len() != func.params.len() {
+        return Err(format!("{} requires {} arguments, found {}", func.name, func.params.len(), args.len()));
+    }
+    let evaled: Vec<_> = args.iter().map(|a| eval(a, env)).collect();
+    // 3. bind arguments to parameters
     env.push();
-    eval(func.body, env)
+    for (name, arg) in func.params.iter().zip(evaled) {
+        env.set(name.to_string(), arg?);
+    }
+    let result = eval(&func.body, env);
+    env.pop()?;
+    result
 }
 
 fn flatten_list(mut cons: &AValue<String>) -> Result<Vec<Expr>, String> {
@@ -149,7 +168,11 @@ fn special_fn(right: &Box<Expr>, env: &mut Env) -> Result<Rc<SLVal>, String> {
                                     return Err("Parameters must be symbols".to_string());
                                 }
                             }
-                            let func = SLVal::Function(name.clone(), params_vec, *body.clone());
+                            let func = SLVal::Function(Function {
+                                name: name.clone(),
+                                params: params_vec,
+                                body: *body.clone(),
+                            });
                             env.set(name.clone(), Rc::new(func));
                             return Ok(Rc::new(SLVal::Void));
                         }
@@ -251,6 +274,9 @@ mod test {
     fn function_param() {
         let mut env = Env::new();
         eval(&form("(fn id (a) a)"), &mut env).unwrap();
-        assert_eq!(eval(&form("(id 5)"), &mut env).unwrap(), Rc::new(SLVal::Int(5)));
+        assert_eq!(
+            eval(&form("(id 5)"), &mut env).unwrap(),
+            Rc::new(SLVal::Int(5))
+        );
     }
 }
