@@ -5,7 +5,40 @@ use std::collections::HashMap;
 use std::rc::Rc; // TODO: use Manishearth/rust-gc
 
 type Expr = AValue<String>;
-type Env = HashMap<String, Rc<SLVal>>;
+
+#[derive(Debug)]
+pub struct Env {
+    frames: Vec<Frame>,
+}
+
+impl Env {
+    pub fn new() -> Self {
+        Env {frames: vec![Frame::new()]}
+    }
+
+    pub fn get(&self, name: &str) -> Option<Rc<SLVal>> {
+        for frame in self.frames.iter().rev() {
+            let v = frame.bindings.get(name).map(|x| x.clone());
+            if v.is_some() { return v; }
+        }
+        return None;
+    }
+
+    pub fn set(&mut self, name: String, val: Rc<SLVal>) {
+        self.frames.last_mut().expect("Invariant failed: No frame found!").bindings.insert(name, val);
+    }
+}
+
+#[derive(Debug)]
+struct Frame {
+    bindings: HashMap<String, Rc<SLVal>>,
+}
+
+impl Frame {
+    fn new() -> Self {
+        Frame { bindings: HashMap::new() }
+    }
+}
 
 #[derive(Debug, PartialEq)]
 pub enum SLVal {
@@ -93,7 +126,7 @@ fn special_fn(right: &Box<Expr>, env: &mut Env) -> Result<Rc<SLVal>, String> {
                                 }
                             }
                             let func = SLVal::Function(name.clone(), params_vec, *body.clone());
-                            env.insert(name.clone(), Rc::new(func));
+                            env.set(name.clone(), Rc::new(func));
                             return Ok(Rc::new(SLVal::Void));
                         }
                         _ => Err("bad `fn`".to_string()),
@@ -117,7 +150,7 @@ fn special_let(right: &Box<Expr>, env: &mut Env) -> Result<Rc<SLVal>, String> {
                 AValue::Cons(ref box_expr, ref box_hopeful_nil) => match **box_hopeful_nil {
                     AValue::Nil => {
                         let result = eval(box_expr, env)?;
-                        env.insert(variable_name.clone(), result);
+                        env.set(variable_name.clone(), result);
                         Ok(Rc::new(SLVal::Void))
                     }
                     _ => Err("`let` must have two arguments.".to_string()),
@@ -142,7 +175,7 @@ mod test {
 
     #[test]
     fn atoms() {
-        let mut empty = HashMap::new();
+        let mut empty = Env::new();
 
         assert_eq!(
             eval(&form("\"foo\""), &mut empty).unwrap(),
@@ -160,8 +193,8 @@ mod test {
 
     #[test]
     fn variable() {
-        let mut env = HashMap::new();
-        env.insert(
+        let mut env = Env::new();
+        env.set(
             "myvar".to_string(),
             Rc::new(SLVal::String("my value".to_string())),
         );
@@ -173,15 +206,15 @@ mod test {
 
     #[test]
     fn let_var() {
-        let mut env = HashMap::new();
+        let mut env = Env::new();
         eval(&form("(let x 5)"), &mut env).unwrap();
-        assert_eq!(env.get("x").unwrap(), &Rc::new(SLVal::Int(5)));
+        assert_eq!(env.get("x").unwrap(), Rc::new(SLVal::Int(5)));
         assert_eq!(eval(&form("x"), &mut env).unwrap(), Rc::new(SLVal::Int(5)));
     }
 
     #[test]
     fn functions() {
-        let mut env = HashMap::new();
+        let mut env = Env::new();
         eval(&form("(fn hello-world () 5)"), &mut env).unwrap();
         println!("{:?}", env);
         assert_eq!(
