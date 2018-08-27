@@ -1,4 +1,4 @@
-use atoms::Value as AValue;
+use atoms::{ParseError, Parser, Value as AValue};
 
 type Expr = AValue<String>;
 
@@ -11,6 +11,20 @@ pub enum AST {
     Int(i64),
     Float(f64),
     String(String),
+}
+
+pub fn read_multiple(s: &str) -> Result<Vec<AST>, String> {
+    let mut p = Parser::new(&s);
+    let mut result = vec![];
+    loop {
+        let form = p.read();
+        match form {
+            Ok(form) => result.push(AST::from_atoms(&form)?),
+            Err(ParseError::EndOfFile(_, _)) => break,
+            Err(e) => return Err(format!("{:?}", e)),
+        }
+    }
+    Ok(result)
 }
 
 impl AST {
@@ -105,5 +119,16 @@ fn flatten_list(mut cons: &AValue<String>) -> Result<Vec<Expr>, String> {
             AValue::Nil => return Ok(result),
             _ => return Err("Attempted to flatten a non-cons".to_string()),
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_read_multiple() {
+        let result = read_multiple("5 3").unwrap();
+        assert_eq!(result, vec![AST::Int(5), AST::Int(3)]);
     }
 }

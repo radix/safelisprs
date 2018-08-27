@@ -44,8 +44,7 @@ impl Env {
         if self.frames.len() == 1 {
             Err("Can't pop last frame".to_string())
         } else {
-            Ok(self
-                .frames
+            Ok(self.frames
                 .pop()
                 .expect("Invariant failed: no last frame found"))
         }
@@ -88,8 +87,7 @@ pub fn eval(form: &AST, env: &mut Env) -> Result<Rc<SLVal>, String> {
         AST::String(s) => Ok(Rc::new(SLVal::String(s.clone()))),
         AST::Int(i) => Ok(Rc::new(SLVal::Int(i.clone()))),
         AST::Float(f) => Ok(Rc::new(SLVal::Float(f.clone()))),
-        AST::Variable(s) => Ok(env
-            .get(s)
+        AST::Variable(s) => Ok(env.get(s)
             .ok_or_else(|| "Variable not found".to_string())?
             .clone()),
         AST::Let(name, expr) => special_let(name, expr, env),
@@ -98,7 +96,7 @@ pub fn eval(form: &AST, env: &mut Env) -> Result<Rc<SLVal>, String> {
     }
 }
 
-fn call_fn(func: &AST, args: &Vec<AST>, env: &mut Env) -> Result<Rc<SLVal>, String> {
+fn call_fn(func: &AST, args: &[AST], env: &mut Env) -> Result<Rc<SLVal>, String> {
     let func = eval(func, env)?;
     if let SLVal::Function(ref func) = *func {
         if args.len() != func.params.len() {
@@ -125,13 +123,13 @@ fn call_fn(func: &AST, args: &Vec<AST>, env: &mut Env) -> Result<Rc<SLVal>, Stri
 
 fn special_fn(
     name: &str,
-    params: &Vec<String>,
+    params: &[String],
     body: &AST,
     env: &mut Env,
 ) -> Result<Rc<SLVal>, String> {
     let func = SLVal::Function(Function {
         name: name.to_string(),
-        params: params.clone(),
+        params: params.to_vec(),
         body: body.clone(),
     });
     env.set(name.to_string(), Rc::new(func));
