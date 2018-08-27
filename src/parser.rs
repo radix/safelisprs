@@ -2,7 +2,6 @@ use atoms::Value as AValue;
 
 type Expr = AValue<String>;
 
-
 #[derive(Debug, PartialEq, Clone)]
 pub enum AST {
     Let(String, Box<AST>),

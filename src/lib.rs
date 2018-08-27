@@ -6,7 +6,6 @@ use std::rc::Rc; // TODO: use Manishearth/rust-gc
 mod parser;
 use parser::AST;
 
-
 #[derive(Debug)]
 pub struct Env {
     frames: Vec<Frame>,
