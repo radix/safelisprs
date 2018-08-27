@@ -6,6 +6,14 @@ use std::rc::Rc; // TODO: use Manishearth/rust-gc
 
 type Expr = AValue<String>;
 
+fn first(val: Expr) -> Result<Expr, String> {
+    if let AValue::Cons(first, _) = val {
+        Ok(*first)
+    } else  {
+        Err("This ain't a Cons".to_string())
+    }
+}
+
 #[derive(Debug)]
 pub struct Env {
     frames: Vec<Frame>,
@@ -26,6 +34,18 @@ impl Env {
 
     pub fn set(&mut self, name: String, val: Rc<SLVal>) {
         self.frames.last_mut().expect("Invariant failed: No frame found!").bindings.insert(name, val);
+    }
+
+    pub fn push(&mut self) {
+        self.frames.push(Frame::new())
+    }
+
+    pub fn pop(&mut self) -> Result<Frame, String> {
+        if self.frames.len() == 1 {
+            Err("Can't pop last frame".to_string())
+        } else {
+            Ok(self.frames.pop().expect("Invariant failed: no last frame found"))
+        }
     }
 }
 
@@ -48,7 +68,14 @@ pub enum SLVal {
     Symbol(String),
     List(Vec<SLVal>),
     Void,
-    Function(String, Vec<String>, Expr),
+    Function(Function),
+}
+
+#[derive(Debug, PartialEq)]
+struct Function {
+    name: String,
+    params: Vec<String>,
+    body: Expr,
 }
 
 
@@ -75,27 +102,24 @@ pub fn eval(form: &Expr, env: &mut Env) -> Result<Rc<SLVal>, String> {
             AValue::Symbol(ref s) => match s.as_ref() {
                 "let" => special_let(right, env),
                 "fn" => special_fn(right, env),
-                _ => {
-                    let val = env.get(s).ok_or_else(|| format!("Unknown invocation: {}", s))?.clone();
-                    if let SLVal::Function(_, _, ref body) = *val {
-                        // TODO: this is totally fake.
-                        // 1. make `env` into a stack data structure, not just a flat hashmap.
-                        // 2. push a frame here
-                        // 3. bind parameters into that frame
-                        // 4. *then* eval the body.
-                        eval(body, env)
-                    } else {
-                        Err(format!("{} is not a function", s))
-                    }
-                }
             },
-            _ => Err("callables must be symbols for now".to_string()),
+            _ => {
+                let func = first(**left)?;
+                let params_unevaled = flatten_list(rest(**left)?)?;
+                call_fn(func, params_unevaled, env)
+            }
         },
         _ => Err("Sorry unimplement".to_string()),
     }
 }
 
-fn flatten_list(mut cons: &AValue<String>) -> Result<Vec<AValue<String>>, String> {
+fn call_fn(func: Rc<Function>, params: Vec<Expr>, env: &mut Env) {
+    // 3. bind parameters into that frame
+    env.push();
+    eval(func.body, env)
+}
+
+fn flatten_list(mut cons: &AValue<String>) -> Result<Vec<Expr>, String> {
     let mut result = vec![];
     loop {
         match cons {
@@ -213,7 +237,7 @@ mod test {
     }
 
     #[test]
-    fn functions() {
+    fn function_const() {
         let mut env = Env::new();
         eval(&form("(fn hello-world () 5)"), &mut env).unwrap();
         println!("{:?}", env);
@@ -221,5 +245,12 @@ mod test {
             eval(&form("(hello-world)"), &mut env).unwrap(),
             Rc::new(SLVal::Int(5))
         );
+    }
+
+    #[test]
+    fn function_param() {
+        let mut env = Env::new();
+        eval(&form("(fn id (a) a)"), &mut env).unwrap();
+        assert_eq!(eval(&form("(id 5)"), &mut env).unwrap(), Rc::new(SLVal::Int(5)));
     }
 }
