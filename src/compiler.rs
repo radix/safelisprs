@@ -1,14 +1,14 @@
 use std::collections::HashMap;
 
-use parser::{read_multiple, Function, AST};
+use parser::{self, read_multiple, AST};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Module {
-  pub functions: HashMap<String, Code>,
+  pub functions: HashMap<String, Function>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct Code {
+pub struct Function {
   pub num_params: u16,
   pub num_locals: u16,
   pub instructions: Vec<Instruction>,
@@ -31,7 +31,7 @@ pub enum Instruction {
 }
 
 impl Module {
-  pub fn get_function(&self, name: &str) -> Result<&Code, String> {
+  pub fn get_function(&self, name: &str) -> Result<&Function, String> {
     self
       .functions
       .get(name)
@@ -51,8 +51,8 @@ pub fn compile_from_source(s: &str) -> Result<Module, String> {
   compile_module(&asts)
 }
 
-fn compile_function(f: &Function) -> Result<Code, String> {
-  Ok(Code {
+fn compile_function(f: &parser::Function) -> Result<Function, String> {
+  Ok(Function {
     num_params: 0,
     num_locals: 0,
     instructions: vec![],
@@ -65,7 +65,7 @@ mod test {
 
   #[test]
   fn compile_id() {
-    let func = Function {
+    let func = parser::Function {
       name: "id".to_string(),
       params: vec!["a".to_string()],
       code: Box::new(AST::Variable("a".to_string())),
@@ -73,7 +73,7 @@ mod test {
     let code = compile_function(&func).unwrap();
     assert_eq!(
       code,
-      Code {
+      Function {
         num_params: 0,
         num_locals: 0,
         instructions: vec![Instruction::LoadLocal(0), Instruction::Return],
@@ -89,32 +89,9 @@ mod test {
       Module {
         functions: hashmap!{
         "id".to_string() =>
-            Code { num_params: 1, num_locals: 1, instructions: vec![Instruction::Return]}},
+            Function { num_params: 1, num_locals: 1, instructions: vec![Instruction::Return]}},
       }
     )
   }
 
 }
-
-/*
-
-
-ADD_I32
-SUB_I32
-MUL_I32
-LT_I32
-EQ_I32
-JMP
-JMPT
-JMPF
-CONST_I32
-LOAD
-GLOAD
-STORE
-GSTORE
-PRINT
-POP
-HALT
-CALL
-RET
-*/

@@ -1,6 +1,6 @@
 use std::rc::Rc; // TODO: use Manishearth/rust-gc
 
-use compiler::{Code, Instruction, Module};
+use compiler::{Function, Instruction, Module};
 
 struct Stack {
   items: Vec<Rc<SLVal>>,
@@ -14,7 +14,6 @@ pub enum SLVal {
   Symbol(String),
   List(Vec<SLVal>),
   Void,
-  // Function(Function),
 }
 
 impl Stack {
@@ -48,11 +47,11 @@ fn call_in_module(module: &Module, main: &str) -> Result<Rc<SLVal>, String> {
   eval_code(module, code, locals)
 }
 
-fn alloc_locals(code: &Code) -> Vec<Rc<SLVal>> {
+fn alloc_locals(code: &Function) -> Vec<Rc<SLVal>> {
   vec![Rc::new(SLVal::Void); usize::from(code.num_locals)]
 }
 
-fn eval_code(module: &Module, code: &Code, mut locals: Vec<Rc<SLVal>>) -> Result<Rc<SLVal>, String> {
+fn eval_code(module: &Module, code: &Function, mut locals: Vec<Rc<SLVal>>) -> Result<Rc<SLVal>, String> {
   // wait, is this right? Shouldn't there be ONE stack, instead of one stack per frame?
   let mut stack: Stack = Stack::new();
   for inst in &code.instructions {
@@ -104,7 +103,7 @@ mod test {
   #[test]
   fn test_id() {
     let empty_mod = Module { functions: hashmap!{}};
-    let code = Code { num_locals: 1, num_params: 1, instructions: vec![Instruction::LoadLocal(0), Instruction::Return]};
+    let code = Function { num_locals: 1, num_params: 1, instructions: vec![Instruction::LoadLocal(0), Instruction::Return]};
     let locals = vec![Rc::new(SLVal::Int(42))];
     let result = eval_code(&empty_mod, &code, locals).unwrap();
     assert_eq!(result, Rc::new(SLVal::Int(42)));
