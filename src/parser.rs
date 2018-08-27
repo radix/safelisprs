@@ -5,12 +5,19 @@ type Expr = AValue<String>;
 #[derive(Debug, PartialEq, Clone)]
 pub enum AST {
   Let(String, Box<AST>),
-  DefineFn(String, Vec<String>, Box<AST>),
+  DefineFn(Function),
   Call(Box<AST>, Vec<AST>),
   Variable(String),
   Int(i64),
   Float(f64),
   String(String),
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct Function {
+  pub name: String,
+  pub params: Vec<String>,
+  pub code: Box<AST>,
 }
 
 pub fn read_multiple(s: &str) -> Result<Vec<AST>, String> {
@@ -90,11 +97,11 @@ fn parse_fn(right: &Box<Expr>) -> Result<AST, String> {
                 return Err("Parameters must be symbols".to_string());
               }
             }
-            Ok(AST::DefineFn(
-              name.clone(),
-              params_vec,
-              Box::new(AST::from_atoms(body)?),
-            ))
+            Ok(AST::DefineFn(Function {
+              name: name.clone(),
+              params: params_vec,
+              code: Box::new(AST::from_atoms(body)?),
+            }))
           }
           _ => Err("bad `fn`".to_string()),
         },

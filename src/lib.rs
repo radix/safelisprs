@@ -8,7 +8,9 @@ use std::collections::HashMap;
 use std::rc::Rc; // TODO: use Manishearth/rust-gc
 
 mod compiler;
+mod interpreter;
 mod parser;
+
 use parser::AST;
 
 #[derive(Debug)]
@@ -103,7 +105,7 @@ pub fn eval(form: &AST, env: &mut Env) -> Result<Rc<SLVal>, String> {
         .clone(),
     ),
     AST::Let(name, expr) => special_let(name, expr, env),
-    AST::DefineFn(name, params, body) => special_fn(name, params, body, env),
+    AST::DefineFn(func) => special_fn(&func.name, &func.params, &func.code, env),
     AST::Call(func, args) => call_fn(func, args, env),
   }
 }
