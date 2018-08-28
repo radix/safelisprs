@@ -86,12 +86,10 @@ fn prim_call(module: &Module, stack: &mut Stack, name: &str) -> Result<(), Strin
       }
       stack.push(eval_code(module, func, locals)?);
     }
-    None => {
-      match name {
-        "+" => builtin_add(stack)?,
-        _ => return Err(format!("No function named {}", name))
-      }
-    }
+    None => match name {
+      "+" => builtin_add(stack)?,
+      _ => return Err(format!("No function named {}", name)),
+    },
   }
   Ok(())
 }
