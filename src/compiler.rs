@@ -2,19 +2,19 @@ use std::collections::HashMap;
 
 use parser::{self, AST};
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Module {
   pub functions: HashMap<String, Function>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Function {
   pub num_params: u16,
   pub num_locals: u16,
   pub instructions: Vec<Instruction>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Instruction {
   /// loads local variable onto the stack
   LoadLocal(u16),
