@@ -21,7 +21,6 @@ fn main() {
     let format = args.value_of("format").unwrap_or("bincode");
     let output_file = args.value_of("output").map(|x| x.to_string()).unwrap_or_else(|| input_file.to_string() + "." + format);
 
-    println!("All args: {:?}", args);
     println!("Compiling {} to {}", input_file, output_file);
 
     let input_data = {
