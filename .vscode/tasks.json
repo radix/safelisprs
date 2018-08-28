@@ -12,7 +12,16 @@
             ],
             "problemMatcher": [
                 "$rustc"
-            ]
+            ],
+            "group": {
+                "kind": "test",
+                "isDefault": true
+            },
+            "options": {
+                "env": {
+                    "RUST_BACKTRACE": "1"
+                }
+            }
         }
     ]
 }

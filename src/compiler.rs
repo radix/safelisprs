@@ -26,34 +26,33 @@ pub enum Instruction {
   /// discards topmost stack item
   Pop,
   Call(String),
+  /// Exit the current function, returning the TOS to the caller
   Return,
-  Add,
 }
 
 impl Module {
-  pub fn get_function(&self, name: &str) -> Result<&Function, String> {
-    self
-      .functions
-      .get(name)
-      .ok_or_else(|| format!("No function named {}", name))
+  pub fn get_function(&self, name: &str) -> Option<&Function> {
+    self.functions.get(name)
   }
 }
 
 pub fn compile_module(asts: &[AST]) -> Result<Module, String> {
-  let mut module = Module {
-    functions: HashMap::new(),
+  let mut functions = hashmap!{};
+  for ast in asts {
+    match ast {
+      AST::DefineFn(func) => functions.insert(func.name.clone(), compile_function(func)?),
+      x => return Err(format!("Unexpected form at module-level: {:?}", x)),
+    };
+  }
+  let module = Module {
+    functions: functions,
   };
   Ok(module)
 }
 
-pub fn compile_from_source(s: &str) -> Result<Module, String> {
-  let asts = read_multiple(s)?;
-  compile_module(&asts)
-}
-
 fn compile_function(f: &parser::Function) -> Result<Function, String> {
   let mut num_locals = f.params.len() as u16;
-  /// Map of local-name to local-index
+  // Map of local-name to local-index
   let mut locals = HashMap::new();
   for (idx, param) in f.params.iter().enumerate() {
     locals.insert(param.clone(), idx as u16);
@@ -86,14 +85,22 @@ fn compile_expr(
       instructions.push(Instruction::SetLocal(locals[name]))
     }
     AST::DefineFn(func) => {}
-    AST::Call(box_expr, arg_exprs) => {}
+    AST::Call(box_expr, arg_exprs) => {
+      for expr in arg_exprs {
+        instructions.extend(compile_expr(&expr, num_locals, locals)?);
+      }
+      match &**box_expr {
+        AST::Variable(name) => instructions.push(Instruction::Call(name.to_string())),
+        x => return Err(format!("NYI: non-constant functions: {:?}", x)),
+      }
+    }
     AST::Variable(name) => {
       if !locals.contains_key(name) {
         return Err(format!("Function accesses unbound variable {}", name));
       }
       instructions.push(Instruction::LoadLocal(locals[name]));
     }
-    AST::Int(i) => {}
+    AST::Int(i) => instructions.push(Instruction::PushInt(*i)),
     AST::Float(f) => {}
     AST::String(s) => {}
   }
@@ -121,18 +128,4 @@ mod test {
       }
     );
   }
-
-  #[test]
-  fn compile_basic_module() {
-    let m = compile_from_source("(fn id (a) a)").unwrap();
-    assert_eq!(
-      m,
-      Module {
-        functions: hashmap!{
-        "id".to_string() =>
-            Function { num_params: 1, num_locals: 1, instructions: vec![]}},
-      }
-    )
-  }
-
 }

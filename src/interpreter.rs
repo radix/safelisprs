@@ -38,7 +38,7 @@ impl Stack {
   }
 }
 
-fn call_in_module(module: &Module, main: &str) -> Result<Rc<SLVal>, String> {
+pub fn call_in_module(module: &Module, main: &str) -> Result<Rc<SLVal>, String> {
   let code = module
     .functions
     .get(main)
@@ -70,23 +70,33 @@ fn eval_code(
       Instruction::SetLocal(i) => locals[usize::from(*i)] = stack.peek()?,
       Instruction::LoadLocal(i) => stack.push(locals[usize::from(*i)].clone()),
       Instruction::Call(name) => prim_call(module, &mut stack, &name)?,
-      Instruction::Add => prim_add(&mut stack)?,
     }
   }
   Ok(Rc::new(SLVal::Void))
 }
 
 fn prim_call(module: &Module, stack: &mut Stack, name: &str) -> Result<(), String> {
-  let func_code = module.get_function(name)?;
-  let mut locals = alloc_locals(func_code);
-  for param_idx in 0..func_code.num_params {
-    locals[usize::from(param_idx)] = stack.pop()?;
+  let func = module.get_function(name);
+  match func {
+    Some(func) => {
+      let mut locals = alloc_locals(func);
+      // The parameters are "in order" on the stack, so popping will give them to us in reverse order.
+      for param_idx in (0..func.num_params).rev() {
+        locals[usize::from(param_idx)] = stack.pop()?;
+      }
+      stack.push(eval_code(module, func, locals)?);
+    }
+    None => {
+      match name {
+        "+" => builtin_add(stack)?,
+        _ => return Err(format!("No function named {}", name))
+      }
+    }
   }
-  stack.push(eval_code(module, func_code, locals)?);
   Ok(())
 }
 
-fn prim_add(stack: &mut Stack) -> Result<(), String> {
+fn builtin_add(stack: &mut Stack) -> Result<(), String> {
   let one = stack.pop()?;
   let two = stack.pop()?;
   let result = match (&*one, &*two) {
