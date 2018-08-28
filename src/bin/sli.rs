@@ -8,7 +8,7 @@ use std::io::prelude::*;
 
 use clap::{App, Arg};
 
-use safelisp::interpreter::call_in_module;
+use safelisp::interpreter::Interpreter;
 
 fn main() {
   let args = App::new("SafeLisp Interpreter")
@@ -22,10 +22,17 @@ fn main() {
   let contents = {
     let mut f = File::open(input_file).expect(&format!("Couldn't open {}", input_file));
     let mut v = vec![];
-    f.read_to_end(&mut v).expect(&format!("Couldn't read from file {}", input_file));
+    f.read_to_end(&mut v)
+      .expect(&format!("Couldn't read from file {}", input_file));
     v
   };
-  let module = bincode::deserialize(&contents[..]).expect(&format!("Couldn't deserialize module from {}", input_file));
-  let result = call_in_module(&module, function_name).expect(&format!("Error calling {}", function_name));
+  let module = bincode::deserialize(&contents[..])
+    .expect(&format!("Couldn't deserialize module from {}", input_file));
+
+  let mut interpreter = Interpreter::new();
+  interpreter.add_module("__main__".to_string(), module);
+  let result = interpreter
+    .call_in_module("__main__", "main")
+    .expect(&format!("Error calling {}", function_name));
   println!("Result: {:?}", result);
 }

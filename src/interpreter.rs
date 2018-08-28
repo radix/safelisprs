@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::rc::Rc; // TODO: use Manishearth/rust-gc
 
 use compiler::{Function, Instruction, Module};
@@ -35,6 +36,33 @@ impl Stack {
       .last()
       .map(|x| x.clone())
       .ok_or_else(|| format!("PEEK on an empty stack"))
+  }
+}
+
+pub struct Interpreter {
+  modules: HashMap<String, Module>,
+}
+
+impl Interpreter {
+  pub fn new() -> Self {
+    Interpreter {
+      modules: hashmap!{},
+    }
+  }
+  pub fn add_module(&mut self, name: String, module: Module) {
+    self.modules.insert(name, module);
+  }
+
+  pub fn call_in_module(
+    &self,
+    module_name: &str,
+    function_name: &str,
+  ) -> Result<Rc<SLVal>, String> {
+    let module = self
+      .modules
+      .get(module_name)
+      .ok_or_else(|| format!("Couldn't find module {}", module_name))?;
+    call_in_module(&module, function_name)
   }
 }
 
