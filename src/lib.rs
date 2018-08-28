@@ -1,7 +1,9 @@
 extern crate atoms;
 
-#[macro_use] extern crate maplit;
-#[macro_use] extern crate serde_derive;
+#[macro_use]
+extern crate maplit;
+#[macro_use]
+extern crate serde_derive;
 
 pub mod compiler;
 pub mod interpreter;
@@ -18,8 +20,8 @@ mod test {
 
   use std::rc::Rc;
 
+  use super::interpreter;
   use super::*;
-  use super::{interpreter};
 
   #[test]
   fn compile_basic_module() {
