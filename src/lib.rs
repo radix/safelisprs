@@ -3,9 +3,9 @@ extern crate atoms;
 #[macro_use]
 extern crate maplit;
 
-mod compiler;
-mod interpreter;
-mod parser;
+pub mod compiler;
+pub mod interpreter;
+pub mod parser;
 
 pub fn compile_from_source(s: &str) -> Result<compiler::Module, String> {
   let asts = parser::read_multiple(s)?;
@@ -19,7 +19,7 @@ mod test {
   use std::rc::Rc;
 
   use super::*;
-  use super::{compiler, interpreter, parser};
+  use super::{interpreter};
 
   #[test]
   fn compile_basic_module() {

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use parser::{self, read_multiple, AST};
+use parser::{self, AST};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Module {
@@ -84,7 +84,7 @@ fn compile_expr(
       instructions.extend(compile_expr(&box_expr, num_locals, locals)?);
       instructions.push(Instruction::SetLocal(locals[name]))
     }
-    AST::DefineFn(func) => {}
+    AST::DefineFn(func) => return Err(format!("NYI: Can't define inner functions: {}", func.name)),
     AST::Call(box_expr, arg_exprs) => {
       for expr in arg_exprs {
         instructions.extend(compile_expr(&expr, num_locals, locals)?);
@@ -101,8 +101,8 @@ fn compile_expr(
       instructions.push(Instruction::LoadLocal(locals[name]));
     }
     AST::Int(i) => instructions.push(Instruction::PushInt(*i)),
-    AST::Float(f) => {}
-    AST::String(s) => {}
+    AST::Float(f) => instructions.push(Instruction::PushFloat(*f)),
+    AST::String(s) => instructions.push(Instruction::PushString(s.clone())),
   }
   Ok(instructions)
 }
