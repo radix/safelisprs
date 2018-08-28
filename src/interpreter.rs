@@ -141,7 +141,8 @@ where
   let func = module.get_function(name);
   if let Some(func) = func {
     let mut locals = alloc_locals(func);
-    // The parameters are "in order" on the stack, so popping will give them to us in reverse order.
+    // The parameters are "in order" on the stack, so popping will give them to us
+    // in reverse order.
     for param_idx in (0..func.num_params).rev() {
       locals[usize::from(param_idx)] = stack.pop()?;
     }
