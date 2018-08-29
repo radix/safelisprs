@@ -12,10 +12,27 @@ use safelisp::compile_from_source;
 
 fn main() {
   let args = App::new("SafeLisp Compiler")
-    .arg(Arg::with_name("INPUT").required(true).index(1))
     .arg(Arg::with_name("output").long("output").takes_value(true))
     .arg(Arg::with_name("format").long("format").takes_value(true))
+    .arg(
+      Arg::with_name("main-module")
+        .long("main-module")
+        .takes_value(true),
+    )
+    .arg(
+      Arg::with_name("main-function")
+        .long("main-function")
+        .takes_value(true)
+        .default_value("main"),
+    )
+    .arg(
+      Arg::with_name("INPUT")
+        .required(true)
+        .index(1)
+        .multiple(true),
+    )
     .get_matches();
+  println!("args is {}", args);
 
   let input_file = args.value_of("INPUT").expect("argument is required");
   let format = args.value_of("format").unwrap_or("bincode");

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::rc::Rc; // TODO: use Manishearth/rust-gc
 
 use builtins::builtin_builtins;
-use compiler::{Function, Instruction, Module};
+use compiler::{Function, Instruction, Package};
 
 pub struct Stack {
   items: Vec<Rc<SLVal>>,
@@ -43,23 +43,23 @@ impl Stack {
 }
 
 pub struct Interpreter<B> {
-  modules: HashMap<String, Module>,
+  package: Package,
   builtins: B,
 }
 
 impl<B> Interpreter<B> {
-  pub fn with_builtins(builtins: B) -> Self {
+  pub fn with_builtins(package: Package, builtins: B) -> Self {
     Interpreter {
-      modules: hashmap!{},
+      package,
       builtins: builtins,
     }
   }
 }
 
 impl Interpreter<fn(&str, &mut Stack) -> BuiltinResult> {
-  pub fn new() -> Self {
+  pub fn new(package: Package) -> Self {
     Interpreter {
-      modules: hashmap!{},
+      package,
       builtins: builtin_builtins,
     }
   }
@@ -69,33 +69,18 @@ impl<B> Interpreter<B>
 where
   B: for<'r, 's> FnMut(&str, &mut Stack) -> BuiltinResult,
 {
-  pub fn add_module(&mut self, name: String, module: Module) {
-    self.modules.insert(name, module);
+  pub fn call(&mut self, module: usize, function: usize) -> Result<Rc<SLVal>, String> {
+    let function = self
+      .package
+      .get_function(module, function)
+      .ok_or_else(|| {
+        format!(
+          "Couldn't find module {} function {}",
+          module, function
+        )
+      })?;
+    eval_code(&self.package, function, alloc_locals(function), &mut self.builtins)
   }
-
-  pub fn call_in_module(
-    &mut self,
-    module_name: &str,
-    function_name: &str,
-  ) -> Result<Rc<SLVal>, String> {
-    let module = self
-      .modules
-      .get(module_name)
-      .ok_or_else(|| format!("Couldn't find module {}", module_name))?;
-    call_in_module(&module, function_name, &mut self.builtins)
-  }
-}
-
-pub fn call_in_module<B>(module: &Module, main: &str, builtins: &mut B) -> Result<Rc<SLVal>, String>
-where
-  B: for<'r, 's> FnMut(&'r str, &'s mut Stack) -> BuiltinResult,
-{
-  let code = module
-    .functions
-    .get(main)
-    .ok_or_else(|| format!("Couldn't find function {}", main))?;
-  let locals = alloc_locals(code);
-  eval_code(module, code, locals, builtins)
 }
 
 fn alloc_locals(code: &Function) -> Vec<Rc<SLVal>> {
@@ -103,7 +88,7 @@ fn alloc_locals(code: &Function) -> Vec<Rc<SLVal>> {
 }
 
 fn eval_code<B>(
-  module: &Module,
+  package: &Package,
   code: &Function,
   mut locals: Vec<Rc<SLVal>>,
   builtins: &mut B,
@@ -123,7 +108,7 @@ where
       Instruction::Return => return stack.pop(),
       Instruction::SetLocal(i) => locals[usize::from(*i)] = stack.peek()?,
       Instruction::LoadLocal(i) => stack.push(locals[usize::from(*i)].clone()),
-      Instruction::Call(name) => prim_call(module, &mut stack, &name, builtins)?,
+      Instruction::Call(name) => prim_call(package, &mut stack, &name, builtins)?,
     }
   }
   Ok(Rc::new(SLVal::Void))

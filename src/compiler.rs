@@ -2,9 +2,12 @@ use std::collections::HashMap;
 
 use parser::{self, AST};
 
+/// A Package can either represent a "program" or a "library".
+/// If a `main` is provided, then it can be executed as a program directly.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Module {
-  pub functions: HashMap<String, Function>,
+pub struct Package {
+  pub functions: Vec<(String, Vec<(String, Function)>)>,
+  pub main: Option<(usize, usize)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -14,8 +17,11 @@ pub struct Function {
   pub instructions: Vec<Instruction>,
 }
 
+type CompiledInstruction = PrivInstruction<(usize, usize)>;
+type CompilingInstruction = PrivInstruction<(String, String)>
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum Instruction {
+pub enum PrivInstruction<CallType> {
   /// loads local variable onto the stack
   LoadLocal(u16),
   /// assigns top of the stack to local variable.
@@ -25,29 +31,65 @@ pub enum Instruction {
   PushString(String),
   /// discards topmost stack item
   Pop,
-  Call(String),
+  Call(CallType),
   /// Exit the current function, returning the TOS to the caller
   Return,
 }
 
-impl Module {
-  pub fn get_function(&self, name: &str) -> Option<&Function> {
-    self.functions.get(name)
+struct Compilation {
+  pub functions: HashMap<String, HashMap<String, Function>>,
+}
+
+impl Compilation {
+  /// "Link" the functions.
+  pub fn to_package(&self) -> Package {
+    Package::new()
   }
 }
 
-pub fn compile_module(asts: &[AST]) -> Result<Module, String> {
-  let mut functions = hashmap!{};
+impl Package {
+  pub fn new() -> Self {
+    Package {
+      functions: vec![],
+      main: None,
+    }
+  }
+
+  pub fn set_main(&mut self, main: Option<(usize, usize)>) {
+    self.main = main
+  }
+
+  // Is this really necessary tho
+  pub fn find_function(&self, module_name: &str, function_name: &str) -> Option<&Function> {
+    for (modname, module) in &self.functions {
+      if modname == module_name {}
+        for (funcname, func) in module {
+          if funcname == function_name {
+            return Some(func)
+          }
+        }
+    }
+    None
+  }
+
+  pub fn get_function(&self, module: usize, function: usize) -> Option<&Function> {
+    self.functions.get(module).and_then(|(_,m)| m.get(function)).map(|(_, f)| f)
+  }
+
+  pub fn add_module(&mut self, name: String, module: Vec<(String, Function)>) {
+    self.functions.push((name, module))
+  }
+}
+
+pub fn compile_module(asts: &[AST]) -> Result<Vec<(String, Function)>, String> {
+  let mut functions = vec![];
   for ast in asts {
     match ast {
-      AST::DefineFn(func) => functions.insert(func.name.clone(), compile_function(func)?),
-      x => return Err(format!("Unexpected form at module-level: {:?}", x)),
+      AST::DefineFn(func) => functions.push((func.name.clone(), compile_function(func)?)),
+      x => return Err(format!("Unexpected form at top-level: {:?}", x)),
     };
   }
-  let module = Module {
-    functions: functions,
-  };
-  Ok(module)
+  Ok(functions)
 }
 
 fn compile_function(f: &parser::Function) -> Result<Function, String> {
