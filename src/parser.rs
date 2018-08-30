@@ -5,12 +5,25 @@ type Expr = AValue<String>;
 #[derive(Debug, PartialEq, Clone)]
 pub enum AST {
   Let(String, Box<AST>),
+  DeclareFn(FunctionDecl),
   DefineFn(Function),
   Call(Box<AST>, Vec<AST>),
   Variable(String),
   Int(i64),
   Float(f64),
   String(String),
+}
+
+/// A FunctionDecl is a signature-only declaration of a function. A program that
+/// provides builtins for executing a SafeLisp program must provide function
+/// declarations to describe the signatures of those functions, which will be
+/// used during compilation.
+#[derive(Debug, PartialEq, Clone)]
+pub struct FunctionDecl {
+  pub name: String,
+  /// TODO: params should be Vec<Type>, not Vec<String>. We don't need parameter
+  /// names here.
+  pub params: Vec<String>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -46,6 +59,7 @@ impl AST {
           AValue::Symbol(ref s) => match s.as_ref() {
             "let" => return parse_let(right),
             "fn" => return parse_fn(right),
+            "decl" => return parse_decl(right),
             _ => {}
           },
           _ => {}
@@ -79,6 +93,33 @@ fn parse_let(right: &Box<Expr>) -> Result<AST, String> {
       _ => Err("first argument to `let` must be a symbol".to_string()),
     },
     _ => Err("`let` must have two arguments, a symbol and an expression.".to_string()),
+  }
+}
+
+fn parse_decl(right: &Box<Expr>) -> Result<AST, String> {
+  match **right {
+    AValue::Cons(ref name, ref box_cons_params) => match **name {
+      AValue::Symbol(ref name) => match **box_cons_params {
+        AValue::Cons(ref params, box_nil) => {
+          let flattened_params = flatten_list(params)?;
+          let mut params_vec = vec![];
+          for param_expr in flattened_params {
+            if let AValue::Symbol(p) = param_expr {
+              params_vec.push(p);
+            } else {
+              return Err("Parameters must be symbols".to_string());
+            }
+          }
+          Ok(AST::DeclareFn(FunctionDecl {
+            name: name.clone(),
+            params: params_vec,
+          }))
+        }
+        _ => Err("`fn` must take parameters after the name.".to_string()),
+      },
+      _ => Err("`fn` first argument must be a symbol.".to_string()),
+    },
+    _ => Err("`fn` must take parameters. And don't use a dot.".to_string()),
   }
 }
 
