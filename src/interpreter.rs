@@ -55,7 +55,7 @@ impl<B> Interpreter<B> {
   }
 }
 
-impl Interpreter<fn(&str, &mut Stack) -> BuiltinResult> {
+impl Interpreter<fn(&str, &str, &mut Stack) -> BuiltinResult> {
   pub fn new(package: Package) -> Self {
     Interpreter {
       package,
@@ -66,7 +66,7 @@ impl Interpreter<fn(&str, &mut Stack) -> BuiltinResult> {
 
 impl<B> Interpreter<B>
 where
-  B: for<'r, 's> FnMut(&str, &mut Stack) -> BuiltinResult,
+  B: for<'r, 's> FnMut(&'r str, &'r str, &'s mut Stack) -> BuiltinResult,
 {
   pub fn call_main(&mut self) -> Result<Rc<SLVal>, String> {
     if let Some((module, function)) = self.package.main {
@@ -104,7 +104,7 @@ fn eval_code<B>(
   builtins: &mut B,
 ) -> Result<Rc<SLVal>, String>
 where
-  B: for<'r, 's> FnMut(&'r str, &'s mut Stack) -> BuiltinResult,
+  B: for<'r, 's> FnMut(&'r str, &'r str, &'s mut Stack) -> BuiltinResult,
 {
   let mut stack: Stack = Stack::new();
   for inst in &code.instructions {
@@ -134,7 +134,7 @@ fn prim_call<B>(
   builtins: &mut B,
 ) -> Result<(), String>
 where
-  B: for<'r, 's> FnMut(&'r str, &'s mut Stack) -> BuiltinResult,
+  B: for<'r, 's> FnMut(&'r str, &'r str, &'s mut Stack) -> BuiltinResult,
 {
   let (module_name, functions) = package
     .get_module(mod_index)
@@ -153,8 +153,8 @@ where
       stack.push(eval_code(package, func, locals, builtins)?);
     }
     Callable::Builtin => {
-      // TODO! FIXME! XXX! builtins should take module name *and* function name!
-      (builtins)(func_name, stack).ok_or_else(|| format!("No function named {}", func_name))??;
+      (builtins)(module_name, func_name, stack)
+        .ok_or_else(|| format!("No function named {}", func_name))??;
     }
   }
   Ok(())
@@ -162,17 +162,16 @@ where
 
 #[cfg(test)]
 mod test {
-  use super::super::compile_from_source;
   use super::*;
-  use compiler::*;
+  use compiler::{self, *};
 
   #[test]
-  fn test_id() {
+  fn test_interpret_id() {
     let empty_mod = Package {
       functions: vec![],
       main: None,
     };
-    let code = Function {
+    let code = compiler::Function {
       num_locals: 1,
       num_params: 1,
       instructions: vec![Instruction::LoadLocal(0), Instruction::Return],
@@ -184,9 +183,9 @@ mod test {
 
   #[test]
   fn extending_builtins() {
-    fn mybuiltins(name: &str, stack: &mut Stack) -> BuiltinResult {
-      match name {
-        "add2" => {
+    fn mybuiltins(mod_name: &str, name: &str, stack: &mut Stack) -> BuiltinResult {
+      match (mod_name, name) {
+        ("main", "add2") => {
           if let Ok(SLVal::Int(n)) = stack.pop().map(|x| (&*x).clone()) {
             stack.push(Rc::new(SLVal::Int(n + 2)));
             Some(Ok(()))
@@ -198,14 +197,15 @@ mod test {
       }
     }
 
-    let source = "(fn main () (add2 3))";
-    let module = compile_from_source(source).unwrap();
+    let source = "
+      (decl add2 (n))
+      (fn main () (add2 3))
+    "
+      .to_string();
+    let package =
+      compile_executable_from_sources(&[("main".to_string(), source)], ("main", "main")).unwrap();
 
-    let mut interpreter = Interpreter::with_builtins(mybuiltins);
-    interpreter.add_module("mymod".to_string(), module);
-    assert_eq!(
-      interpreter.call_in_module("mymod", "main").unwrap(),
-      Rc::new(SLVal::Int(5))
-    );
+    let mut interpreter = Interpreter::with_builtins(package, mybuiltins);
+    assert_eq!(interpreter.call_main().unwrap(), Rc::new(SLVal::Int(5)));
   }
 }

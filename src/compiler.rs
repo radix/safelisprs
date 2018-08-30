@@ -307,7 +307,7 @@ mod test {
       params: vec!["a".to_string()],
       code: vec![AST::Variable("a".to_string())],
     };
-    let code = compile_function(&func).unwrap();
+    let code = compile_function("main", &func).unwrap();
     assert_eq!(
       code,
       Function {

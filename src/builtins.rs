@@ -2,10 +2,10 @@ use std::rc::Rc;
 
 use interpreter::{BuiltinResult, SLVal, Stack};
 
-pub fn builtin_builtins(name: &str, stack: &mut Stack) -> BuiltinResult {
+pub fn builtin_builtins(mod_name: &str, name: &str, stack: &mut Stack) -> BuiltinResult {
   // This must be kept up-to-date with std.sl
-  match name {
-    "+" => Some(builtin_add(stack)),
+  match (mod_name, name) {
+    ("std", "+") => Some(builtin_add(stack)),
     _ => None,
   }
 }
