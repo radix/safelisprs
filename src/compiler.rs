@@ -55,12 +55,10 @@ pub enum Instruction<CallType> {
   Return,
 }
 
-struct Compilation {
-  pub functions: HashMap<String, HashMap<String, CompilingFunction>>,
-}
-
 type CompilingModules = Vec<(String, Vec<(String, CompilingCallable)>)>;
 type CompiledModules = Vec<(String, Vec<(String, CompiledCallable)>)>;
+
+type ModuleIndex = HashMap<String, (usize, HashMap<String, usize>)>;
 
 impl Package {
   pub fn from_modules(modules: CompilingModules) -> Result<Self, String> {
@@ -78,7 +76,11 @@ impl Package {
     let index = index_modules(&modules);
     let functions = link(&index, modules)?;
     let main = find_function(&index, &main.0, &main.1);
-    Ok(Package { functions, main })
+    if main.is_none() {
+      Err(format!("Main function {:?} was not found!", main))
+    } else {
+      Ok(Package { functions, main })
+    }
   }
 
   pub fn get_module(&self, mod_index: usize) -> Option<&(String, Vec<(String, CompiledCallable)>)> {
@@ -94,7 +96,7 @@ impl Package {
   }
 }
 
-fn index_modules(modules: &CompilingModules) -> HashMap<String, (usize, HashMap<String, usize>)> {
+fn index_modules(modules: &CompilingModules) -> ModuleIndex {
   let mut module_table = hashmap!{};
   for (mod_index, (mod_name, functions)) in modules.iter().enumerate() {
     module_table.insert(mod_name.to_string(), (mod_index, hashmap!{}));
@@ -109,15 +111,64 @@ fn index_modules(modules: &CompilingModules) -> HashMap<String, (usize, HashMap<
   module_table
 }
 
-fn link(
-  module_table: &HashMap<String, (usize, HashMap<String, usize>)>,
-  modules: CompilingModules,
-) -> Result<CompiledModules, String> {
-  panic!()
+fn link(module_table: &ModuleIndex, modules: CompilingModules) -> Result<CompiledModules, String> {
+  let mut result = vec![];
+  for (mod_name, functions) in modules {
+    // consuming
+    let new_functions = functions.into_iter().map(|(func_name, callable)| {
+      let new_callable = match callable {
+        Callable::Function(function) => Callable::Function(link_instructions(module_table, function)?),
+        Callable::Builtin => Callable::Builtin,
+      };
+      Ok((func_name, new_callable))
+    }).collect::<Result<Vec<(String, CompiledCallable)>, String>>()?;
+    result.push((mod_name, new_functions));
+  }
+  Ok(result)
+}
+
+fn link_instructions(
+  module_table: &ModuleIndex,
+  function: CompilingFunction,
+) -> Result<CompiledFunction, String> {
+  let instructions = function
+    .instructions
+    .into_iter()
+    .map(|i| link_instruction(module_table, i))
+    .collect::<Result<Vec<_>, _>> ()?;
+  Ok(CompiledFunction {
+    num_params: function.num_params,
+    num_locals: function.num_locals,
+    instructions,
+  })
+}
+
+fn link_instruction(
+  module_table: &ModuleIndex,
+  instruction: CompilingInstruction,
+) -> Result<CompiledInstruction, String> {
+  Ok(match instruction {
+    Instruction::Call((mod_name, func_name)) => {
+      let (mod_idx, func_idx) = find_function(module_table, &mod_name, &func_name)
+        .ok_or_else(|| format!("Call to undefined function {}.{}", mod_name, func_name))?;
+      Instruction::Call((mod_idx, func_idx))
+    }
+    // Here's what I want to say:
+    // x => Ok(x),
+    // but Rust isn't smart enough to allow me. So I have to list out every variant of Instruction
+    // :(
+    Instruction::LoadLocal(num) => Instruction::LoadLocal(num),
+    Instruction::SetLocal(num) => Instruction::SetLocal(num),
+    Instruction::PushInt(num) => Instruction::PushInt(num),
+    Instruction::PushFloat(f) => Instruction::PushFloat(f),
+    Instruction::PushString(string) => Instruction::PushString(string),
+    Instruction::Pop => Instruction::Pop,
+    Instruction::Return => Instruction::Return,
+  })
 }
 
 pub fn find_function(
-  index: &HashMap<String, (usize, HashMap<String, usize>)>,
+  index: &ModuleIndex,
   module_name: &str,
   function_name: &str,
 ) -> Option<(usize, usize)> {
