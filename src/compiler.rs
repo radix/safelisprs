@@ -59,23 +59,26 @@ struct Compilation {
   pub functions: HashMap<String, HashMap<String, CompilingFunction>>,
 }
 
-impl Compilation {
-  /// "Link" the functions.
-  pub fn to_package(&self) -> Package {
-    Package::new()
-  }
-}
+type CompilingModules = Vec<(String, Vec<(String, CompilingCallable)>)>;
+type CompiledModules = Vec<(String, Vec<(String, CompiledCallable)>)>;
 
 impl Package {
-  pub fn new() -> Self {
-    Package {
-      functions: vec![],
+  pub fn from_modules(modules: CompilingModules) -> Result<Self, String> {
+    let index = index_modules(&modules);
+    Ok(Package {
+      functions: link(&index, modules)?,
       main: None,
-    }
+    })
   }
 
-  pub fn set_main(&mut self, main: Option<(usize, usize)>) {
-    self.main = main
+  pub fn from_modules_with_main(
+    modules: CompilingModules,
+    main: (String, String),
+  ) -> Result<Self, String> {
+    let index = index_modules(&modules);
+    let functions = link(&index, modules)?;
+    let main = find_function(&index, &main.0, &main.1);
+    Ok(Package { functions, main })
   }
 
   pub fn get_module(&self, mod_index: usize) -> Option<&(String, Vec<(String, CompiledCallable)>)> {
@@ -83,15 +86,58 @@ impl Package {
   }
 
   pub fn get_function(&self, module: usize, function: usize) -> Option<&CompiledCallable> {
-    self.functions.get(module).and_then(|(_,m)| m.get(function)).map(|(_, f)| f)
+    self
+      .functions
+      .get(module)
+      .and_then(|(_, m)| m.get(function))
+      .map(|(_, f)| f)
   }
 }
 
-pub fn compile_module(name: &str, asts: &[AST]) -> Result<Vec<(String, CompilingCallable)>, String> {
+fn index_modules(modules: &CompilingModules) -> HashMap<String, (usize, HashMap<String, usize>)> {
+  let mut module_table = hashmap!{};
+  for (mod_index, (mod_name, functions)) in modules.iter().enumerate() {
+    module_table.insert(mod_name.to_string(), (mod_index, hashmap!{}));
+    for (func_index, (func_name, _)) in functions.iter().enumerate() {
+      module_table
+        .get_mut(mod_name)
+        .unwrap()
+        .1
+        .insert(func_name.to_string(), func_index);
+    }
+  }
+  module_table
+}
+
+fn link(
+  module_table: &HashMap<String, (usize, HashMap<String, usize>)>,
+  modules: CompilingModules,
+) -> Result<CompiledModules, String> {
+  panic!()
+}
+
+pub fn find_function(
+  index: &HashMap<String, (usize, HashMap<String, usize>)>,
+  module_name: &str,
+  function_name: &str,
+) -> Option<(usize, usize)> {
+  index.get(module_name).and_then(|(mod_index, m)| {
+    m.get(function_name)
+      .map(|func_index| (*mod_index, *func_index))
+  })
+}
+
+pub fn compile_module(
+  name: &str,
+  asts: &[AST],
+) -> Result<Vec<(String, CompilingCallable)>, String> {
   let mut functions = vec![];
   for ast in asts {
     match ast {
-      AST::DefineFn(func) => functions.push((func.name.clone(), Callable::Function(compile_function(name, func)?))),
+      AST::DefineFn(func) => functions.push((
+        func.name.clone(),
+        Callable::Function(compile_function(name, func)?),
+      )),
       AST::DeclareFn(decl) => functions.push((decl.name.clone(), Callable::Builtin)),
       x => return Err(format!("Unexpected form at top-level: {:?}", x)),
     };
@@ -108,7 +154,12 @@ fn compile_function(module_name: &str, f: &parser::Function) -> Result<Compiling
   }
   let mut instructions = vec![];
   for ast in &f.code {
-    instructions.extend(compile_expr(module_name, ast, &mut num_locals, &mut locals)?);
+    instructions.extend(compile_expr(
+      module_name,
+      ast,
+      &mut num_locals,
+      &mut locals,
+    )?);
   }
   instructions.push(Instruction::Return);
   Ok(Function {
@@ -135,13 +186,21 @@ fn compile_expr(
       instructions.push(Instruction::SetLocal(locals[name]))
     }
     AST::DefineFn(func) => return Err(format!("NYI: Can't define inner functions: {}", func.name)),
-    AST::DeclareFn(decl) => return Err(format!("Cannot declare functions inside other forms: {}", decl.name)),
+    AST::DeclareFn(decl) => {
+      return Err(format!(
+        "Cannot declare functions inside other forms: {}",
+        decl.name
+      ))
+    }
     AST::Call(box_expr, arg_exprs) => {
       for expr in arg_exprs {
         instructions.extend(compile_expr(module_name, &expr, num_locals, locals)?);
       }
       match &**box_expr {
-        AST::Variable(name) => instructions.push(Instruction::Call((module_name.to_string(), name.to_string()))),
+        AST::Variable(name) => instructions.push(Instruction::Call((
+          module_name.to_string(),
+          name.to_string(),
+        ))),
         x => return Err(format!("NYI: non-constant functions: {:?}", x)),
       }
     }
