@@ -3,6 +3,7 @@ use std::rc::Rc;
 use interpreter::{BuiltinResult, SLVal, Stack};
 
 pub fn builtin_builtins(name: &str, stack: &mut Stack) -> BuiltinResult {
+  // This must be kept up-to-date with std.sl
   match name {
     "+" => Some(builtin_add(stack)),
     _ => None,
