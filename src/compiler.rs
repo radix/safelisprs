@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use parser::{self, AST};
+use parser::{self, Identifier, AST};
 
 /// A Package can either represent a "program" or a "library".
 /// If a `main` is provided, then it can be executed as a program directly.
@@ -115,13 +115,18 @@ fn link(module_table: &ModuleIndex, modules: CompilingModules) -> Result<Compile
   let mut result = vec![];
   for (mod_name, functions) in modules {
     // consuming
-    let new_functions = functions.into_iter().map(|(func_name, callable)| {
-      let new_callable = match callable {
-        Callable::Function(function) => Callable::Function(link_instructions(module_table, function)?),
-        Callable::Builtin => Callable::Builtin,
-      };
-      Ok((func_name, new_callable))
-    }).collect::<Result<Vec<(String, CompiledCallable)>, String>>()?;
+    let new_functions = functions
+      .into_iter()
+      .map(|(func_name, callable)| {
+        let new_callable = match callable {
+          Callable::Function(function) => {
+            Callable::Function(link_instructions(module_table, function)?)
+          }
+          Callable::Builtin => Callable::Builtin,
+        };
+        Ok((func_name, new_callable))
+      })
+      .collect::<Result<Vec<(String, CompiledCallable)>, String>>()?;
     result.push((mod_name, new_functions));
   }
   Ok(result)
@@ -135,7 +140,7 @@ fn link_instructions(
     .instructions
     .into_iter()
     .map(|i| link_instruction(module_table, i))
-    .collect::<Result<Vec<_>, _>> ()?;
+    .collect::<Result<Vec<_>, _>>()?;
   Ok(CompiledFunction {
     num_params: function.num_params,
     num_locals: function.num_locals,
@@ -243,19 +248,21 @@ fn compile_expr(
         decl.name
       ))
     }
-    AST::Call(box_expr, arg_exprs) => {
+    AST::CallFixed(identifier, arg_exprs) => {
       for expr in arg_exprs {
         instructions.extend(compile_expr(module_name, &expr, num_locals, locals)?);
       }
-      match &**box_expr {
-        AST::Variable(name) => instructions.push(Instruction::Call((
-          // FIXME TODO XXX: this is wrong, module_name is the *current*
-          // module's name, not the name of the module containing this function!
-          module_name.to_string(),
-          name.to_string(),
-        ))),
-        x => return Err(format!("NYI: non-constant functions: {:?}", x)),
-      }
+      let (module_name, function_name) = match identifier {
+        Identifier::Bare(fname) => (module_name.to_string(), fname.to_string()),
+        Identifier::Qualified(mname, fname) => (mname.to_string(), fname.to_string()),
+      };
+      instructions.push(Instruction::Call((
+        module_name.to_string(),
+        function_name.to_string(),
+      )))
+    }
+    AST::Call(box_expr, arg_exprs) => {
+      return Err(format!("NYI: non-constant functions: {:?}", box_expr))
     }
     AST::Variable(name) => {
       if !locals.contains_key(name) {
@@ -270,7 +277,6 @@ fn compile_expr(
   Ok(instructions)
 }
 
-
 pub fn compile_from_sources(module_sources: &[(String, String)]) -> Result<Package, String> {
   use parser;
   let mut compiling_modules: CompilingModules = vec![];
@@ -281,7 +287,6 @@ pub fn compile_from_sources(module_sources: &[(String, String)]) -> Result<Packa
   }
   Ok(Package::from_modules(compiling_modules)?)
 }
-
 
 #[cfg(test)]
 mod test {

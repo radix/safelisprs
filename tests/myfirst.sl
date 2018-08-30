@@ -1,4 +1,4 @@
-(fn add1 (n) (+ n 1))
+(fn add1 (n) (std.+ n 1))
 
 
 (fn main ()

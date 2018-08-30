@@ -4,14 +4,22 @@ type Expr = AValue<String>;
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum AST {
+  // Import(String),
   Let(String, Box<AST>),
   DeclareFn(FunctionDecl),
   DefineFn(Function),
   Call(Box<AST>, Vec<AST>),
+  CallFixed(Identifier, Vec<AST>),
   Variable(String),
   Int(i64),
   Float(f64),
   String(String),
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum Identifier {
+  Bare(String),
+  Qualified(String, String),
 }
 
 /// A FunctionDecl is a signature-only declaration of a function. A program that
@@ -57,28 +65,45 @@ impl AST {
       AValue::Cons(left, right) => {
         match **left {
           AValue::Symbol(ref s) => match s.as_ref() {
-            "let" => return parse_let(right),
-            "fn" => return parse_fn(right),
-            "decl" => return parse_decl(right),
+            "let" => return parse_let(&right),
+            "fn" => return parse_fn(&right),
+            "decl" => return parse_decl(&right),
             _ => {}
           },
           _ => {}
         }
-        let function_ast = AST::from_atoms(left)?;
-        let args: Result<Vec<AST>, String> = flatten_list(right)?
-          .iter()
-          .map(|form| AST::from_atoms(form))
-          .collect();
-        let args = args?;
-        Ok(AST::Call(Box::new(function_ast), args))
+        parse_call(&form)
       }
       _ => Err(format!("Sorry, didn't implement {:?} yet", form)),
     }
   }
 }
 
-fn parse_let(right: &Box<Expr>) -> Result<AST, String> {
-  match **right {
+fn parse_call(form: &Expr) -> Result<AST, String> {
+  let form = flatten_list(form)?;
+  if form.len() == 0 {
+    return Err(format!("Empty call"))
+  }
+  let args: Result<Vec<AST>, _> = form[1..].iter().map(|f| AST::from_atoms(f)).collect();
+  let args = args?;
+  if let AValue::Symbol(ref name) = form[0] {
+    return Ok(AST::CallFixed(parse_identifier(&name), args));
+  } else {
+    return Ok(AST::Call(Box::new(AST::from_atoms(&form[0])?), args));
+  }
+}
+
+fn parse_identifier(name: &str) -> Identifier {
+  let parts: Vec<&str> = name.splitn(2, ".").collect();
+  if parts.len() == 1 {
+    return Identifier::Bare(name.to_string())
+  } else {
+    return Identifier::Qualified(parts[0].to_string(), parts[1].to_string());
+  }
+}
+
+fn parse_let(right: &Expr) -> Result<AST, String> {
+  match right {
     AValue::Cons(ref var, ref box_cons_expr) => match **var {
       AValue::Symbol(ref variable_name) => match **box_cons_expr {
         AValue::Cons(ref box_expr, ref box_hopeful_nil) => match **box_hopeful_nil {
@@ -88,7 +113,7 @@ fn parse_let(right: &Box<Expr>) -> Result<AST, String> {
           )),
           _ => Err("`let` must have two arguments.".to_string()),
         },
-        _ => Err("`let` must have two arguments. Don't use a dot.".to_string()),
+        _ => Err("`let` must have two arguments. Don't use a cons-dot.".to_string()),
       },
       _ => Err("first argument to `let` must be a symbol".to_string()),
     },
@@ -96,8 +121,8 @@ fn parse_let(right: &Box<Expr>) -> Result<AST, String> {
   }
 }
 
-fn parse_decl(right: &Box<Expr>) -> Result<AST, String> {
-  match **right {
+fn parse_decl(right: &Expr) -> Result<AST, String> {
+  match right {
     AValue::Cons(ref name, ref box_cons_params) => match **name {
       AValue::Symbol(ref name) => match **box_cons_params {
         AValue::Cons(ref params, ref box_nil) => {
@@ -123,8 +148,8 @@ fn parse_decl(right: &Box<Expr>) -> Result<AST, String> {
   }
 }
 
-fn parse_fn(right: &Box<Expr>) -> Result<AST, String> {
-  match **right {
+fn parse_fn(right: &Expr) -> Result<AST, String> {
+  match *right {
     AValue::Cons(ref name, ref box_cons_params_and_body) => match **name {
       AValue::Symbol(ref name) => match **box_cons_params_and_body {
         AValue::Cons(ref params, ref box_body) => {
