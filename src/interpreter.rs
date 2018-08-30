@@ -1,8 +1,7 @@
-use std::collections::HashMap;
 use std::rc::Rc; // TODO: use Manishearth/rust-gc
 
 use builtins::builtin_builtins;
-use compiler::{Function, Instruction, Package};
+use compiler::{Callable, CompiledFunction as Function, Instruction, Package};
 
 pub struct Stack {
   items: Vec<Rc<SLVal>>,
@@ -69,17 +68,28 @@ impl<B> Interpreter<B>
 where
   B: for<'r, 's> FnMut(&str, &mut Stack) -> BuiltinResult,
 {
-  pub fn call(&mut self, module: usize, function: usize) -> Result<Rc<SLVal>, String> {
-    let function = self
-      .package
-      .get_function(module, function)
-      .ok_or_else(|| {
-        format!(
-          "Couldn't find module {} function {}",
-          module, function
+  pub fn call_main(&mut self, module: usize, function: usize) -> Result<Rc<SLVal>, String> {
+    if let Some((module, function)) = self.package.main {
+      let callable = self
+        .package
+        .get_function(module, function)
+        .ok_or_else(|| format!("Couldn't find module {} function {}", module, function))?;
+      if let Callable::Function(function) = callable {
+        eval_code(
+          &self.package,
+          function,
+          alloc_locals(function),
+          &mut self.builtins,
         )
-      })?;
-    eval_code(&self.package, function, alloc_locals(function), &mut self.builtins)
+      } else {
+        Err(format!(
+          "{}.{} is a builtin. We can only call regular functions.",
+          module, function
+        ))
+      }
+    } else {
+      Err(format!("This package has no main function."))
+    }
   }
 }
 
@@ -108,32 +118,44 @@ where
       Instruction::Return => return stack.pop(),
       Instruction::SetLocal(i) => locals[usize::from(*i)] = stack.peek()?,
       Instruction::LoadLocal(i) => stack.push(locals[usize::from(*i)].clone()),
-      Instruction::Call(name) => prim_call(package, &mut stack, &name, builtins)?,
+      Instruction::Call((mod_index, func_index)) => {
+        prim_call(package, &mut stack, *mod_index, *func_index, builtins)?
+      }
     }
   }
   Ok(Rc::new(SLVal::Void))
 }
 
 fn prim_call<B>(
-  module: &Module,
+  package: &Package,
   stack: &mut Stack,
-  name: &str,
+  mod_index: usize,
+  func_index: usize,
   builtins: &mut B,
 ) -> Result<(), String>
 where
   B: for<'r, 's> FnMut(&'r str, &'s mut Stack) -> BuiltinResult,
 {
-  let func = module.get_function(name);
-  if let Some(func) = func {
-    let mut locals = alloc_locals(func);
-    // The parameters are "in order" on the stack, so popping will give them to us
-    // in reverse order.
-    for param_idx in (0..func.num_params).rev() {
-      locals[usize::from(param_idx)] = stack.pop()?;
+  let (module_name, functions) = package
+    .get_module(mod_index)
+    .ok_or_else(|| format!("Module not found: {}", mod_index))?;
+  let (func_name, callable) = functions
+    .get(func_index)
+    .ok_or_else(|| format!("Function not found: {}/{}", mod_index, func_index))?;
+  match callable {
+    Callable::Function(func) => {
+      let mut locals = alloc_locals(func);
+      // The parameters are "in order" on the stack, so popping will give them to us
+      // in reverse order.
+      for param_idx in (0..func.num_params).rev() {
+        locals[usize::from(param_idx)] = stack.pop()?;
+      }
+      stack.push(eval_code(package, func, locals, builtins)?);
     }
-    stack.push(eval_code(module, func, locals, builtins)?);
-  } else {
-    (builtins)(name, stack).ok_or_else(|| format!("No function named {}", name))??;
+    Callable::Builtin => {
+      // TODO! FIXME! XXX! builtins should take module name *and* function name!
+      (builtins)(func_name, stack).ok_or_else(|| format!("No function named {}", func_name))??;
+    }
   }
   Ok(())
 }
@@ -146,8 +168,9 @@ mod test {
 
   #[test]
   fn test_id() {
-    let empty_mod = Module {
-      functions: hashmap!{},
+    let empty_mod = Package {
+      functions: vec![],
+      main: None,
     };
     let code = Function {
       num_locals: 1,

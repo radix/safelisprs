@@ -100,7 +100,7 @@ fn parse_decl(right: &Box<Expr>) -> Result<AST, String> {
   match **right {
     AValue::Cons(ref name, ref box_cons_params) => match **name {
       AValue::Symbol(ref name) => match **box_cons_params {
-        AValue::Cons(ref params, box_nil) => {
+        AValue::Cons(ref params, ref box_nil) => {
           let flattened_params = flatten_list(params)?;
           let mut params_vec = vec![];
           for param_expr in flattened_params {

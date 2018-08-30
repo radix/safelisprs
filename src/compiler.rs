@@ -6,22 +6,41 @@ use parser::{self, AST};
 /// If a `main` is provided, then it can be executed as a program directly.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Package {
-  pub functions: Vec<(String, Vec<(String, Function)>)>,
+  /// While the names here *can* be used for function lookup, they are only
+  /// included for debugging purposes. In a complete "executable" package, all
+  /// calls will be represented with index-based function offsets.
+  pub functions: Vec<(String, Vec<(String, CompiledCallable)>)>,
   pub main: Option<(usize, usize)>,
 }
 
+pub type CompiledCallable = Callable<(usize, usize)>;
+type CompilingCallable = Callable<(String, String)>;
+
+/// Packages contain Callables, which can either be CompiledFunctions or
+/// Builtins. This is so the interpreter can know whether it should fall back to
+/// the builtins when invoking a function. Builtin doesn't need a name because
+/// it's already in the Package::functions data.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Function {
-  pub num_params: u16,
-  pub num_locals: u16,
-  pub instructions: Vec<Instruction>,
+pub enum Callable<CallType> {
+  Function(Function<CallType>),
+  Builtin,
 }
 
-type CompiledInstruction = PrivInstruction<(usize, usize)>;
-type CompilingInstruction = PrivInstruction<(String, String)>
+pub type CompiledFunction = Function<(usize, usize)>;
+type CompilingFunction = Function<(String, String)>;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum PrivInstruction<CallType> {
+pub struct Function<CallType> {
+  pub num_params: u16,
+  pub num_locals: u16,
+  pub instructions: Vec<Instruction<CallType>>,
+}
+
+type CompiledInstruction = Instruction<(usize, usize)>;
+type CompilingInstruction = Instruction<(String, String)>;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Instruction<CallType> {
   /// loads local variable onto the stack
   LoadLocal(u16),
   /// assigns top of the stack to local variable.
@@ -37,7 +56,7 @@ pub enum PrivInstruction<CallType> {
 }
 
 struct Compilation {
-  pub functions: HashMap<String, HashMap<String, Function>>,
+  pub functions: HashMap<String, HashMap<String, CompilingFunction>>,
 }
 
 impl Compilation {
@@ -59,40 +78,28 @@ impl Package {
     self.main = main
   }
 
-  // Is this really necessary tho
-  pub fn find_function(&self, module_name: &str, function_name: &str) -> Option<&Function> {
-    for (modname, module) in &self.functions {
-      if modname == module_name {}
-        for (funcname, func) in module {
-          if funcname == function_name {
-            return Some(func)
-          }
-        }
-    }
-    None
+  pub fn get_module(&self, mod_index: usize) -> Option<&(String, Vec<(String, CompiledCallable)>)> {
+    self.functions.get(mod_index)
   }
 
-  pub fn get_function(&self, module: usize, function: usize) -> Option<&Function> {
+  pub fn get_function(&self, module: usize, function: usize) -> Option<&CompiledCallable> {
     self.functions.get(module).and_then(|(_,m)| m.get(function)).map(|(_, f)| f)
-  }
-
-  pub fn add_module(&mut self, name: String, module: Vec<(String, Function)>) {
-    self.functions.push((name, module))
   }
 }
 
-pub fn compile_module(asts: &[AST]) -> Result<Vec<(String, Function)>, String> {
+pub fn compile_module(name: &str, asts: &[AST]) -> Result<Vec<(String, CompilingCallable)>, String> {
   let mut functions = vec![];
   for ast in asts {
     match ast {
-      AST::DefineFn(func) => functions.push((func.name.clone(), compile_function(func)?)),
+      AST::DefineFn(func) => functions.push((func.name.clone(), Callable::Function(compile_function(name, func)?))),
+      AST::DeclareFn(decl) => functions.push((decl.name.clone(), Callable::Builtin)),
       x => return Err(format!("Unexpected form at top-level: {:?}", x)),
     };
   }
   Ok(functions)
 }
 
-fn compile_function(f: &parser::Function) -> Result<Function, String> {
+fn compile_function(module_name: &str, f: &parser::Function) -> Result<CompilingFunction, String> {
   let mut num_locals = f.params.len() as u16;
   // Map of local-name to local-index
   let mut locals = HashMap::new();
@@ -101,7 +108,7 @@ fn compile_function(f: &parser::Function) -> Result<Function, String> {
   }
   let mut instructions = vec![];
   for ast in &f.code {
-    instructions.extend(compile_expr(ast, &mut num_locals, &mut locals)?);
+    instructions.extend(compile_expr(module_name, ast, &mut num_locals, &mut locals)?);
   }
   instructions.push(Instruction::Return);
   Ok(Function {
@@ -112,10 +119,11 @@ fn compile_function(f: &parser::Function) -> Result<Function, String> {
 }
 
 fn compile_expr(
+  module_name: &str,
   ast: &AST,
   num_locals: &mut u16,
   locals: &mut HashMap<String, u16>,
-) -> Result<Vec<Instruction>, String> {
+) -> Result<Vec<CompilingInstruction>, String> {
   let mut instructions = vec![];
   match ast {
     AST::Let(name, box_expr) => {
@@ -123,16 +131,17 @@ fn compile_expr(
         locals.insert(name.clone(), *num_locals);
         *num_locals += 1;
       }
-      instructions.extend(compile_expr(&box_expr, num_locals, locals)?);
+      instructions.extend(compile_expr(module_name, &box_expr, num_locals, locals)?);
       instructions.push(Instruction::SetLocal(locals[name]))
     }
     AST::DefineFn(func) => return Err(format!("NYI: Can't define inner functions: {}", func.name)),
+    AST::DeclareFn(decl) => return Err(format!("Cannot declare functions inside other forms: {}", decl.name)),
     AST::Call(box_expr, arg_exprs) => {
       for expr in arg_exprs {
-        instructions.extend(compile_expr(&expr, num_locals, locals)?);
+        instructions.extend(compile_expr(module_name, &expr, num_locals, locals)?);
       }
       match &**box_expr {
-        AST::Variable(name) => instructions.push(Instruction::Call(name.to_string())),
+        AST::Variable(name) => instructions.push(Instruction::Call((module_name.to_string(), name.to_string()))),
         x => return Err(format!("NYI: non-constant functions: {:?}", x)),
       }
     }
