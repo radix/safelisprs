@@ -68,7 +68,7 @@ impl<B> Interpreter<B>
 where
   B: for<'r, 's> FnMut(&str, &mut Stack) -> BuiltinResult,
 {
-  pub fn call_main(&mut self, module: usize, function: usize) -> Result<Rc<SLVal>, String> {
+  pub fn call_main(&mut self) -> Result<Rc<SLVal>, String> {
     if let Some((module, function)) = self.package.main {
       let callable = self
         .package
