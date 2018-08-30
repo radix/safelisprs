@@ -13,6 +13,7 @@ use safelisp::interpreter::Interpreter;
 fn main() {
   let args = App::new("SafeLisp Interpreter")
     .arg(Arg::with_name("INPUT").required(true).index(1))
+    .arg(Arg::with_name("module").default("main"))
     .arg(Arg::with_name("function").default_value("main"))
     .get_matches();
 

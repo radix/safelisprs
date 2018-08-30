@@ -10,7 +10,7 @@ use std::io::prelude::*;
 
 use clap::{App, Arg};
 
-use safelisp::compiler::compile_from_sources;
+use safelisp::compiler::{compile_from_sources, compile_executable_from_sources};
 
 fn main() -> Result<(), failure::Error> {
   let args = App::new("SafeLisp Compiler")
@@ -66,7 +66,13 @@ fn main() -> Result<(), failure::Error> {
     module_sources.push((module_name.to_string_lossy().to_string(), input_data));
   }
 
-  let package = compile_from_sources(&module_sources).map_err(|e| format_err!("{}", e))?;
+  let package = if args.is_present("no-main") {
+    compile_from_sources(&module_sources)
+  } else {
+    let main_mod = args.value_of("main-module").ok_or_else(|| format_err!("There must be a main module"))?;
+    let main_func = args.value_of("main-function").ok_or_else(|| format_err!("There must be a main function"))?;
+    compile_executable_from_sources(&module_sources, (main_mod, main_func))
+  }.map_err(|e| format_err!("{}", e))?;
 
   let output = match format {
     "yaml" => serde_yaml::to_string(&package)?.into_bytes(),

@@ -71,11 +71,11 @@ impl Package {
 
   pub fn from_modules_with_main(
     modules: CompilingModules,
-    main: (String, String),
+    main: (&str, &str),
   ) -> Result<Self, String> {
     let index = index_modules(&modules);
     let functions = link(&index, modules)?;
-    let main = find_function(&index, &main.0, &main.1);
+    let main = find_function(&index, main.0, main.1);
     if main.is_none() {
       Err(format!("Main function {:?} was not found!", main))
     } else {
@@ -277,7 +277,15 @@ fn compile_expr(
   Ok(instructions)
 }
 
+pub fn compile_executable_from_sources(module_sources: &[(String, String)], main: (&str, &str)) -> Result<Package, String> {
+    Ok(Package::from_modules_with_main(_compile_from_sources(module_sources)?, main)?)
+}
+
 pub fn compile_from_sources(module_sources: &[(String, String)]) -> Result<Package, String> {
+    Ok(Package::from_modules(_compile_from_sources(module_sources)?)?)
+}
+
+fn _compile_from_sources(module_sources: &[(String, String)]) -> Result<CompilingModules, String> {
   use parser;
   let mut compiling_modules: CompilingModules = vec![];
   for (mod_name, mod_data) in module_sources {
@@ -285,7 +293,7 @@ pub fn compile_from_sources(module_sources: &[(String, String)]) -> Result<Packa
     let compiling_module = compile_module(&mod_name, &asts)?;
     compiling_modules.push((mod_name.to_string(), compiling_module));
   }
-  Ok(Package::from_modules(compiling_modules)?)
+  Ok(compiling_modules)
 }
 
 #[cfg(test)]
