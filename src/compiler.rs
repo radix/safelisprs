@@ -249,6 +249,8 @@ fn compile_expr(
       }
       match &**box_expr {
         AST::Variable(name) => instructions.push(Instruction::Call((
+          // FIXME TODO XXX: this is wrong, module_name is the *current*
+          // module's name, not the name of the module containing this function!
           module_name.to_string(),
           name.to_string(),
         ))),

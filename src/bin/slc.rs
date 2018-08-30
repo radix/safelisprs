@@ -3,9 +3,8 @@ extern crate clap;
 #[macro_use] extern crate failure;
 extern crate safelisp;
 extern crate serde_yaml;
-#[macro_use] extern crate maplit;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::fs::File;
 use std::io::prelude::*;
 
@@ -45,36 +44,37 @@ fn main() -> Result<(), failure::Error> {
     .get_matches();
   println!("args is {:?}", args);
 
-  let input_files = args.values_of("INPUT").ok_or_else(|| format_err!("Must provide input files on the command line."))?.collect();
+  let input_files : Vec<&str> = args.values_of("INPUT").ok_or_else(|| format_err!("Must provide input files on the command line."))?.collect();
   let format = args.value_of("format").unwrap_or("bincode");
-  let output_file = args.value_of("output").expect("Must specify --output");
+  let output_file = args.value_of("output").ok_or(format_err!("Must specify output file"))?;
 
   println!("Compiling {:?} to {}", input_files, output_file);
 
-  let mut module_asts = hashmap!{};
+  let mut module_sources = vec![];
 
   for input_filename in input_files {
     let input_filename = PathBuf::from(input_filename);
+    let module_name = Path::new(input_filename.file_stem().ok_or_else(|| format_err!("{:?} is not a file", input_filename))?).file_name().ok_or_else(|| format_err!("Couldn't get file name of {:?}", input_filename))?;
 
     let input_data = {
-      let mut f = File::open(input_filename)?;
+      let mut f = File::open(&input_filename)?;
       let mut input_data = String::new();
       f.read_to_string(&mut input_data)?;
       input_data
     };
 
-    let module = compile_from_source(&input_data).expect("Error while compiling module");
+    module_sources.push((module_name.to_string_lossy().to_string(), input_data));
   }
 
+  let package = compile_from_sources(&module_sources).map_err(|e| format_err!("{}", e))?;
+
   let output = match format {
-    "yaml" => serde_yaml::to_string(&module)
-      .expect("Error serializing to YAML")
-      .into_bytes(),
-    "bincode" => bincode::serialize(&module).expect("Error serializing to Bincode"),
+    "yaml" => serde_yaml::to_string(&package)?.into_bytes(),
+    "bincode" => bincode::serialize(&package)?,
     _ => panic!(format!("Invalid format: {}", format)),
   };
   let mut outfile =
     File::create(&output_file).expect(&format!("Couldn't create file {}", output_file));
-  outfile
-    .write_all(&output)
+  outfile.write_all(&output)?;
+  Ok(())
 }
