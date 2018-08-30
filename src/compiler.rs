@@ -56,7 +56,7 @@ pub enum Instruction<CallType> {
 }
 
 type CompilingModules = Vec<(String, Vec<(String, CompilingCallable)>)>;
-type CompiledModules = Vec<(String, Vec<(String, CompiledCallable)>)>;
+pub type CompiledModules = Vec<(String, Vec<(String, CompiledCallable)>)>;
 
 type ModuleIndex = HashMap<String, (usize, HashMap<String, usize>)>;
 
@@ -267,6 +267,19 @@ fn compile_expr(
   }
   Ok(instructions)
 }
+
+
+pub fn compile_from_sources(module_sources: &[(String, String)]) -> Result<Package, String> {
+  use parser;
+  let mut compiling_modules: CompilingModules = vec![];
+  for (mod_name, mod_data) in module_sources {
+    let asts = parser::read_multiple(&mod_data)?;
+    let compiling_module = compile_module(&mod_name, &asts)?;
+    compiling_modules.push((mod_name.to_string(), compiling_module));
+  }
+  Ok(Package::from_modules(compiling_modules)?)
+}
+
 
 #[cfg(test)]
 mod test {

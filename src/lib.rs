@@ -10,10 +10,6 @@ pub mod compiler;
 pub mod interpreter;
 pub mod parser;
 
-// pub fn compile_from_source(s: &str) -> Result<compiler::Module, String> {
-//   let asts = parser::read_multiple(s)?;
-//   compiler::compile_module(&asts)
-// }
 
 #[cfg(test)]
 mod test {
