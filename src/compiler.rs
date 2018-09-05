@@ -10,10 +10,10 @@ pub struct Package {
   /// included for debugging purposes. In a complete "executable" package, all
   /// calls will be represented with index-based function offsets.
   pub functions: Vec<(String, Vec<(String, CompiledCallable)>)>,
-  pub main: Option<(usize, usize)>,
+  pub main: Option<(u32, u32)>,
 }
 
-pub type CompiledCallable = Callable<(usize, usize)>;
+pub type CompiledCallable = Callable<(u32, u32)>;
 type CompilingCallable = Callable<(String, String)>;
 
 /// Packages contain Callables, which can either be CompiledFunctions or
@@ -26,7 +26,7 @@ pub enum Callable<CallType> {
   Builtin,
 }
 
-pub type CompiledFunction = Function<(usize, usize)>;
+pub type CompiledFunction = Function<(u32, u32)>;
 type CompilingFunction = Function<(String, String)>;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -36,9 +36,15 @@ pub struct Function<CallType> {
   pub instructions: Vec<Instruction<CallType>>,
 }
 
-type CompiledInstruction = Instruction<(usize, usize)>;
+type CompiledInstruction = Instruction<(u32, u32)>;
 type CompilingInstruction = Instruction<(String, String)>;
 
+/// Instructions are parameterized by the representation of function calls.
+/// During compilation, functions are referenced by name, but they are later
+/// "linked" and turned into direct offsets into the function table.
+///
+/// TODO: This Instruction type is BIG. I'm guessing that reducing its size down
+/// to, say, 64 bits would lead to some pretty big wins.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Instruction<CallType> {
   /// loads local variable onto the stack
@@ -53,12 +59,23 @@ pub enum Instruction<CallType> {
   Call(CallType),
   /// Exit the current function, returning the TOS to the caller
   Return,
+  /// Wrap the TOS in a Cell, which is pushed.
+  MakeCell,
+  /// Extract the underlying SLVal from the Cell that's on TOS.
+  ExtractCell,
+  /// Push a reference to a function
+  MakeFunctionRef(u32, u32),
+  /// Create a function closure and push it.
+  /// TOS: a function reference
+  /// the argument indicates how many cells to pop that should be made available
+  /// in the function's environment. Each stack entry should be a cell index.
+  MakeClosure(u16),
 }
 
 type CompilingModules = Vec<(String, Vec<(String, CompilingCallable)>)>;
 pub type CompiledModules = Vec<(String, Vec<(String, CompiledCallable)>)>;
 
-type ModuleIndex = HashMap<String, (usize, HashMap<String, usize>)>;
+type ModuleIndex = HashMap<String, (u32, HashMap<String, u32>)>;
 
 impl Package {
   pub fn from_modules(modules: CompilingModules) -> Result<Self, String> {
@@ -83,15 +100,15 @@ impl Package {
     }
   }
 
-  pub fn get_module(&self, mod_index: usize) -> Option<&(String, Vec<(String, CompiledCallable)>)> {
-    self.functions.get(mod_index)
+  pub fn get_module(&self, mod_index: u32) -> Option<&(String, Vec<(String, CompiledCallable)>)> {
+    self.functions.get(mod_index as usize)
   }
 
-  pub fn get_function(&self, module: usize, function: usize) -> Option<&CompiledCallable> {
+  pub fn get_function(&self, module: u32, function: u32) -> Option<&CompiledCallable> {
     self
       .functions
-      .get(module)
-      .and_then(|(_, m)| m.get(function))
+      .get(module as usize)
+      .and_then(|(_, m)| m.get(function as usize))
       .map(|(_, f)| f)
   }
 }
@@ -99,13 +116,13 @@ impl Package {
 fn index_modules(modules: &CompilingModules) -> ModuleIndex {
   let mut module_table = hashmap!{};
   for (mod_index, (mod_name, functions)) in modules.iter().enumerate() {
-    module_table.insert(mod_name.to_string(), (mod_index, hashmap!{}));
+    module_table.insert(mod_name.to_string(), (mod_index as u32, hashmap!{}));
     for (func_index, (func_name, _)) in functions.iter().enumerate() {
       module_table
         .get_mut(mod_name)
         .unwrap()
         .1
-        .insert(func_name.to_string(), func_index);
+        .insert(func_name.to_string(), func_index as u32);
     }
   }
   module_table
@@ -169,6 +186,10 @@ fn link_instruction(
     Instruction::PushString(string) => Instruction::PushString(string),
     Instruction::Pop => Instruction::Pop,
     Instruction::Return => Instruction::Return,
+    Instruction::MakeCell => Instruction::MakeCell,
+    Instruction::ExtractCell => Instruction::ExtractCell,
+    Instruction::MakeClosure(size) => Instruction::MakeClosure(size),
+    Instruction::MakeFunctionRef(m, f) => Instruction::MakeFunctionRef(m, f),
   })
 }
 
@@ -176,7 +197,7 @@ pub fn find_function(
   index: &ModuleIndex,
   module_name: &str,
   function_name: &str,
-) -> Option<(usize, usize)> {
+) -> Option<(u32, u32)> {
   index.get(module_name).and_then(|(mod_index, m)| {
     m.get(function_name)
       .map(|func_index| (*mod_index, *func_index))

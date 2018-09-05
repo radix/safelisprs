@@ -12,9 +12,16 @@ pub enum SLVal {
   Int(i64),
   Float(f64),
   String(String),
-  Symbol(String),
-  List(Vec<SLVal>),
   Void,
+  FunctionRef(u32, u32),
+  Closure(Closure),
+  Cell(Rc<SLVal>),
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct Closure {
+  function: (u32, u32),
+  closure_cells: Vec<Rc<SLVal>>, // These had better all be Cells...
 }
 
 pub type BuiltinResult = Option<Result<(), String>>;
@@ -116,21 +123,55 @@ where
         stack.pop()?;
       }
       Instruction::Return => return stack.pop(),
-      Instruction::SetLocal(i) => locals[usize::from(*i)] = stack.peek()?,
+      Instruction::SetLocal(i) => locals[usize::from(*i)] = stack.pop()?,
       Instruction::LoadLocal(i) => stack.push(locals[usize::from(*i)].clone()),
       Instruction::Call((mod_index, func_index)) => {
         prim_call(package, &mut stack, *mod_index, *func_index, builtins)?
+      }
+      Instruction::MakeFunctionRef(mod_index, func_index) => {
+        stack.push(Rc::new(SLVal::FunctionRef(*mod_index, *func_index)))
+      }
+      Instruction::MakeCell => {
+        let val = stack.pop()?;
+        stack.push(Rc::new(SLVal::Cell(val)));
+      }
+      Instruction::ExtractCell => {
+        let val = stack.pop()?;
+        match &*val {
+          SLVal::Cell(r) => stack.push(r.clone()),
+          other => return Err(format!("Not a cell: {:?}", other)),
+        }
+      }
+      Instruction::MakeClosure(num_cells) => {
+        make_closure(&mut stack, *num_cells)?;
       }
     }
   }
   Ok(Rc::new(SLVal::Void))
 }
 
+fn make_closure(stack: &mut Stack, num_cells: u16) -> Result<(), String> {
+  let func = stack.pop()?;
+  let mut closure_cells = vec![];
+  for _ in 0..num_cells {
+    closure_cells.push(stack.pop()?)
+  }
+  let closure = match &*func {
+    SLVal::FunctionRef(mod_index, func_index) => Ok(Rc::new(SLVal::Closure(Closure {
+      function: (*mod_index, *func_index),
+      closure_cells,
+    }))),
+    _ => Err(format!("make_closure needs a function at TOS")),
+  }?;
+  stack.push(closure);
+  Ok(())
+}
+
 fn prim_call<B>(
   package: &Package,
   stack: &mut Stack,
-  mod_index: usize,
-  func_index: usize,
+  mod_index: u32,
+  func_index: u32,
   builtins: &mut B,
 ) -> Result<(), String>
 where
@@ -140,7 +181,7 @@ where
     .get_module(mod_index)
     .ok_or_else(|| format!("Module not found: {}", mod_index))?;
   let (func_name, callable) = functions
-    .get(func_index)
+    .get(func_index as usize)
     .ok_or_else(|| format!("Function not found: {}/{}", mod_index, func_index))?;
   match callable {
     Callable::Function(func) => {
@@ -207,5 +248,60 @@ mod test {
 
     let mut interpreter = Interpreter::with_builtins(package, mybuiltins);
     assert_eq!(interpreter.call_main().unwrap(), Rc::new(SLVal::Int(5)));
+  }
+
+  #[test]
+  fn closure() {
+    let source = "
+      (fn outer ()
+        (let a 1)
+        (fn inner () a)
+        inner
+      )
+      (fn main () ((outer)))
+    "
+      .to_string();
+    compile_executable_from_sources(&[("main".to_string(), source)], ("main", "main")).unwrap();
+  }
+
+  #[test]
+  fn closure_bytecode() {
+    let main = compiler::Function {
+      num_locals: 1,
+      num_params: 0,
+      instructions: vec![
+        Instruction::PushInt(42),
+        Instruction::MakeFunctionRef(0, 0),
+        Instruction::MakeClosure(1),
+        Instruction::Return,
+      ],
+    };
+
+    let inner = compiler::Function {
+      num_locals: 1,
+      num_params: 0,
+      instructions: vec![Instruction::ExtractCell, Instruction::Return],
+    };
+
+    let pkg = Package {
+      functions: vec![(
+        "main".to_string(),
+        vec![
+          ("inner".to_string(), Callable::Function(inner)),
+          ("main".to_string(), Callable::Function(main)),
+        ],
+      )],
+      main: Some((0, 1)),
+    };
+
+    let mut interp = Interpreter::new(pkg);
+    let result = interp.call_main().unwrap();
+    assert_eq!(
+      result,
+      Rc::new(SLVal::Closure(Closure {
+        function: (0, 0),
+        closure_cells: vec![Rc::new(SLVal::Int(42))],
+      }))
+    );
   }
 }
