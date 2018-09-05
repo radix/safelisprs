@@ -57,6 +57,8 @@ pub enum Instruction<CallType> {
   /// discards topmost stack item
   Pop,
   Call(CallType),
+  /// Call a FunctionRef or a Closure at TOS.
+  CallDynamic,
   /// Exit the current function, returning the TOS to the caller
   Return,
   /// Wrap the TOS in a Cell, which is pushed.
@@ -179,6 +181,7 @@ fn link_instruction(
     // x => Ok(x),
     // but Rust isn't smart enough to allow me. So I have to list out every variant of Instruction
     // :(
+    Instruction::CallDynamic => Instruction::CallDynamic,
     Instruction::LoadLocal(num) => Instruction::LoadLocal(num),
     Instruction::SetLocal(num) => Instruction::SetLocal(num),
     Instruction::PushInt(num) => Instruction::PushInt(num),

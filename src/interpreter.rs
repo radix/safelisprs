@@ -3,6 +3,7 @@ use std::rc::Rc; // TODO: use Manishearth/rust-gc
 use builtins::builtin_builtins;
 use compiler::{Callable, CompiledFunction as Function, Instruction, Package};
 
+#[derive(Debug)]
 pub struct Stack {
   items: Vec<Rc<SLVal>>,
 }
@@ -34,7 +35,7 @@ impl Stack {
     self
       .items
       .pop()
-      .ok_or_else(|| format!("POP on an empty stack"))
+      .ok_or_else(|| panic!("POP on an empty stack"))
   }
   pub fn push(&mut self, item: Rc<SLVal>) {
     self.items.push(item);
@@ -98,6 +99,14 @@ where
       Err(format!("This package has no main function."))
     }
   }
+
+  /// Call a FunctionRef or a Closure in an SLVal, returning the result.
+  pub fn call_slval(&mut self, slval: Rc<SLVal>) -> Result<Rc<SLVal>, String> {
+    let mut stack = Stack::new();
+    stack.push(slval);
+    call_dynamic(&self.package, &mut stack, &mut self.builtins)?;
+    stack.pop()
+  }
 }
 
 fn alloc_locals(code: &Function) -> Vec<Rc<SLVal>> {
@@ -126,8 +135,9 @@ where
       Instruction::SetLocal(i) => locals[usize::from(*i)] = stack.pop()?,
       Instruction::LoadLocal(i) => stack.push(locals[usize::from(*i)].clone()),
       Instruction::Call((mod_index, func_index)) => {
-        prim_call(package, &mut stack, *mod_index, *func_index, builtins)?
+        call_fixed(package, &mut stack, *mod_index, *func_index, builtins)?
       }
+      Instruction::CallDynamic => call_dynamic(package, &mut stack, builtins)?,
       Instruction::MakeFunctionRef(mod_index, func_index) => {
         stack.push(Rc::new(SLVal::FunctionRef(*mod_index, *func_index)))
       }
@@ -167,7 +177,43 @@ fn make_closure(stack: &mut Stack, num_cells: u16) -> Result<(), String> {
   Ok(())
 }
 
-fn prim_call<B>(
+fn call_dynamic<B>(package: &Package, stack: &mut Stack, builtins: &mut B) -> Result<(), String>
+where
+  B: for<'r, 's> FnMut(&'r str, &'r str, &'s mut Stack) -> BuiltinResult,
+{
+  let callable = stack.pop()?;
+  match &*callable {
+    SLVal::FunctionRef(mod_index, func_index) => {
+      call_fixed(package, stack, *mod_index, *func_index, builtins)
+    }
+    SLVal::Closure(Closure {
+      function: (mod_index, func_index),
+      closure_cells,
+    }) => {
+      let (_, functions) = package
+        .get_module(*mod_index)
+        .ok_or_else(|| format!("Module not found: {}", mod_index))?;
+      let (_, callable) = functions
+        .get(*func_index as usize)
+        .ok_or_else(|| format!("Function not found: {}/{}", mod_index, func_index))?;
+      match callable {
+        Callable::Function(func) => {
+          // let mut locals = vec![Rc::new(SLVal::Void); usize::from(func.num_locals + closure_cells.len())];
+          let mut locals = closure_cells.clone();
+          locals.extend(alloc_locals(func));
+          place_locals(stack, &mut locals, closure_cells.len(), func)?;
+          println!("Um hey my locals for a closure are {:?}", locals);
+          stack.push(eval_code(package, func, locals, builtins)?);
+          Ok(())
+        }
+        Callable::Builtin => Err(format!("Can't invoke a builtin as a closure")),
+      }
+    }
+    x => Err(format!("Can't call a non-callable! {:?}", x)),
+  }
+}
+
+fn call_fixed<B>(
   package: &Package,
   stack: &mut Stack,
   mod_index: u32,
@@ -186,17 +232,22 @@ where
   match callable {
     Callable::Function(func) => {
       let mut locals = alloc_locals(func);
-      // The parameters are "in order" on the stack, so popping will give them to us
-      // in reverse order.
-      for param_idx in (0..func.num_params).rev() {
-        locals[usize::from(param_idx)] = stack.pop()?;
-      }
+      place_locals(stack, &mut locals, 0, &func)?;
       stack.push(eval_code(package, func, locals, builtins)?);
     }
     Callable::Builtin => {
       (builtins)(module_name, func_name, stack)
         .ok_or_else(|| format!("No function named {}", func_name))??;
     }
+  }
+  Ok(())
+}
+
+fn place_locals(stack: &mut Stack, locals: &mut Vec<Rc<SLVal>>, start: usize, func: &Function) -> Result<(), String> {
+  // The parameters are "in order" on the stack, so popping will give them to us
+  // in reverse order.
+  for param_idx in (0..func.num_params).rev() {
+    locals[usize::from(param_idx)] = stack.pop()?;
   }
   Ok(())
 }
@@ -271,6 +322,7 @@ mod test {
       num_params: 0,
       instructions: vec![
         Instruction::PushInt(42),
+        Instruction::MakeCell,
         Instruction::MakeFunctionRef(0, 0),
         Instruction::MakeClosure(1),
         Instruction::Return,
@@ -280,7 +332,7 @@ mod test {
     let inner = compiler::Function {
       num_locals: 1,
       num_params: 0,
-      instructions: vec![Instruction::ExtractCell, Instruction::Return],
+      instructions: vec![Instruction::LoadLocal(0), Instruction::ExtractCell, Instruction::Return],
     };
 
     let pkg = Package {
@@ -296,12 +348,7 @@ mod test {
 
     let mut interp = Interpreter::new(pkg);
     let result = interp.call_main().unwrap();
-    assert_eq!(
-      result,
-      Rc::new(SLVal::Closure(Closure {
-        function: (0, 0),
-        closure_cells: vec![Rc::new(SLVal::Int(42))],
-      }))
-    );
+    let result = interp.call_slval(result).unwrap();
+    assert_eq!(result, Rc::new(SLVal::Int(42)));
   }
 }
