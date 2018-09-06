@@ -15,14 +15,14 @@ pub enum SLVal {
   String(String),
   Void,
   FunctionRef(u32, u32),
-  Closure(Closure),
+  Partial(Partial),
   Cell(Rc<SLVal>),
 }
 
 #[derive(Debug, PartialEq, Clone)]
-pub struct Closure {
+pub struct Partial {
   function: (u32, u32),
-  closure_cells: Vec<Rc<SLVal>>, // These had better all be Cells...
+  args: Vec<Rc<SLVal>>,
 }
 
 pub type BuiltinResult = Option<Result<(), String>>;
@@ -35,7 +35,7 @@ impl Stack {
     self
       .items
       .pop()
-      .ok_or_else(|| panic!("POP on an empty stack"))
+      .ok_or_else(|| format!("POP on an empty stack"))
   }
   pub fn push(&mut self, item: Rc<SLVal>) {
     self.items.push(item);
@@ -100,7 +100,7 @@ where
     }
   }
 
-  /// Call a FunctionRef or a Closure in an SLVal, returning the result.
+  /// Call a FunctionRef or a Partial in an SLVal, returning the result.
   pub fn call_slval(&mut self, slval: Rc<SLVal>) -> Result<Rc<SLVal>, String> {
     let mut stack = Stack::new();
     stack.push(slval);
@@ -138,38 +138,38 @@ where
         call_fixed(package, &mut stack, *mod_index, *func_index, builtins)?
       }
       Instruction::CallDynamic => call_dynamic(package, &mut stack, builtins)?,
-      Instruction::MakeFunctionRef(mod_index, func_index) => {
+      Instruction::MakeFunctionRef((mod_index, func_index)) => {
         stack.push(Rc::new(SLVal::FunctionRef(*mod_index, *func_index)))
       }
       Instruction::MakeCell => {
         let val = stack.pop()?;
         stack.push(Rc::new(SLVal::Cell(val)));
       }
-      Instruction::ExtractCell => {
+      Instruction::DerefCell => {
         let val = stack.pop()?;
         match &*val {
           SLVal::Cell(r) => stack.push(r.clone()),
           other => return Err(format!("Not a cell: {:?}", other)),
         }
       }
-      Instruction::MakeClosure(num_cells) => {
-        make_closure(&mut stack, *num_cells)?;
+      Instruction::PartialApply(num_args) => {
+        partial_apply(&mut stack, *num_args)?;
       }
     }
   }
   Ok(Rc::new(SLVal::Void))
 }
 
-fn make_closure(stack: &mut Stack, num_cells: u16) -> Result<(), String> {
+fn partial_apply(stack: &mut Stack, num_args: u16) -> Result<(), String> {
   let func = stack.pop()?;
-  let mut closure_cells = vec![];
-  for _ in 0..num_cells {
-    closure_cells.push(stack.pop()?)
+  let mut args = vec![];
+  for _ in 0..num_args {
+    args.push(stack.pop()?)
   }
   let closure = match &*func {
-    SLVal::FunctionRef(mod_index, func_index) => Ok(Rc::new(SLVal::Closure(Closure {
+    SLVal::FunctionRef(mod_index, func_index) => Ok(Rc::new(SLVal::Partial(Partial {
       function: (*mod_index, *func_index),
-      closure_cells,
+      args,
     }))),
     _ => Err(format!("make_closure needs a function at TOS")),
   }?;
@@ -186,9 +186,9 @@ where
     SLVal::FunctionRef(mod_index, func_index) => {
       call_fixed(package, stack, *mod_index, *func_index, builtins)
     }
-    SLVal::Closure(Closure {
+    SLVal::Partial(Partial {
       function: (mod_index, func_index),
-      closure_cells,
+      args,
     }) => {
       let (_, functions) = package
         .get_module(*mod_index)
@@ -198,11 +198,9 @@ where
         .ok_or_else(|| format!("Function not found: {}/{}", mod_index, func_index))?;
       match callable {
         Callable::Function(func) => {
-          // let mut locals = vec![Rc::new(SLVal::Void); usize::from(func.num_locals + closure_cells.len())];
-          let mut locals = closure_cells.clone();
+          let mut locals = args.clone();
           locals.extend(alloc_locals(func));
-          place_locals(stack, &mut locals, closure_cells.len(), func)?;
-          println!("Um hey my locals for a closure are {:?}", locals);
+          place_locals(stack, &mut locals, args.len(), func)?;
           stack.push(eval_code(package, func, locals, builtins)?);
           Ok(())
         }
@@ -243,7 +241,12 @@ where
   Ok(())
 }
 
-fn place_locals(stack: &mut Stack, locals: &mut Vec<Rc<SLVal>>, start: usize, func: &Function) -> Result<(), String> {
+fn place_locals(
+  stack: &mut Stack,
+  locals: &mut Vec<Rc<SLVal>>,
+  start: usize,
+  func: &Function,
+) -> Result<(), String> {
   // The parameters are "in order" on the stack, so popping will give them to us
   // in reverse order.
   for param_idx in (0..func.num_params).rev() {
@@ -302,20 +305,6 @@ mod test {
   }
 
   #[test]
-  fn closure() {
-    let source = "
-      (fn outer ()
-        (let a 1)
-        (fn inner () a)
-        inner
-      )
-      (fn main () ((outer)))
-    "
-      .to_string();
-    compile_executable_from_sources(&[("main".to_string(), source)], ("main", "main")).unwrap();
-  }
-
-  #[test]
   fn closure_bytecode() {
     let main = compiler::Function {
       num_locals: 1,
@@ -323,8 +312,8 @@ mod test {
       instructions: vec![
         Instruction::PushInt(42),
         Instruction::MakeCell,
-        Instruction::MakeFunctionRef(0, 0),
-        Instruction::MakeClosure(1),
+        Instruction::MakeFunctionRef((0, 0)),
+        Instruction::PartialApply(1),
         Instruction::Return,
       ],
     };
@@ -332,7 +321,11 @@ mod test {
     let inner = compiler::Function {
       num_locals: 1,
       num_params: 0,
-      instructions: vec![Instruction::LoadLocal(0), Instruction::ExtractCell, Instruction::Return],
+      instructions: vec![
+        Instruction::LoadLocal(0),
+        Instruction::DerefCell,
+        Instruction::Return,
+      ],
     };
 
     let pkg = Package {
@@ -351,4 +344,22 @@ mod test {
     let result = interp.call_slval(result).unwrap();
     assert_eq!(result, Rc::new(SLVal::Int(42)));
   }
+
+  #[test]
+  fn closure() {
+    let source = "
+      (fn outer ()
+        (let a 1)
+        (fn inner () a)
+        inner
+      )
+      (fn main () ((outer)))
+    "
+      .to_string();
+    let pkg =
+      compile_executable_from_sources(&[("main".to_string(), source)], ("main", "main")).unwrap();
+    let mut interp = Interpreter::new(pkg);
+    assert_eq!(interp.call_main().unwrap(), Rc::new(SLVal::Int(1)));
+  }
+
 }

@@ -44,7 +44,7 @@ type CompilingInstruction = Instruction<(String, String)>;
 /// "linked" and turned into direct offsets into the function table.
 ///
 /// TODO: This Instruction type is BIG. I'm guessing that reducing its size down
-/// to, say, 64 bits would lead to some pretty big wins.
+/// to, say, 64 bits would lead to some wins?
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Instruction<CallType> {
   /// loads local variable onto the stack
@@ -64,14 +64,13 @@ pub enum Instruction<CallType> {
   /// Wrap the TOS in a Cell, which is pushed.
   MakeCell,
   /// Extract the underlying SLVal from the Cell that's on TOS.
-  ExtractCell,
+  DerefCell,
   /// Push a reference to a function
-  MakeFunctionRef(u32, u32),
-  /// Create a function closure and push it.
+  MakeFunctionRef(CallType),
+  /// Partially apply some arguments to a function.
+  /// argument: how many arguments to pop from the stack and bind to the function.
   /// TOS: a function reference
-  /// the argument indicates how many cells to pop that should be made available
-  /// in the function's environment. Each stack entry should be a cell index.
-  MakeClosure(u16),
+  PartialApply(u16),
 }
 
 type CompilingModules = Vec<(String, Vec<(String, CompilingCallable)>)>;
@@ -177,6 +176,12 @@ fn link_instruction(
         .ok_or_else(|| format!("Call to undefined function {}.{}", mod_name, func_name))?;
       Instruction::Call((mod_idx, func_idx))
     }
+    Instruction::MakeFunctionRef((mod_name, func_name)) => {
+      let (mod_idx, func_idx) = find_function(module_table, &mod_name, &func_name)
+        .ok_or_else(|| format!("Call to undefined function {}.{}", mod_name, func_name))?;
+      Instruction::MakeFunctionRef((mod_idx, func_idx))
+    }
+
     // Here's what I want to say:
     // x => Ok(x),
     // but Rust isn't smart enough to allow me. So I have to list out every variant of Instruction
@@ -190,9 +195,8 @@ fn link_instruction(
     Instruction::Pop => Instruction::Pop,
     Instruction::Return => Instruction::Return,
     Instruction::MakeCell => Instruction::MakeCell,
-    Instruction::ExtractCell => Instruction::ExtractCell,
-    Instruction::MakeClosure(size) => Instruction::MakeClosure(size),
-    Instruction::MakeFunctionRef(m, f) => Instruction::MakeFunctionRef(m, f),
+    Instruction::DerefCell => Instruction::DerefCell,
+    Instruction::PartialApply(size) => Instruction::PartialApply(size),
   })
 }
 
@@ -214,10 +218,7 @@ pub fn compile_module(
   let mut functions = vec![];
   for ast in asts {
     match ast {
-      AST::DefineFn(func) => functions.push((
-        func.name.clone(),
-        Callable::Function(compile_function(name, func)?),
-      )),
+      AST::DefineFn(func) => functions.extend(compile_function(name, "", func)?),
       AST::DeclareFn(decl) => functions.push((decl.name.clone(), Callable::Builtin)),
       x => return Err(format!("Unexpected form at top-level: {:?}", x)),
     };
@@ -225,7 +226,13 @@ pub fn compile_module(
   Ok(functions)
 }
 
-fn compile_function(module_name: &str, f: &parser::Function) -> Result<CompilingFunction, String> {
+/// Compile a function.
+/// Returns a vec of functions in case any of them contain nested functions.
+fn compile_function(
+  module_name: &str,
+  func_prefix: &str,
+  f: &parser::Function,
+) -> Result<Vec<(String, CompilingCallable)>, String> {
   let mut num_locals = f.params.len() as u16;
   // Map of local-name to local-index
   let mut locals = HashMap::new();
@@ -233,20 +240,25 @@ fn compile_function(module_name: &str, f: &parser::Function) -> Result<Compiling
     locals.insert(param.clone(), idx as u16);
   }
   let mut instructions = vec![];
+  let nsp = vec![func_prefix, &f.name].join("(");
   for ast in &f.code {
     instructions.extend(compile_expr(
       module_name,
       ast,
       &mut num_locals,
       &mut locals,
+      &nsp,
     )?);
   }
   instructions.push(Instruction::Return);
-  Ok(Function {
-    num_params: f.params.len() as u16,
-    num_locals: num_locals as u16,
-    instructions: instructions,
-  })
+  Ok(vec![(
+    f.name.to_string(),
+    Callable::Function(Function {
+      num_params: f.params.len() as u16,
+      num_locals: num_locals as u16,
+      instructions: instructions,
+    }),
+  )])
 }
 
 fn compile_expr(
@@ -254,27 +266,16 @@ fn compile_expr(
   ast: &AST,
   num_locals: &mut u16,
   locals: &mut HashMap<String, u16>,
+  scope_name: &str,
 ) -> Result<Vec<CompilingInstruction>, String> {
   let mut instructions = vec![];
   match ast {
-    AST::Let(name, box_expr) => {
-      if !locals.contains_key(name) {
-        locals.insert(name.clone(), *num_locals);
-        *num_locals += 1;
-      }
-      instructions.extend(compile_expr(module_name, &box_expr, num_locals, locals)?);
-      instructions.push(Instruction::SetLocal(locals[name]))
-    }
-    AST::DefineFn(func) => return Err(format!("NYI: Can't define inner functions: {}", func.name)),
-    AST::DeclareFn(decl) => {
-      return Err(format!(
-        "Cannot declare functions inside other forms: {}",
-        decl.name
-      ))
+    AST::Call(callable_expr, arg_exprs) => {
+      return Err(format!("NYI: non-constant functions: {:?}", callable_expr))
     }
     AST::CallFixed(identifier, arg_exprs) => {
       for expr in arg_exprs {
-        instructions.extend(compile_expr(module_name, &expr, num_locals, locals)?);
+        instructions.extend(compile_expr(module_name, &expr, num_locals, locals, scope_name)?);
       }
       let (module_name, function_name) = match identifier {
         Identifier::Bare(fname) => (module_name.to_string(), fname.to_string()),
@@ -285,8 +286,38 @@ fn compile_expr(
         function_name.to_string(),
       )))
     }
-    AST::Call(box_expr, arg_exprs) => {
-      return Err(format!("NYI: non-constant functions: {:?}", box_expr))
+    AST::Cell(expr) => {
+      instructions.extend(compile_expr(module_name, &expr, num_locals, locals, scope_name)?);
+      instructions.push(Instruction::MakeCell);
+    }
+    AST::DeclareFn(decl) => {
+      return Err(format!(
+        "Cannot declare functions inside other forms: {}",
+        decl.name
+      ))
+    }
+    AST::DefineFn(func) => return Err(format!("NYI: Can't define inner functions: {}", func.name)),
+    AST::DerefCell(expr) => {
+      instructions.extend(compile_expr(module_name, &expr, num_locals, locals, scope_name)?);
+      instructions.push(Instruction::DerefCell);
+    }
+    AST::FunctionRef(mname, fname) => {
+      instructions.push(Instruction::MakeFunctionRef((mname.to_owned(), fname.to_owned())));
+    }
+    AST::Let(name, expr) => {
+      if !locals.contains_key(name) {
+        locals.insert(name.clone(), *num_locals);
+        *num_locals += 1;
+      }
+      instructions.extend(compile_expr(module_name, expr, num_locals, locals, scope_name)?);
+      instructions.push(Instruction::SetLocal(locals[name]))
+    }
+    AST::PartialApply(expr, args) => {
+      for expr in args {
+        instructions.extend(compile_expr(module_name, &expr, num_locals, locals, scope_name)?);
+      }
+      instructions.extend(compile_expr(module_name, &expr, num_locals, locals, scope_name)?);
+      instructions.push(Instruction::PartialApply(args.len() as u16));
     }
     AST::Variable(name) => {
       if !locals.contains_key(name) {
@@ -294,6 +325,7 @@ fn compile_expr(
       }
       instructions.push(Instruction::LoadLocal(locals[name]));
     }
+
     AST::Int(i) => instructions.push(Instruction::PushInt(*i)),
     AST::Float(f) => instructions.push(Instruction::PushFloat(*f)),
     AST::String(s) => instructions.push(Instruction::PushString(s.clone())),
@@ -301,12 +333,20 @@ fn compile_expr(
   Ok(instructions)
 }
 
-pub fn compile_executable_from_sources(module_sources: &[(String, String)], main: (&str, &str)) -> Result<Package, String> {
-    Ok(Package::from_modules_with_main(_compile_from_sources(module_sources)?, main)?)
+pub fn compile_executable_from_sources(
+  module_sources: &[(String, String)],
+  main: (&str, &str),
+) -> Result<Package, String> {
+  Ok(Package::from_modules_with_main(
+    _compile_from_sources(module_sources)?,
+    main,
+  )?)
 }
 
 pub fn compile_from_sources(module_sources: &[(String, String)]) -> Result<Package, String> {
-    Ok(Package::from_modules(_compile_from_sources(module_sources)?)?)
+  Ok(Package::from_modules(_compile_from_sources(
+    module_sources,
+  )?)?)
 }
 
 fn _compile_from_sources(module_sources: &[(String, String)]) -> Result<CompilingModules, String> {
@@ -331,14 +371,17 @@ mod test {
       params: vec!["a".to_string()],
       code: vec![AST::Variable("a".to_string())],
     };
-    let code = compile_function("main", &func).unwrap();
+    let code = compile_function("main", "", &func).unwrap();
     assert_eq!(
       code,
-      Function {
-        num_params: 1,
-        num_locals: 1,
-        instructions: vec![Instruction::LoadLocal(0), Instruction::Return],
-      }
+      vec![(
+        "id".to_string(),
+        Callable::Function(Function {
+          num_params: 1,
+          num_locals: 1,
+          instructions: vec![Instruction::LoadLocal(0), Instruction::Return],
+        }),
+      )]
     );
   }
 }

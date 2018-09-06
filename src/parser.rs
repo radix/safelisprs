@@ -14,6 +14,19 @@ pub enum AST {
   Int(i64),
   Float(f64),
   String(String),
+
+  // The following variants aren't represented in the syntax, but are produced
+  // by transformations on the previous variants.
+
+  /// A Cell wraps a value in a box. This is used to provide closures with
+  /// access to values in outer variables.
+  Cell(Box<AST>),
+  /// And we can deref these cells to get their inner value.
+  DerefCell(Box<AST>),
+  /// Bind up some arguments with a callable. (this is used for passing cells to closures!)
+  PartialApply(Box<AST>, Vec<AST>),
+  /// Get a reference to a function.
+  FunctionRef(String, String),
 }
 
 #[derive(Debug, PartialEq, Clone)]
