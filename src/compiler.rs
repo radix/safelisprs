@@ -80,7 +80,7 @@ type ModuleIndex = HashMap<String, (u32, HashMap<String, u32>)>;
 
 impl Package {
   pub fn from_modules(modules: CompilingModules) -> Result<Self, String> {
-    let index = index_modules(&modules);
+    let index = index_modules(modules.iter());
     Ok(Package {
       functions: link(&index, modules)?,
       main: None,
@@ -91,7 +91,7 @@ impl Package {
     modules: CompilingModules,
     main: (&str, &str),
   ) -> Result<Self, String> {
-    let index = index_modules(&modules);
+    let index = index_modules(modules.iter());
     let functions = link(&index, modules)?;
     let main = find_function(&index, main.0, main.1);
     if main.is_none() {
@@ -114,9 +114,9 @@ impl Package {
   }
 }
 
-fn index_modules(modules: &CompilingModules) -> ModuleIndex {
+fn index_modules<'a>(modules: impl Iterator<Item=&'a (String, Vec<(String, CompilingCallable)>)>) -> ModuleIndex {
   let mut module_table = hashmap!{};
-  for (mod_index, (mod_name, functions)) in modules.iter().enumerate() {
+  for (mod_index, (mod_name, functions)) in modules.enumerate() {
     module_table.insert(mod_name.to_string(), (mod_index as u32, hashmap!{}));
     for (func_index, (func_name, _)) in functions.iter().enumerate() {
       module_table
