@@ -72,18 +72,17 @@ impl AST {
   pub fn from_atoms(form: &Expr) -> Result<Self, String> {
     match form {
       AValue::Str(s) => Ok(AST::String(s.clone())),
-      AValue::Int(i) => Ok(AST::Int(i.clone())),
-      AValue::Float(f) => Ok(AST::Float(f.clone())),
+      AValue::Int(i) => Ok(AST::Int(*i)),
+      AValue::Float(f) => Ok(AST::Float(*f)),
       AValue::Symbol(s) => Ok(AST::Variable(s.clone())),
       AValue::Cons(left, right) => {
-        match **left {
-          AValue::Symbol(ref s) => match s.as_ref() {
+        if let AValue::Symbol(ref s) = **left {
+          match s.as_ref() {
             "let" => return parse_let(&right),
             "fn" => return parse_fn(&right),
             "decl" => return parse_decl(&right),
             _ => {}
-          },
-          _ => {}
+          }
         }
         parse_call(&form)
       }
@@ -94,7 +93,7 @@ impl AST {
 
 fn parse_call(form: &Expr) -> Result<AST, String> {
   let form = flatten_list(form)?;
-  if form.len() == 0 {
+  if form.is_empty() {
     return Err(format!("Empty call"))
   }
   let args: Result<Vec<AST>, _> = form[1..].iter().map(|f| AST::from_atoms(f)).collect();
@@ -107,11 +106,11 @@ fn parse_call(form: &Expr) -> Result<AST, String> {
 }
 
 fn parse_identifier(name: &str) -> Identifier {
-  let parts: Vec<&str> = name.splitn(2, ".").collect();
+  let parts: Vec<&str> = name.splitn(2, '.').collect();
   if parts.len() == 1 {
-    return Identifier::Bare(name.to_string())
+    Identifier::Bare(name.to_string())
   } else {
-    return Identifier::Qualified(parts[0].to_string(), parts[1].to_string());
+    Identifier::Qualified(parts[0].to_string(), parts[1].to_string())
   }
 }
 

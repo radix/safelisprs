@@ -44,7 +44,7 @@ foo:
 
 
 
-use parser::{AST, Function, FunctionDecl, Identifier};
+use parser::{AST, Function, Identifier};
 
 
 /// We transform any usage of closures (i.e., nested functions that make use of
@@ -78,7 +78,7 @@ pub fn closure_transform(items: &[AST]) -> Result<Vec<AST>, String> {
 }
 
 
-fn closurize_function(func: &Function) -> Result<Vec<AST>, String> {
+fn closurize_function(_func: &Function) -> Result<Vec<AST>, String> {
   // We need to do the following things:
   // 1. look for inner functions
   // 2. scan for their free variables

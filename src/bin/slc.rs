@@ -46,7 +46,7 @@ fn main() -> Result<(), failure::Error> {
 
   let input_files : Vec<&str> = args.values_of("INPUT").ok_or_else(|| format_err!("Must provide input files on the command line."))?.collect();
   let format = args.value_of("format").unwrap_or("bincode");
-  let output_file = args.value_of("output").ok_or(format_err!("Must specify output file"))?;
+  let output_file = args.value_of("output").ok_or_else(|| format_err!("Must specify output file"))?;
 
   println!("Compiling {:?} to {}", input_files, output_file);
 

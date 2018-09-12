@@ -44,7 +44,7 @@ impl Stack {
     self
       .items
       .last()
-      .map(|x| x.clone())
+      .cloned()
       .ok_or_else(|| format!("PEEK on an empty stack"))
   }
 }
@@ -56,10 +56,7 @@ pub struct Interpreter<B> {
 
 impl<B> Interpreter<B> {
   pub fn with_builtins(package: Package, builtins: B) -> Self {
-    Interpreter {
-      package,
-      builtins: builtins,
-    }
+    Interpreter { package, builtins }
   }
 }
 

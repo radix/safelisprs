@@ -256,7 +256,7 @@ fn compile_function(
     Callable::Function(Function {
       num_params: f.params.len() as u16,
       num_locals: num_locals as u16,
-      instructions: instructions,
+      instructions,
     }),
   )])
 }
@@ -270,7 +270,7 @@ fn compile_expr(
 ) -> Result<Vec<CompilingInstruction>, String> {
   let mut instructions = vec![];
   match ast {
-    AST::Call(callable_expr, arg_exprs) => {
+    AST::Call(callable_expr, _arg_exprs) => {
       return Err(format!("NYI: non-constant functions: {:?}", callable_expr))
     }
     AST::CallFixed(identifier, arg_exprs) => {
