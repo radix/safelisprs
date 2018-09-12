@@ -1,9 +1,10 @@
+use std::default::Default;
 use std::rc::Rc; // TODO: use Manishearth/rust-gc
 
 use builtins::builtin_builtins;
 use compiler::{Callable, CompiledFunction as Function, Instruction, Package};
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Stack {
   items: Vec<Rc<SLVal>>,
 }
@@ -99,7 +100,7 @@ where
 
   /// Call a FunctionRef or a Partial in an SLVal, returning the result.
   pub fn call_slval(&mut self, slval: Rc<SLVal>) -> Result<Rc<SLVal>, String> {
-    let mut stack = Stack::new();
+    let mut stack: Stack = Default::default();
     stack.push(slval);
     call_dynamic(&self.package, &mut stack, &mut self.builtins)?;
     stack.pop()
@@ -246,8 +247,8 @@ fn place_locals(
 ) -> Result<(), String> {
   // The parameters are "in order" on the stack, so popping will give them to us
   // in reverse order.
-  for param_idx in (0..func.num_params).rev() {
-    locals[usize::from(param_idx)] = stack.pop()?;
+  for param_idx in (start..usize::from(func.num_params)).rev() {
+    locals[param_idx] = stack.pop()?;
   }
   Ok(())
 }

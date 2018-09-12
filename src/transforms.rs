@@ -44,7 +44,7 @@ foo:
 
 
 
-use parser::{AST, Function, Identifier};
+use parser::{AST, Function};
 
 
 /// We transform any usage of closures (i.e., nested functions that make use of
