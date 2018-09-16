@@ -78,7 +78,7 @@ pub fn closure_transform(items: &[AST]) -> Result<Vec<AST>, String> {
 }
 
 
-fn closurize_function(_func: &Function) -> Result<Vec<AST>, String> {
+fn closurize_function(func: &Function) -> Result<Vec<AST>, String> {
   // We need to do the following things:
   // 1. look for inner functions
   // 2. scan for their free variables
@@ -86,5 +86,19 @@ fn closurize_function(_func: &Function) -> Result<Vec<AST>, String> {
   // 4. If there are matches: wrap the declarations with (cell)
   // 5. ALSO: only allow calls to the inner function if all the outer variables
   //    have been initialized...
-  Ok(vec![])
+  let mut top_level = vec![];
+  let mut code: Vec<AST> = func.code.clone();
+
+  // WTB drain_filter
+  let mut i = 0;
+  while i != code.len() {
+      if let AST::DefineFn(_) = code[i] {
+          let val = code.remove(i);
+          top_level.push(val);
+      } else {
+          i += 1;
+      }
+  }
+  top_level.push(AST::DefineFn(Function {name: func.name.clone(), params: func.params.clone(), code}));
+  Ok(top_level)
 }

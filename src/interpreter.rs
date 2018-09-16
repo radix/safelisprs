@@ -344,7 +344,7 @@ mod test {
   }
 
   #[test]
-  fn closure() {
+  fn closure_end_to_end() {
     let source = "
       (fn outer ()
         (let a 1)

@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use parser::{self, Identifier, AST};
+use transforms::closure_transform;
 
 /// A Package can either represent a "program" or a "library".
 /// If a `main` is provided, then it can be executed as a program directly.
@@ -114,7 +115,9 @@ impl Package {
   }
 }
 
-fn index_modules<'a>(modules: impl Iterator<Item=&'a (String, Vec<(String, CompilingCallable)>)>) -> ModuleIndex {
+fn index_modules<'a>(
+  modules: impl Iterator<Item = &'a (String, Vec<(String, CompilingCallable)>)>,
+) -> ModuleIndex {
   let mut module_table = hashmap!{};
   for (mod_index, (mod_name, functions)) in modules.enumerate() {
     module_table.insert(mod_name.to_string(), (mod_index as u32, hashmap!{}));
@@ -143,8 +146,7 @@ fn link(module_table: &ModuleIndex, modules: CompilingModules) -> Result<Compile
           Callable::Builtin => Callable::Builtin,
         };
         Ok((func_name, new_callable))
-      })
-      .collect::<Result<Vec<(String, CompiledCallable)>, String>>()?;
+      }).collect::<Result<Vec<(String, CompiledCallable)>, String>>()?;
     result.push((mod_name, new_functions));
   }
   Ok(result)
@@ -215,8 +217,9 @@ pub fn compile_module(
   name: &str,
   asts: &[AST],
 ) -> Result<Vec<(String, CompilingCallable)>, String> {
+  let asts = closure_transform(asts)?;
   let mut functions = vec![];
-  for ast in asts {
+  for ast in &asts {
     match ast {
       AST::DefineFn(func) => functions.extend(compile_function(name, "", func)?),
       AST::DeclareFn(decl) => functions.push((decl.name.clone(), Callable::Builtin)),
@@ -275,7 +278,13 @@ fn compile_expr(
     }
     AST::CallFixed(identifier, arg_exprs) => {
       for expr in arg_exprs {
-        instructions.extend(compile_expr(module_name, &expr, num_locals, locals, scope_name)?);
+        instructions.extend(compile_expr(
+          module_name,
+          &expr,
+          num_locals,
+          locals,
+          scope_name,
+        )?);
       }
       let (module_name, function_name) = match identifier {
         Identifier::Bare(fname) => (module_name.to_string(), fname.to_string()),
@@ -287,36 +296,69 @@ fn compile_expr(
       )))
     }
     AST::Cell(expr) => {
-      instructions.extend(compile_expr(module_name, &expr, num_locals, locals, scope_name)?);
+      instructions.extend(compile_expr(
+        module_name,
+        &expr,
+        num_locals,
+        locals,
+        scope_name,
+      )?);
       instructions.push(Instruction::MakeCell);
     }
     AST::DeclareFn(decl) => {
       return Err(format!(
-        "Cannot declare functions inside other forms: {}",
+        "[BUG] Cannot declare functions inside other forms: {}",
         decl.name
       ))
     }
-    AST::DefineFn(func) => return Err(format!("NYI: Can't define inner functions: {}", func.name)),
+    AST::DefineFn(func) => return Err(format!("[BUG] DefineFn in an expression: {}", func.name)),
     AST::DerefCell(expr) => {
-      instructions.extend(compile_expr(module_name, &expr, num_locals, locals, scope_name)?);
+      instructions.extend(compile_expr(
+        module_name,
+        &expr,
+        num_locals,
+        locals,
+        scope_name,
+      )?);
       instructions.push(Instruction::DerefCell);
     }
     AST::FunctionRef(mname, fname) => {
-      instructions.push(Instruction::MakeFunctionRef((mname.to_owned(), fname.to_owned())));
+      instructions.push(Instruction::MakeFunctionRef((
+        mname.to_owned(),
+        fname.to_owned(),
+      )));
     }
     AST::Let(name, expr) => {
       if !locals.contains_key(name) {
         locals.insert(name.clone(), *num_locals);
         *num_locals += 1;
       }
-      instructions.extend(compile_expr(module_name, expr, num_locals, locals, scope_name)?);
+      instructions.extend(compile_expr(
+        module_name,
+        expr,
+        num_locals,
+        locals,
+        scope_name,
+      )?);
       instructions.push(Instruction::SetLocal(locals[name]))
     }
     AST::PartialApply(expr, args) => {
       for expr in args {
-        instructions.extend(compile_expr(module_name, &expr, num_locals, locals, scope_name)?);
+        instructions.extend(compile_expr(
+          module_name,
+          &expr,
+          num_locals,
+          locals,
+          scope_name,
+        )?);
       }
-      instructions.extend(compile_expr(module_name, &expr, num_locals, locals, scope_name)?);
+      instructions.extend(compile_expr(
+        module_name,
+        &expr,
+        num_locals,
+        locals,
+        scope_name,
+      )?);
       instructions.push(Instruction::PartialApply(args.len() as u16));
     }
     AST::Variable(name) => {
