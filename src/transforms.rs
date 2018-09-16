@@ -1,6 +1,3 @@
-
-
-
 /*
 
 This would convert an AST like:
@@ -42,17 +39,14 @@ foo:
   CallDynamic
 */
 
-
-
-use parser::{AST, Function};
-
+use parser::{Function, AST};
 
 /// We transform any usage of closures (i.e., nested functions that make use of
 /// variables from their lexical scope) into mostly plain functions.
 ///
 /// 1. nested functions (regardless of whether they use enclosing variables) are
 ///    lifted (I'm not sure if this is actually an important thing to happen at
-///    the AST level...).
+///    the AST level, but it makes things easier).
 /// 2. variables used in closures have their values wrapped in Cell, and their
 ///    usage wrapped in DerefCell.
 /// 3. Free variables in closure-functions get converted to parameters, which
@@ -67,9 +61,7 @@ pub fn closure_transform(items: &[AST]) -> Result<Vec<AST>, String> {
   let mut result = vec![];
   for item in items {
     let out = match item {
-      AST::DefineFn(func) => {
-        closurize_function(func)?
-      }
+      AST::DefineFn(func) => closurize_function(func)?,
       x => vec![x.clone()],
     };
     result.extend(out);
@@ -77,6 +69,58 @@ pub fn closure_transform(items: &[AST]) -> Result<Vec<AST>, String> {
   Ok(result)
 }
 
+fn transform_multi<'a, T>(
+  asts: impl Iterator<Item = &'a AST>,
+  transformer: &'a mut T,
+) -> Result<Vec<AST>, String>
+where
+  T: FnMut(&AST) -> Result<Option<AST>, String>,
+{
+  asts.map(|ast| transform(ast, transformer)).collect()
+}
+
+/// Basically fmap for AST.
+pub fn transform<T>(ast: &AST, transformer: &mut T) -> Result<AST, String>
+where
+  T: FnMut(&AST) -> Result<Option<AST>, String>,
+{
+  let result = match transformer(ast)? {
+    Some(replacement) => replacement,
+    None => match ast {
+      AST::Let(name, expr) => AST::Let(name.to_string(), Box::new(transform(&expr, transformer)?)),
+      AST::DefineFn(func) => {
+        let code = transform_multi(func.code.iter(), transformer)?;
+        AST::DefineFn(Function {
+          name: func.name.clone(),
+          params: func.params.clone(),
+          code,
+        })
+      }
+      AST::Call(func_expr, args) => {
+        let new_args = transform_multi(args.iter(), transformer)?;
+        AST::Call(Box::new(transform(&func_expr, transformer)?), new_args)
+      }
+      AST::CallFixed(ident, args) => {
+        let new_args = transform_multi(args.iter(), transformer)?;
+        AST::CallFixed(ident.clone(), new_args)
+      }
+      AST::Cell(expr) => AST::Cell(Box::new(transform(&expr, transformer)?)),
+      AST::DerefCell(expr) => AST::DerefCell(Box::new(transform(&expr, transformer)?)),
+      AST::PartialApply(call_expr, args) => AST::PartialApply(
+        Box::new(transform(&call_expr, transformer)?),
+        transform_multi(args.iter(), transformer)?,
+      ),
+
+      AST::DeclareFn(_decl) => ast.clone(),
+      AST::Variable(_ident) => ast.clone(),
+      AST::Int(_num) => ast.clone(),
+      AST::Float(_num) => ast.clone(),
+      AST::String(_s) => ast.clone(),
+      AST::FunctionRef(_mod_name, _func_name) => ast.clone(),
+    },
+  };
+  Ok(result)
+}
 
 fn closurize_function(func: &Function) -> Result<Vec<AST>, String> {
   // We need to do the following things:
@@ -89,16 +133,55 @@ fn closurize_function(func: &Function) -> Result<Vec<AST>, String> {
   let mut top_level = vec![];
   let mut code: Vec<AST> = func.code.clone();
 
+  // map_expr?
+  // it needs to
+  // 1. traverse all... expressions... (not into function definitions probably? or maybe it needs to be like os.path.walk...)
+  // 1. traverse all ASTs
+  // 2. call a closure on each one
+  // 3. closure returns:
+  //    - signal on whether to walk deeper
+  //    - a vec of replacement ASTs
+
   // WTB drain_filter
   let mut i = 0;
   while i != code.len() {
-      if let AST::DefineFn(_) = code[i] {
-          let val = code.remove(i);
-          top_level.push(val);
-      } else {
-          i += 1;
-      }
+    if let AST::DefineFn(_) = code[i] {
+      let val = code.remove(i);
+      top_level.push(val);
+    } else {
+      i += 1;
+    }
   }
-  top_level.push(AST::DefineFn(Function {name: func.name.clone(), params: func.params.clone(), code}));
+  top_level.push(AST::DefineFn(Function {
+    name: func.name.clone(),
+    params: func.params.clone(),
+    code,
+  }));
   Ok(top_level)
+}
+
+#[cfg(test)]
+mod test {
+  use super::transform;
+  use parser::AST;
+  #[test]
+  fn test_transform_replacement_id() {
+    let ast = AST::Let("a".to_string(), Box::new(AST::Int(42)));
+    fn transformer(ast: &AST) -> Result<Option<AST>, String> {
+      Ok(Some(ast.clone()))
+    }
+    let new_ast = transform(&ast, &mut transformer).unwrap();
+    assert_eq!(new_ast, ast);
+  }
+
+  #[test]
+  fn test_transform_no_replacements() {
+    let ast = AST::Let("a".to_string(), Box::new(AST::Int(42)));
+    fn transformer(_: &AST) -> Result<Option<AST>, String> {
+      Ok(None)
+    }
+    let new_ast = transform(&ast, &mut transformer).unwrap();
+    assert_eq!(new_ast, ast);
+  }
+
 }
