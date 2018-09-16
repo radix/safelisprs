@@ -69,6 +69,38 @@ pub fn closure_transform(items: &[AST]) -> Result<Vec<AST>, String> {
   Ok(result)
 }
 
+fn closurize_function(func: &Function) -> Result<Vec<AST>, String> {
+  // We need to do the following things:
+  // 1. look for inner functions
+  // 2. scan for their free variables
+  // 3. scan THIS function for matching variable declarations
+  // 4. If there are matches: wrap the declarations with (cell)
+  // 5. ALSO: only allow calls to the inner function if all the outer variables
+  //    have been initialized...
+  let mut top_level = vec![];
+  let code = {
+    let mut transformer = |ast: &AST| -> Result<Option<AST>, String> {
+      match ast {
+        AST::DefineFn(func) => {
+          // TODO: mangle the name!
+          top_level.push(AST::DefineFn(func.clone()));
+          Ok(Some(AST::Variable(func.name.clone())))
+        }
+        _ => Ok(None)
+      }
+    };
+    transform_multi(func.code.iter(), &mut transformer)?
+  };
+  top_level.push(AST::DefineFn(Function { name: func.name.clone(), params: func.params.clone(), code}));
+  Ok(top_level)
+}
+
+
+
+// General transformation machinery
+
+
+// Transform an iterator of ASTs.
 fn transform_multi<'a, T>(
   asts: impl Iterator<Item = &'a AST>,
   transformer: &'a mut T,
@@ -79,7 +111,8 @@ where
   asts.map(|ast| transform(ast, transformer)).collect()
 }
 
-/// Basically fmap for AST.
+/// Recursively transform an AST.
+/// If the visitor returns None, then the original AST is used and is then traversed.
 pub fn transform<T>(ast: &AST, transformer: &mut T) -> Result<AST, String>
 where
   T: FnMut(&AST) -> Result<Option<AST>, String>,
@@ -122,44 +155,6 @@ where
   Ok(result)
 }
 
-fn closurize_function(func: &Function) -> Result<Vec<AST>, String> {
-  // We need to do the following things:
-  // 1. look for inner functions
-  // 2. scan for their free variables
-  // 3. scan THIS function for matching variable declarations
-  // 4. If there are matches: wrap the declarations with (cell)
-  // 5. ALSO: only allow calls to the inner function if all the outer variables
-  //    have been initialized...
-  let mut top_level = vec![];
-  let mut code: Vec<AST> = func.code.clone();
-
-  // map_expr?
-  // it needs to
-  // 1. traverse all... expressions... (not into function definitions probably? or maybe it needs to be like os.path.walk...)
-  // 1. traverse all ASTs
-  // 2. call a closure on each one
-  // 3. closure returns:
-  //    - signal on whether to walk deeper
-  //    - a vec of replacement ASTs
-
-  // WTB drain_filter
-  let mut i = 0;
-  while i != code.len() {
-    if let AST::DefineFn(_) = code[i] {
-      let val = code.remove(i);
-      top_level.push(val);
-    } else {
-      i += 1;
-    }
-  }
-  top_level.push(AST::DefineFn(Function {
-    name: func.name.clone(),
-    params: func.params.clone(),
-    code,
-  }));
-  Ok(top_level)
-}
-
 #[cfg(test)]
 mod test {
   use super::transform;
@@ -184,4 +179,10 @@ mod test {
     assert_eq!(new_ast, ast);
   }
 
+  #[test]
+  fn test_transform_no_replacement_closure() {
+    let ast = AST::Let("a".to_string(), Box::new(AST::Int(42)));
+    let mut transformer = |a: &AST| {Ok(None)};
+    assert_eq!(transform(&ast, &mut transformer).unwrap(), ast);
+  }
 }
