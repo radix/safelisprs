@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use parser::{self, Identifier, AST};
-use transforms::closure_transform;
+use transforms::transform_closures_in_module;
 
 /// A Package can either represent a "program" or a "library".
 /// If a `main` is provided, then it can be executed as a program directly.
@@ -217,7 +217,7 @@ pub fn compile_module(
   name: &str,
   asts: &[AST],
 ) -> Result<Vec<(String, CompilingCallable)>, String> {
-  let asts = closure_transform(asts)?;
+  let asts = transform_closures_in_module(asts)?;
   let mut functions = vec![];
   for ast in &asts {
     match ast {
