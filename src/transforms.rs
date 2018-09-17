@@ -45,9 +45,8 @@ pub fn closure_transform(items: &[AST]) -> Result<Vec<AST>, String> {
   //! We transform any usage of closures (i.e., nested functions that make use of
   //! variables from their lexical scope) into mostly plain functions.
   //!
-  //! 1. nested functions (regardless of whether they use enclosing variables) are
-  //!    lifted (I'm not sure if this is actually an important thing to happen at
-  //!    the AST level, but it makes things easier).
+  //! 1. All nested functions are lifted to the top level and have their names mangled,
+  //!    regardless of whether they need closures.
   //! 2. variables used in closures have their values wrapped in Cell, and their
   //!    usage wrapped in DerefCell.
   //! 3. Free variables in closure-functions get converted to parameters, which
@@ -70,8 +69,7 @@ pub fn closure_transform(items: &[AST]) -> Result<Vec<AST>, String> {
   Ok(result)
 }
 
-
-fn closurize_function(func: &Function) -> Result<Vec<AST>, String> {
+fn closurize_function(outer_func: &Function) -> Result<Vec<AST>, String> {
   //! We need to do the following things:
   //! 1. look for inner functions
   //! 2. scan for their free variables
@@ -80,27 +78,57 @@ fn closurize_function(func: &Function) -> Result<Vec<AST>, String> {
   //! 5. ALSO: only allow calls to the inner function if all the outer variables
   //!    have been initialized...
   let mut top_level = vec![];
-  let code = {
+  let mut locals = hashset!{};
+  locals.extend(outer_func.params);
+  let mut all_used_free_vars = hashset!{};
+  let code = { // TODO: NLL will probably allow this scope to go away
     let mut transformer = |ast: &AST| -> Result<Option<AST>, String> {
       match ast {
-        AST::DefineFn(func) => {
-          // TODO: mangle the name!
-          top_level.push(AST::DefineFn(func.clone()));
-          Ok(Some(AST::Variable(func.name.clone())))
+        AST::Let(name, _v) => {
+          locals.insert(name.clone());
+          Ok(None)
         }
-        _ => Ok(None)
+        AST::DefineFn(inner_func) => {
+          // TODO: uniquify the name!
+          let new_name = format!("{}_closure", inner_func.name);
+          // TODO: search inner_func.code for free variables
+          let (used_free_vars, inner_func) = transform_free_vars(inner_func, locals)?;
+          all_used_free_vars.extend(used_free_vars);
+          // TODO: search func.params and func.code for definitions with the same names
+          // TODO: If there are any matches, add them as prefixes to the parameter list
+          //       of the transformed inner_func
+          // TODO: transform inner_func accesses to those variables to use DerefCell
+          // TODO: figure out how the hell to do this while allowing referring to the function
+          //       before defining the variable...?
+          //         - How the heck? We want to make sure the variables a closure uses are defined
+          //           by the time the closure is *called*, or, as a compromise, by the time the
+          //           closure *escapes* the defining function. that means: when it is passed to
+          //           another function, or when it is returned from this function.
+          //         - In the meantime, we can just require that variables are initialized before
+          //           the closure is used.
+          top_level.push(AST::DefineFn(Function {
+            name: new_name,
+            ..inner_func.clone()
+          }));
+          Ok(Some(AST::Variable(inner_func.name.clone())))
+        }
+        _ => Ok(None),
       }
     };
-    transform_multi(func.code.iter(), &mut transformer)?
+    transform_multi(outer_func.code.iter(), &mut transformer)?
   };
-  top_level.push(AST::DefineFn(Function { name: func.name.clone(), params: func.params.clone(), code}));
+  // TODO: transform the *outer* function to use `PartialApply` with `Cell`ed up values
+  let outer_func = transform_declared_vars(outer_func, all_used_free_vars)?;
+
+  top_level.push(AST::DefineFn(Function {
+    name: outer_func.name.clone(),
+    params: outer_func.params.clone(),
+    code,
+  }));
   Ok(top_level)
 }
 
-
-
 // General transformation machinery
-
 
 fn transform_multi<'a, T>(
   asts: impl Iterator<Item = &'a AST>,
@@ -184,7 +212,7 @@ mod test {
   #[test]
   fn test_transform_no_replacement_closure() {
     let ast = AST::Let("a".to_string(), Box::new(AST::Int(42)));
-    let mut transformer = |a: &AST| {Ok(None)};
+    let mut transformer = |a: &AST| Ok(None);
     assert_eq!(transform(&ast, &mut transformer).unwrap(), ast);
   }
 }
