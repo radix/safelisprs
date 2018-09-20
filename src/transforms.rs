@@ -142,16 +142,44 @@ fn transform_free_vars(
   environment: &HashSet<String>,
 ) -> Result<(HashSet<String>, Function), String> {
   //! Transform a function so that any free variables are converted to Celled parameters.
+  //! Also returns the names of any free variables used in the function.
+  //! * `environment` - the names that are defined in the containing function.
   let mut locals = hashset!{};
-  let mut code = {
-    let mut transformer = |ast: &AST| Ok(None);
+  let mut free_vars = hashset!{};
+  let code = {
+    let mut transformer = |ast: &AST| {
+      match ast {
+        AST::Let(name, _v) => {
+          locals.insert(name.clone());
+          Ok(None)
+        }
+        AST::Variable(ref name) => {
+          if environment.contains(name) {
+            free_vars.insert(name.clone());
+            Ok(Some(AST::DerefCell(Box::new(AST::Variable(name.clone())))))
+          } else {
+            Ok(None)
+          }
+        }
+        // Specifically avoid recursing into function definitions, we're only doing one at a time.
+        // TODO: actually we need to closurize these too!!!???
+        AST::DefineFn(_) => Ok(Some(ast.clone())),
+        _ => Ok(None),
+      }
+    };
     transform_multi(func.code.iter(), &mut transformer)?
   };
+  println!(
+    free_vars
+  );
+  let mut params = vec![];
+  params.extend(free_vars.iter().cloned());
+  params.extend(func.params.clone());
   Ok((
-    locals,
+    free_vars,
     Function {
       name: func.name.clone(),
-      params: func.params.clone(),
+      params,
       code,
     },
   ))
@@ -183,6 +211,8 @@ where
 {
   //! Recursively transform an AST.
   //! If the visitor returns None, then the original AST is used and is then traversed.
+  //! If the visitor returns a new AST, then it is used to replace the original AST.
+  //! The new AST is not visited.
   let result = match transformer(ast)? {
     Some(replacement) => replacement,
     None => match ast {
@@ -249,7 +279,7 @@ mod test {
   #[test]
   fn test_transform_no_replacement_closure() -> Result<(), String> {
     let ast = AST::Let("a".to_string(), Box::new(AST::Int(42)));
-    let mut transformer = |a: &AST| Ok(None);
+    let mut transformer = |_: &AST| Ok(None);
     assert_eq!(transform(&ast, &mut transformer)?, ast);
     Ok(())
   }
