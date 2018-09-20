@@ -87,14 +87,9 @@ fn closurize_function(outer_func: &Function) -> Result<Vec<AST>, String> {
   let code = transform_multi(outer_func.code.iter(), &mut |ast: &AST| {
     _closure_code_transform(ast, &mut locals, &mut all_used_free_vars, &mut top_level)
   })?;
-  // TODO: transform the *outer* function to use `PartialApply` with `Cell`ed up values
   let outer_func = transform_declared_vars(outer_func, &all_used_free_vars)?;
 
-  top_level.push(AST::DefineFn(Function {
-    name: outer_func.name.clone(),
-    params: outer_func.params.clone(),
-    code,
-  }));
+  top_level.push(AST::DefineFn(outer_func));
   Ok(top_level)
 }
 
@@ -115,10 +110,6 @@ fn _closure_code_transform(
       let new_name = format!("{}_closure", inner_func.name);
       let (free_vars, inner_func) = transform_free_vars(inner_func, locals)?;
       all_used_free_vars.extend(free_vars);
-      // TODO: search func.params and func.code for definitions with the same names
-      // TODO: If there are any matches, add them as prefixes to the parameter list
-      //       of the transformed inner_func
-      // TODO: transform inner_func accesses to those variables to use DerefCell
       // TODO: figure out how the hell to do this while allowing referring to the function
       //       before defining the variable...?
       //         - How the heck? We want to make sure the variables a closure uses are defined
@@ -186,7 +177,43 @@ fn transform_declared_vars(
   func: &Function,
   all_used_free_vars: &HashSet<String>,
 ) -> Result<Function, String> {
-  Ok(func.clone())
+  //! Transform a function which *contains* closures so that any variables that are
+  //! 1. defined in the outer functions
+  //! 2. used in any inner functions
+  //! are wrapped in Cells.
+  println!("[RADIX] transform_declared_vars all_used_free_vars {:#?}", all_used_free_vars);
+  let code = {
+    let mut transformer = |ast: &AST| {
+      match ast {
+        AST::Let(name, expr) => {
+          println!("[RADIX] a let for {:?}", name);
+          if all_used_free_vars.contains(name) {
+            println!("[RADIX] Great!... Wrapping in Cell....");
+            Ok(Some(AST::Let(name.clone(), Box::new(AST::Cell(expr.clone())))))
+          } else {
+            Ok(None)
+          }
+        }
+        AST::Variable(ref name) => {
+          if all_used_free_vars.contains(name) {
+            Ok(Some(AST::DerefCell(Box::new(AST::Variable(name.clone())))))
+          } else {
+            Ok(None)
+          }
+        }
+        // Specifically avoid recursing into function definitions, we're only doing one at a time.
+        // TODO: actually we need to closurize these too!!!???
+        AST::DefineFn(_) => Ok(Some(ast.clone())),
+        _ => Ok(None),
+      }
+    };
+    transform_multi(func.code.iter(), &mut transformer)?
+  };
+  Ok(Function {
+    name: func.name.clone(),
+    params: func.params.clone(),
+    code,
+  })
 }
 
 // General transformation machinery
