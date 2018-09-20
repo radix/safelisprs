@@ -169,9 +169,6 @@ fn transform_free_vars(
     };
     transform_multi(func.code.iter(), &mut transformer)?
   };
-  println!(
-    free_vars
-  );
   let mut params = vec![];
   params.extend(free_vars.iter().cloned());
   params.extend(func.params.clone());
