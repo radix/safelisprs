@@ -39,7 +39,7 @@ foo:
   CallDynamic
 */
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use parser::{Function, AST};
 
@@ -82,12 +82,17 @@ fn closurize_function(outer_func: &Function) -> Result<Vec<AST>, String> {
   let mut top_level = vec![];
   let mut locals = hashset!{};
   locals.extend(outer_func.params.iter().cloned());
-  let mut all_used_free_vars = hashset!{};
+  let mut all_closure_bindings = hashmap!{};
 
   let code = transform_multi(outer_func.code.iter(), &mut |ast: &AST| {
-    _closure_code_transform(ast, &mut locals, &mut all_used_free_vars, &mut top_level)
+    _closure_code_transform(ast, &mut locals, &mut all_closure_bindings, &mut top_level)
   })?;
-  let outer_func = transform_declared_vars(outer_func, &all_used_free_vars)?;
+  let outer_func = Function {
+    name: outer_func.name.clone(),
+    params: outer_func.params.clone(),
+    code,
+  };
+  let outer_func = transform_declared_vars(&outer_func, &all_closure_bindings)?;
 
   top_level.push(AST::DefineFn(outer_func));
   Ok(top_level)
@@ -96,20 +101,20 @@ fn closurize_function(outer_func: &Function) -> Result<Vec<AST>, String> {
 fn _closure_code_transform(
   ast: &AST,
   locals: &mut HashSet<String>,
-  all_used_free_vars: &mut HashSet<String>,
+  all_closure_bindings: &mut HashMap<String, Vec<String>>,
   top_level: &mut Vec<AST>,
 ) -> Result<Option<AST>, String> {
   //! This is a transformer suitable for passing to `transform`.
-  match ast {
+  let new_ast = match ast {
     AST::Let(name, _v) => {
       locals.insert(name.clone());
-      Ok(None)
+      None
     }
     AST::DefineFn(inner_func) => {
       // TODO: uniquify the name!
       let new_name = format!("{}_closure", inner_func.name);
       let (free_vars, inner_func) = transform_free_vars(inner_func, locals)?;
-      all_used_free_vars.extend(free_vars);
+      all_closure_bindings.insert(inner_func.name.clone(), free_vars.clone());
       // TODO: figure out how the hell to do this while allowing referring to the function
       //       before defining the variable...?
       //         - How the heck? We want to make sure the variables a closure uses are defined
@@ -122,21 +127,22 @@ fn _closure_code_transform(
         name: new_name.clone(),
         ..inner_func
       }));
-      Ok(Some(AST::Variable(new_name)))
+      Some(AST::PartialApply(Box::new(AST::Variable(new_name)), free_vars.iter().cloned().map(AST::Variable).collect()))
     }
-    _ => Ok(None),
-  }
+    _ => None,
+  };
+  Ok(new_ast)
 }
 
 fn transform_free_vars(
   func: &Function,
   environment: &HashSet<String>,
-) -> Result<(HashSet<String>, Function), String> {
+) -> Result<(Vec<String>, Function), String> {
   //! Transform a function so that any free variables are converted to Celled parameters.
   //! Also returns the names of any free variables used in the function.
   //! * `environment` - the names that are defined in the containing function.
   let mut locals = hashset!{};
-  let mut free_vars = hashset!{};
+  let mut free_vars = vec![];
   let code = {
     let mut transformer = |ast: &AST| {
       match ast {
@@ -146,7 +152,9 @@ fn transform_free_vars(
         }
         AST::Variable(ref name) => {
           if environment.contains(name) {
-            free_vars.insert(name.clone());
+            if !free_vars.contains(name) {
+              free_vars.push(name.clone());
+            }
             Ok(Some(AST::DerefCell(Box::new(AST::Variable(name.clone())))))
           } else {
             Ok(None)
@@ -175,28 +183,46 @@ fn transform_free_vars(
 
 fn transform_declared_vars(
   func: &Function,
-  all_used_free_vars: &HashSet<String>,
+  closure_bindings: &HashMap<String, Vec<String>>,
 ) -> Result<Function, String> {
   //! Transform a function which *contains* closures so that any variables that are
   //! 1. defined in the outer functions
   //! 2. used in any inner functions
   //! are wrapped in Cells.
-  println!("[RADIX] transform_declared_vars all_used_free_vars {:#?}", all_used_free_vars);
+
+  let mut all_used_free_vars = hashset!{};
+  for bindings in closure_bindings.values() {
+    all_used_free_vars.extend(bindings.iter().cloned());
+  }
+  println!(
+    "[RADIX] transform_declared_vars closure_bindings {:?}",
+    closure_bindings
+  );
   let code = {
     let mut transformer = |ast: &AST| {
       match ast {
+        // Variable definitions need to wrap their expression in Cell.
         AST::Let(name, expr) => {
-          println!("[RADIX] a let for {:?}", name);
           if all_used_free_vars.contains(name) {
-            println!("[RADIX] Great!... Wrapping in Cell....");
-            Ok(Some(AST::Let(name.clone(), Box::new(AST::Cell(expr.clone())))))
+            Ok(Some(AST::Let(
+              name.clone(),
+              Box::new(AST::Cell(expr.clone())),
+            )))
           } else {
             Ok(None)
           }
         }
+        // Variable *usage* needs to be wrapped in a DerefCell.
         AST::Variable(ref name) => {
+          println!("[RADIX] wut dis var {:?}", name);
           if all_used_free_vars.contains(name) {
             Ok(Some(AST::DerefCell(Box::new(AST::Variable(name.clone())))))
+          } else if let Some(params) = closure_bindings.get(name) {
+            println!("[RADIX] omg referring to the closure itself");
+            Ok(Some(AST::PartialApply(
+              Box::new(ast.clone()),
+              params.iter().cloned().map(AST::Variable).collect(),
+            )))
           } else {
             Ok(None)
           }
@@ -328,7 +354,10 @@ mod test {
         params: vec![],
         code: vec![
           Let("a".to_string(), Box::new(Cell(Box::new(Int(1))))),
-          PartialApply(Box::new(Variable("inner_closure".to_string())), vec![]),
+          PartialApply(
+            Box::new(Variable("inner_closure".to_string())),
+            vec![AST::Variable("a".to_string())],
+          ),
         ],
       }),
     ];
