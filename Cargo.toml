@@ -14,3 +14,4 @@ bincode = "1.0"
 failure = "0.1"
 
 [dev-dependencies]
+pretty_assertions = "0.5.1"
