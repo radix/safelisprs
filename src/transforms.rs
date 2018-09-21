@@ -55,10 +55,6 @@ pub fn transform_closures_in_module(items: &[AST]) -> Result<Vec<AST>, String> {
   //!    are expected to be passed as Cells.
   //! 4. We set a local variable with the result of a MakeClosure where the inner
   //!    function was defined.
-  //!
-  // TODO: Disallow any invocation or returning of a closure before all of its
-  // cells have been initialized.
-  // TODO: "drop" the (let cname (make-closure ...)) to the lowest point possible
 
   let mut result = vec![];
   for item in items {
@@ -72,13 +68,13 @@ pub fn transform_closures_in_module(items: &[AST]) -> Result<Vec<AST>, String> {
 }
 
 fn closurize_function(outer_func: &Function) -> Result<Vec<AST>, String> {
-  //! We need to do the following things:
-  //! 1. look for inner functions
-  //! 2. scan for their free variables
-  //! 3. scan THIS function for matching variable declarations
-  //! 4. If there are matches: wrap the declarations with (cell)
-  //! 5. ALSO: only allow calls to the inner function if all the outer variables
-  //!    have been initialized...
+  //! Do the following things to a top-levele function:
+  //! 1. accumulate variable definitions
+  //! 2. for any inner function, check for uses of outer variables, and convert them to DerefCell
+  //! 3. Remove those inner functions from the outer function and emit them as (mangled) top-level functions.
+  //! 4. then, transform the outer function to wrap those inner-used variables in Cell.
+  // TODO: Handle parameters to the outer function which are used in inner functions.
+  // Need to convert these to `fn outer(x) { let x = Cell(x); ...}
   let mut top_level = vec![];
   let mut locals = hashset!{};
   locals.extend(outer_func.params.iter().cloned());
@@ -105,6 +101,7 @@ fn _closure_code_transform(
   top_level: &mut Vec<AST>,
 ) -> Result<Option<AST>, String> {
   //! This is a transformer suitable for passing to `transform`.
+  //! See `closurize_function`.
   let new_ast = match ast {
     AST::Let(name, _v) => {
       locals.insert(name.clone());
@@ -112,7 +109,7 @@ fn _closure_code_transform(
     }
     AST::DefineFn(inner_func) => {
       // TODO: uniquify the name!
-      let new_name = format!("{}_closure", inner_func.name);
+      let new_name = format!("{}:[closure]", inner_func.name);
       let (free_vars, inner_func) = transform_free_vars(inner_func, locals)?;
       all_closure_bindings.insert(inner_func.name.clone(), free_vars.clone());
       // TODO: figure out how the hell to do this while allowing referring to the function
@@ -127,7 +124,8 @@ fn _closure_code_transform(
         name: new_name.clone(),
         ..inner_func
       }));
-      Some(AST::PartialApply(Box::new(AST::Variable(new_name)), free_vars.iter().cloned().map(AST::Variable).collect()))
+      Some(AST::Variable(inner_func.name.clone()))
+      // Some(AST::PartialApply(Box::new(AST::Variable(new_name)), free_vars.iter().cloned().map(AST::Variable).collect()))
     }
     _ => None,
   };
@@ -220,7 +218,7 @@ fn transform_declared_vars(
           } else if let Some(params) = closure_bindings.get(name) {
             println!("[RADIX] omg referring to the closure itself");
             Ok(Some(AST::PartialApply(
-              Box::new(ast.clone()),
+              Box::new(AST::Variable(format!("{}:[closure]", name))),
               params.iter().cloned().map(AST::Variable).collect(),
             )))
           } else {
@@ -345,7 +343,7 @@ mod test {
     use parser::AST::*;
     let expected = vec![
       AST::DefineFn(Function {
-        name: "inner_closure".to_string(),
+        name: "inner:[closure]".to_string(),
         params: vec!["a".to_string()],
         code: vec![DerefCell(Box::new(Variable("a".to_string())))],
       }),
@@ -355,7 +353,7 @@ mod test {
         code: vec![
           Let("a".to_string(), Box::new(Cell(Box::new(Int(1))))),
           PartialApply(
-            Box::new(Variable("inner_closure".to_string())),
+            Box::new(Variable("inner:[closure]".to_string())),
             vec![AST::Variable("a".to_string())],
           ),
         ],
