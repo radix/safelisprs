@@ -32,8 +32,6 @@ fn closurize_function(outer_func: &Function) -> Result<Vec<AST>, String> {
   //! 2. for any inner function, check for uses of outer variables, and convert them to DerefCell
   //! 3. Remove those inner functions from the outer function and emit them as (mangled) top-level functions.
   //! 4. then, transform the outer function to wrap those inner-used variables in Cell.
-  // TODO: Handle parameters to the outer function which are used in inner functions.
-  // Need to convert these to `fn outer(x) { let x = Cell(x); ...}
   let mut top_level = vec![];
   let mut locals = hashset!{};
   locals.extend(outer_func.params.iter().cloned());
@@ -42,6 +40,7 @@ fn closurize_function(outer_func: &Function) -> Result<Vec<AST>, String> {
   let code = transform_multi(outer_func.code.iter(), &mut |ast: &AST| {
     _closure_code_transform(ast, &mut locals, &mut all_closure_bindings, &mut top_level)
   })?;
+  // If a closure uses one of our parameters, we need to insert a `(let param (cell param))` at the top.
   let outer_func = Function {
     name: outer_func.name.clone(),
     params: outer_func.params.clone(),
@@ -321,6 +320,7 @@ mod test {
     //! Cell.
     let source = "
       (fn outer (par)
+        (let b (+ par 1))
         (fn inner () par))";
     let asts = read_multiple(source)?;
     let new_asts = transform_closures_in_module(&asts)?;
@@ -338,6 +338,13 @@ mod test {
           Let(
             "par".to_string(),
             Box::new(Cell(Box::new(Variable("par".to_string())))),
+          ),
+          Let(
+            "b".to_string(),
+            Box::new(Call(
+              Box::new(Variable("+".to_string())),
+              vec![DerefCell(Box::new(Variable("par".to_string()))), Int(1)],
+            )),
           ),
           PartialApply(
             Box::new(Variable("inner:[closure]".to_string())),
