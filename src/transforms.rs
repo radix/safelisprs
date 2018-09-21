@@ -1,60 +1,19 @@
-/*
-
-This would convert an AST like:
-
-(fn foo ()
-  (let a 1)
-  (fn inner () a)
-  (inner)
-)
-
-to...
-
-(fn foo/inner (a)
-  (deref-cell a))
-
-(fn foo ()
-  (let a (cell 1))
-  (let foo/inner (make-closure "foo/inner" a))
-  (foo/inner))
-
-This is then more easily compiled to:
-
-foo/inner:
-  LoadLocal 0
-  DerefCell
-  Return
-
-foo:
-  PushInt 1
-  MakeCell
-  SetLocal 0
-
-  LoadLocal 0
-  MakeFunctionRef "foo/inner"
-  MakeClosure
-  SetLocal 1
-
-  LoadLocal 1
-  CallDynamic
-*/
+//! AST transformations.
 
 use std::collections::{HashMap, HashSet};
 
 use parser::{Function, AST};
 
 pub fn transform_closures_in_module(items: &[AST]) -> Result<Vec<AST>, String> {
-  //! We transform any usage of closures (i.e., nested functions that make use of
-  //! variables from their lexical scope) into mostly plain functions.
-  //!
-  //! 1. All nested functions are lifted to the top level and have their names mangled,
-  //!    regardless of whether they need closures.
-  //! 2. variables used in closures have their values wrapped in Cell, and their
-  //!    usage wrapped in DerefCell.
-  //! 3. Free variables in closure-functions get converted to parameters, which
-  //!    are expected to be passed as Cells.
-  //! 4. We set a local variable with the result of a MakeClosure where the inner
-  //!    function was defined.
+  //! There isn't technically anything called a "closure" in either the runtime
+  //! or compile time of Safelisp. Instead, nested functions are represented as
+  //! top-level functions. Any variables they use from their definition
+  //! environment are passed in as parameters. However, to allow shared
+  //! mutation, they are wrapped up in Cells and all usage both inside the
+  //! nested function and in the outer function is transformed to deref the
+  //! contents from the cell. Then, to actually represent the "closure" (i.e.
+  //! the callable object which has the environment bound to it), we
+  //! PartialApply the inner function with all the cells that it uses.
 
   let mut result = vec![];
   for item in items {
@@ -108,39 +67,33 @@ fn _closure_code_transform(
       None
     }
     AST::DefineFn(inner_func) => {
-      // TODO: uniquify the name!
+      // TODO: handle name mangling / uniquification in a better way.
       let new_name = format!("{}:[closure]", inner_func.name);
-      let (free_vars, inner_func) = transform_free_vars(inner_func, locals)?;
-      all_closure_bindings.insert(inner_func.name.clone(), free_vars.clone());
-      // TODO: figure out how the hell to do this while allowing referring to the function
-      //       before defining the variable...?
-      //         - How the heck? We want to make sure the variables a closure uses are defined
-      //           by the time the closure is *called*, or, as a compromise, by the time the
-      //           closure *escapes* the defining function. that means: when it is passed to
-      //           another function, or when it is returned from this function.
-      //         - In the meantime, we can just require that variables are initialized before
-      //           the closure is used.
+      let (used_env_vars, inner_func) = transform_inner_func(inner_func, locals)?;
+      all_closure_bindings.insert(inner_func.name.clone(), used_env_vars.clone());
       top_level.push(AST::DefineFn(Function {
         name: new_name.clone(),
         ..inner_func
       }));
+      // Replace the definition of the function with a reference to its name.
+      // Later we will transform this Variable to a PartialApply(variable, cell_args...),
+      // *if* it uses variables from the environment.
       Some(AST::Variable(inner_func.name.clone()))
-      // Some(AST::PartialApply(Box::new(AST::Variable(new_name)), free_vars.iter().cloned().map(AST::Variable).collect()))
     }
     _ => None,
   };
   Ok(new_ast)
 }
 
-fn transform_free_vars(
+fn transform_inner_func(
   func: &Function,
   environment: &HashSet<String>,
 ) -> Result<(Vec<String>, Function), String> {
   //! Transform a function so that any free variables are converted to Celled parameters.
-  //! Also returns the names of any free variables used in the function.
+  //! Also returns the names of any variables used in the function that come from the environment.
   //! * `environment` - the names that are defined in the containing function.
   let mut locals = hashset!{};
-  let mut free_vars = vec![];
+  let mut env_vars = vec![];
   let code = {
     let mut transformer = |ast: &AST| {
       match ast {
@@ -150,8 +103,8 @@ fn transform_free_vars(
         }
         AST::Variable(ref name) => {
           if environment.contains(name) {
-            if !free_vars.contains(name) {
-              free_vars.push(name.clone());
+            if !env_vars.contains(name) {
+              env_vars.push(name.clone());
             }
             Ok(Some(AST::DerefCell(Box::new(AST::Variable(name.clone())))))
           } else {
@@ -167,10 +120,10 @@ fn transform_free_vars(
     transform_multi(func.code.iter(), &mut transformer)?
   };
   let mut params = vec![];
-  params.extend(free_vars.iter().cloned());
+  params.extend(env_vars.iter().cloned());
   params.extend(func.params.clone());
   Ok((
-    free_vars,
+    env_vars,
     Function {
       name: func.name.clone(),
       params,
@@ -192,10 +145,6 @@ fn transform_declared_vars(
   for bindings in closure_bindings.values() {
     all_used_free_vars.extend(bindings.iter().cloned());
   }
-  println!(
-    "[RADIX] transform_declared_vars closure_bindings {:?}",
-    closure_bindings
-  );
   let code = {
     let mut transformer = |ast: &AST| {
       match ast {
@@ -212,15 +161,17 @@ fn transform_declared_vars(
         }
         // Variable *usage* needs to be wrapped in a DerefCell.
         AST::Variable(ref name) => {
-          println!("[RADIX] wut dis var {:?}", name);
           if all_used_free_vars.contains(name) {
             Ok(Some(AST::DerefCell(Box::new(AST::Variable(name.clone())))))
           } else if let Some(params) = closure_bindings.get(name) {
-            println!("[RADIX] omg referring to the closure itself");
-            Ok(Some(AST::PartialApply(
-              Box::new(AST::Variable(format!("{}:[closure]", name))),
-              params.iter().cloned().map(AST::Variable).collect(),
-            )))
+            if params.len() > 0 {
+              Ok(Some(AST::PartialApply(
+                Box::new(AST::Variable(format!("{}:[closure]", name))),
+                params.iter().cloned().map(AST::Variable).collect(),
+              )))
+            } else {
+              Ok(Some(AST::Variable(format!("{}:[closure]", name))))
+            }
           } else {
             Ok(None)
           }
@@ -384,7 +335,10 @@ mod test {
         name: "outer".to_string(),
         params: vec!["par".to_string()],
         code: vec![
-          Let("par".to_string(), Box::new(Cell(Box::new(Variable("par".to_string()))))),
+          Let(
+            "par".to_string(),
+            Box::new(Cell(Box::new(Variable("par".to_string())))),
+          ),
           PartialApply(
             Box::new(Variable("inner:[closure]".to_string())),
             vec![AST::Variable("par".to_string())],
@@ -395,4 +349,65 @@ mod test {
     assert_eq!(new_asts, expected);
     Ok(())
   }
+
+  #[test]
+  fn non_closure_inner_fn() -> Result<(), String> {
+    let source = "
+      (fn outer ()
+        (fn inner () 1))";
+    let asts = read_multiple(source)?;
+    let new_asts = transform_closures_in_module(&asts)?;
+    use parser::AST::*;
+    let expected = vec![
+      AST::DefineFn(Function {
+        name: "inner:[closure]".to_string(),
+        params: vec![],
+        code: vec![Int(1)],
+      }),
+      AST::DefineFn(Function {
+        name: "outer".to_string(),
+        params: vec![],
+        code: vec![Variable("inner:[closure]".to_string())],
+      }),
+    ];
+    assert_eq!(new_asts, expected);
+    Ok(())
+  }
+
+  #[test]
+  fn tricksy_inner_var() -> Result<(), String> {
+    let source = "
+      (fn outer ()
+        (let a 1)
+        (fn inner ()
+          (let a 2)
+          a))";
+    let asts = read_multiple(source)?;
+    let new_asts = transform_closures_in_module(&asts)?;
+    use parser::AST::*;
+    let expected = vec![
+      AST::DefineFn(Function {
+        name: "inner:[closure]".to_string(),
+        params: vec![],
+        code: vec![
+          Let("a".to_string(), Box::new(Int(2))),
+          Variable("a".to_string()),
+        ],
+      }),
+      AST::DefineFn(Function {
+        name: "outer".to_string(),
+        params: vec!["a".to_string()],
+        code: vec![
+          Let("a".to_string(), Box::new(Int(1))),
+          PartialApply(
+            Box::new(Variable("inner:[closure]".to_string())),
+            vec![AST::Variable("par".to_string())],
+          ),
+        ],
+      }),
+    ];
+    assert_eq!(new_asts, expected);
+    Ok(())
+  }
+
 }
