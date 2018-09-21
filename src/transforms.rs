@@ -373,6 +373,8 @@ mod test {
 
   #[test]
   fn non_closure_inner_fn() -> Result<(), String> {
+    //! If an inner function doesn't use any variables from the outer function's
+    //! environment, then it is not PartialApply'd.
     let source = "
       (fn outer ()
         (fn inner () 1))";
@@ -396,7 +398,10 @@ mod test {
   }
 
   #[test]
-  fn tricksy_inner_var() -> Result<(), String> {
+  fn tricksy_inner_var_non_closure() -> Result<(), String> {
+    //! Inner functions which *define* variables that happen to have the same
+    //! name as a variable in an outer function will not bring that outer
+    //! variable in as a cell.
     let source = "
       (fn outer ()
         (let a 1)
@@ -417,13 +422,10 @@ mod test {
       }),
       AST::DefineFn(Function {
         name: "outer".to_string(),
-        params: vec!["a".to_string()],
+        params: vec![],
         code: vec![
           Let("a".to_string(), Box::new(Int(1))),
-          PartialApply(
-            Box::new(Variable("inner:[closure]".to_string())),
-            vec![AST::Variable("par".to_string())],
-          ),
+          Variable("inner:[closure]".to_string()),
         ],
       }),
     ];
