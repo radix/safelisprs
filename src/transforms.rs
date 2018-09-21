@@ -359,13 +359,39 @@ mod test {
         ],
       }),
     ];
+    assert_eq!(new_asts, expected);
+    Ok(())
+  }
 
-    // let expected_source = "
-    // (fn inner_closure (a)
-    //   (deref-cell a))
-    // (fn outer ()
-    //   (let a (cell 1))
-    //   (partial-apply inner_closure a))";
+  #[test]
+  fn cell_pack_outer_parameters() -> Result<(), String> {
+    //! When an outer function takes a parameter that is used by an inner
+    //! function, it is transformed such that the parameter is rebound in a
+    //! Cell.
+    let source = "
+      (fn outer (par)
+        (fn inner () par))";
+    let asts = read_multiple(source)?;
+    let new_asts = transform_closures_in_module(&asts)?;
+    use parser::AST::*;
+    let expected = vec![
+      AST::DefineFn(Function {
+        name: "inner:[closure]".to_string(),
+        params: vec!["par".to_string()],
+        code: vec![DerefCell(Box::new(Variable("par".to_string())))],
+      }),
+      AST::DefineFn(Function {
+        name: "outer".to_string(),
+        params: vec!["par".to_string()],
+        code: vec![
+          Let("par".to_string(), Box::new(Cell(Box::new(Variable("par".to_string()))))),
+          PartialApply(
+            Box::new(Variable("inner:[closure]".to_string())),
+            vec![AST::Variable("par".to_string())],
+          ),
+        ],
+      }),
+    ];
     assert_eq!(new_asts, expected);
     Ok(())
   }
