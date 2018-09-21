@@ -81,7 +81,7 @@ fn _closure_code_transform(
     }
     AST::DefineFn(inner_func) => {
       // TODO: handle name mangling / uniquification in a better way.
-      let new_name = format!("{}:[closure]", inner_func.name);
+      let new_name = format!("{}:(closure)", inner_func.name);
       let (used_env_vars, inner_func) = transform_inner_func(inner_func, locals)?;
       all_closure_bindings.insert(inner_func.name.clone(), used_env_vars.clone());
       top_level.push(AST::DefineFn(Function {
@@ -179,11 +179,11 @@ fn transform_declared_vars(
           } else if let Some(params) = closure_bindings.get(name) {
             if params.len() > 0 {
               Ok(Some(AST::PartialApply(
-                Box::new(AST::Variable(format!("{}:[closure]", name))),
+                Box::new(AST::Variable(format!("{}:(closure)", name))),
                 params.iter().cloned().map(AST::Variable).collect(),
               )))
             } else {
-              Ok(Some(AST::Variable(format!("{}:[closure]", name))))
+              Ok(Some(AST::Variable(format!("{}:(closure)", name))))
             }
           } else {
             Ok(None)
@@ -307,7 +307,7 @@ mod test {
     use parser::AST::*;
     let expected = vec![
       AST::DefineFn(Function {
-        name: "inner:[closure]".to_string(),
+        name: "inner:(closure)".to_string(),
         params: vec!["a".to_string()],
         code: vec![DerefCell(Box::new(Variable("a".to_string())))],
       }),
@@ -317,7 +317,7 @@ mod test {
         code: vec![
           Let("a".to_string(), Box::new(Cell(Box::new(Int(1))))),
           PartialApply(
-            Box::new(Variable("inner:[closure]".to_string())),
+            Box::new(Variable("inner:(closure)".to_string())),
             vec![AST::Variable("a".to_string())],
           ),
         ],
@@ -341,7 +341,7 @@ mod test {
     use parser::AST::*;
     let expected = vec![
       AST::DefineFn(Function {
-        name: "inner:[closure]".to_string(),
+        name: "inner:(closure)".to_string(),
         params: vec!["par".to_string()],
         code: vec![DerefCell(Box::new(Variable("par".to_string())))],
       }),
@@ -361,7 +361,7 @@ mod test {
             )),
           ),
           PartialApply(
-            Box::new(Variable("inner:[closure]".to_string())),
+            Box::new(Variable("inner:(closure)".to_string())),
             vec![AST::Variable("par".to_string())],
           ),
         ],
@@ -383,14 +383,14 @@ mod test {
     use parser::AST::*;
     let expected = vec![
       AST::DefineFn(Function {
-        name: "inner:[closure]".to_string(),
+        name: "inner:(closure)".to_string(),
         params: vec![],
         code: vec![Int(1)],
       }),
       AST::DefineFn(Function {
         name: "outer".to_string(),
         params: vec![],
-        code: vec![Variable("inner:[closure]".to_string())],
+        code: vec![Variable("inner:(closure)".to_string())],
       }),
     ];
     assert_eq!(new_asts, expected);
@@ -413,7 +413,7 @@ mod test {
     use parser::AST::*;
     let expected = vec![
       AST::DefineFn(Function {
-        name: "inner:[closure]".to_string(),
+        name: "inner:(closure)".to_string(),
         params: vec![],
         code: vec![
           Let("a".to_string(), Box::new(Int(2))),
@@ -425,7 +425,49 @@ mod test {
         params: vec![],
         code: vec![
           Let("a".to_string(), Box::new(Int(1))),
-          Variable("inner:[closure]".to_string()),
+          Variable("inner:(closure)".to_string()),
+        ],
+      }),
+    ];
+    assert_eq!(new_asts, expected);
+    Ok(())
+  }
+
+  #[test]
+  fn tricksier_inner_var_closure() -> Result<(), String> {
+    //! Inner functions which use and *then* shadow outer variables will still
+    //! be treated as closures, but only the variable usages *before* the
+    //! rebinding will be treated as cells.
+    let source = "
+      (fn outer ()
+        (let a 1)
+        (fn inner ()
+          (let a (+ a 1))
+          a))";
+    let asts = read_multiple(source)?;
+    let new_asts = transform_closures_in_module(&asts)?;
+    use parser::AST::*;
+    let expected = vec![
+      AST::DefineFn(Function {
+        name: "inner:(closure)".to_string(),
+        params: vec!["a".to_string()],
+        code: vec![
+          Let(
+            "a".to_string(),
+            Box::new(Call(
+              Box::new(Variable("+".to_string())),
+              vec![DerefCell(Box::new(Variable("a".to_string()))), Int(1)],
+            )),
+          ),
+          Variable("a".to_string()),
+        ],
+      }),
+      AST::DefineFn(Function {
+        name: "outer".to_string(),
+        params: vec![],
+        code: vec![
+          Let("a".to_string(), Box::new(Int(1))),
+          Variable("inner:(closure)".to_string()),
         ],
       }),
     ];
