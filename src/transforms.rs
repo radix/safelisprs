@@ -40,13 +40,27 @@ fn closurize_function(outer_func: &Function) -> Result<Vec<AST>, String> {
   let code = transform_multi(outer_func.code.iter(), &mut |ast: &AST| {
     _closure_code_transform(ast, &mut locals, &mut all_closure_bindings, &mut top_level)
   })?;
-  // If a closure uses one of our parameters, we need to insert a `(let param (cell param))` at the top.
   let outer_func = Function {
     name: outer_func.name.clone(),
     params: outer_func.params.clone(),
     code,
   };
-  let outer_func = transform_declared_vars(&outer_func, &all_closure_bindings)?;
+  let mut outer_func = transform_declared_vars(&outer_func, &all_closure_bindings)?;
+
+  // If a closure uses one of our parameters, we need to insert a `(let param
+  // (cell param))` at the top.
+  let mut rebindings = vec![];
+  for bindings in all_closure_bindings.values() {
+    for binding in bindings {
+      if outer_func.params.contains(binding) {
+        rebindings.push(AST::Let(
+          binding.clone(),
+          Box::new(AST::Cell(Box::new(AST::Variable(binding.clone())))),
+        ));
+      }
+    }
+  }
+  outer_func.code.splice(0..0, rebindings);
 
   top_level.push(AST::DefineFn(outer_func));
   Ok(top_level)
