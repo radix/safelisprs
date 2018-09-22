@@ -144,9 +144,6 @@ fn _inner_func_transform(
       Ok(Some(AST::Let(name.clone(), Box::new(expr))))
     }
     AST::Variable(ref name) => {
-      println!("[RADIX] hey a variable {}", name);
-      println!("[RADIX] locals: {:?}", locals);
-      println!("[RADIX environment: {:?}", environment);
       if (!locals.contains(name)) && environment.contains(name) {
         if !env_vars.contains(name) {
           env_vars.push(name.clone());
@@ -491,8 +488,11 @@ mod test {
         name: "outer".to_string(),
         params: vec![],
         code: vec![
-          Let("a".to_string(), Box::new(Int(1))),
-          Variable("inner:(closure)".to_string()),
+          Let("a".to_string(), Box::new(AST::Cell(Box::new(Int(1))))),
+          PartialApply(
+            Box::new(Variable("inner:(closure)".to_string())),
+            vec![AST::Variable("a".to_string())],
+          ),
         ],
       }),
     ];
