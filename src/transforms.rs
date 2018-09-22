@@ -112,6 +112,9 @@ fn transform_inner_func(
     let mut transformer = |ast: &AST| {
       match ast {
         AST::Let(name, _v) => {
+          // Oh no! We need to transform `_v` before we record `name` as a new
+          // local! Our transformation machinery doesn't transform in
+          // eval-order, but rather in "parse" or "out-to-in" order.
           locals.insert(name.clone());
           Ok(None)
         }
