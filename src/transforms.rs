@@ -500,4 +500,26 @@ mod test {
     Ok(())
   }
 
+  #[test]
+  fn nested_closures() -> Result<(), String> {
+    let source = "
+      (fn outer ()
+        (let a 1)
+        (fn intermediate ()
+          (fn inner () a)
+        )
+        intermediate
+      )
+    ";
+    let asts = read_multiple(source)?;
+    let new_asts = transform_closures_in_module(&asts)?;
+    use parser::AST::*;
+    let expected = vec![
+      //TODO: fill in
+
+    ];
+    assert_eq!(new_asts, expected);
+    Ok(())
+  }
+
 }
