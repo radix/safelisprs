@@ -30,7 +30,8 @@ fn closurize_function(outer_func: &Function) -> Result<Vec<AST>, String> {
   //! Do the following things to a top-levele function:
   //! 1. accumulate variable definitions
   //! 2. for any inner function, check for uses of outer variables, and convert them to DerefCell
-  //! 3. Remove those inner functions from the outer function and emit them as (mangled) top-level functions.
+  //! 3. Remove those inner functions from the outer function and emit them as (mangled) top-level
+  //!    functions.
   //! 4. then, transform the outer function to wrap those inner-used variables in Cell.
   let mut top_level = vec![];
   let mut locals = hashset!{};
@@ -45,7 +46,7 @@ fn closurize_function(outer_func: &Function) -> Result<Vec<AST>, String> {
     params: outer_func.params.clone(),
     code,
   };
-  let mut outer_func = transform_declared_vars(&outer_func, &all_closure_bindings)?;
+  let mut outer_func = transform_outer_func(&outer_func, &all_closure_bindings)?;
 
   // If a closure uses one of our parameters, we need to insert a `(let param
   // (cell param))` at the top.
@@ -115,7 +116,7 @@ fn transform_inner_func(
           Ok(None)
         }
         AST::Variable(ref name) => {
-          if environment.contains(name) {
+          if (!locals.contains(name)) && environment.contains(name) {
             if !env_vars.contains(name) {
               env_vars.push(name.clone());
             }
@@ -145,7 +146,7 @@ fn transform_inner_func(
   ))
 }
 
-fn transform_declared_vars(
+fn transform_outer_func(
   func: &Function,
   closure_bindings: &HashMap<String, Vec<String>>,
 ) -> Result<Function, String> {
