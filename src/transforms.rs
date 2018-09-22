@@ -5,15 +5,16 @@ use std::collections::{HashMap, HashSet};
 use parser::{Function, AST};
 
 pub fn transform_closures_in_module(items: &[AST]) -> Result<Vec<AST>, String> {
-  //! There isn't technically anything called a "closure" in either the runtime
-  //! or compile time of Safelisp. Instead, nested functions are represented as
-  //! top-level functions. Any variables they use from their definition
-  //! environment are passed in as parameters. However, to allow shared
-  //! mutation, they are wrapped up in Cells and all usage both inside the
-  //! nested function and in the outer function is transformed to deref the
-  //! contents from the cell. Then, to actually represent the "closure" (i.e.
-  //! the callable object which has the environment bound to it), we
-  //! PartialApply the inner function with all the cells that it uses.
+  //! There isn't technically anything called a "closure" in either the runtime or compile time of
+  //! Safelisp. We represent closures as more general-purpose things: top-level functions, Cells,
+  //! and Partial Applications.
+  //!
+  //! Nested functions are represented as top-level functions. Any variables they use from their
+  //! definition environment are passed in as parameters. However, to allow shared mutation, they
+  //! are wrapped up in Cells and all usage both inside the nested function and in the outer
+  //! function is transformed to deref the contents from the cell. Then, to actually represent the
+  //! "closure" (i.e. the callable object which has the environment bound to it), we PartialApply
+  //! the inner function with all the cells that it uses.
 
   let mut result = vec![];
   for item in items {
@@ -48,8 +49,8 @@ fn closurize_function(outer_func: &Function) -> Result<Vec<AST>, String> {
   };
   let mut outer_func = transform_outer_func(&outer_func, &all_closure_bindings)?;
 
-  // If a closure uses one of our parameters, we need to insert a `(let param
-  // (cell param))` at the top.
+  // If a closure uses one of our parameters, we need to insert a `(let param (cell param))` at the
+  // top.
   let mut rebindings = vec![];
   for bindings in all_closure_bindings.values() {
     for binding in bindings {
@@ -107,33 +108,10 @@ fn transform_inner_func(
   //! Also returns the names of any variables used in the function that come from the environment.
   //! * `environment` - the names that are defined in the containing function.
   let mut locals = hashset!{};
-  let mut env_vars = vec![];
+  let mut env_vars = vec![]; // the *used* env vars
   let code = {
-    let mut transformer = |ast: &AST| {
-      match ast {
-        AST::Let(name, _v) => {
-          // Oh no! We need to transform `_v` before we record `name` as a new
-          // local! Our transformation machinery doesn't transform in
-          // eval-order, but rather in "parse" or "out-to-in" order.
-          locals.insert(name.clone());
-          Ok(None)
-        }
-        AST::Variable(ref name) => {
-          if (!locals.contains(name)) && environment.contains(name) {
-            if !env_vars.contains(name) {
-              env_vars.push(name.clone());
-            }
-            Ok(Some(AST::DerefCell(Box::new(AST::Variable(name.clone())))))
-          } else {
-            Ok(None)
-          }
-        }
-        // Specifically avoid recursing into function definitions, we're only doing one at a time.
-        // TODO: actually we need to closurize these too!!!???
-        AST::DefineFn(_) => Ok(Some(ast.clone())),
-        _ => Ok(None),
-      }
-    };
+    let mut transformer =
+      |ast: &AST| _inner_func_transform(ast, &mut locals, &mut env_vars, environment);
     transform_multi(func.code.iter(), &mut transformer)?
   };
   let mut params = vec![];
@@ -147,6 +125,42 @@ fn transform_inner_func(
       code,
     },
   ))
+}
+
+fn _inner_func_transform(
+  ast: &AST,
+  locals: &mut HashSet<String>,
+  env_vars: &mut Vec<String>,
+  environment: &HashSet<String>,
+) -> Result<Option<AST>, String> {
+  match ast {
+    AST::Let(name, expr) => {
+      let expr = transform(expr, &mut |ast: &AST| {
+        _inner_func_transform(ast, locals, env_vars, environment)
+      })?;
+      // Very important: insert the name into locals *after* transforming the expression!
+      // because: `(let a (+ a 1))`
+      locals.insert(name.clone());
+      Ok(Some(AST::Let(name.clone(), Box::new(expr))))
+    }
+    AST::Variable(ref name) => {
+      println!("[RADIX] hey a variable {}", name);
+      println!("[RADIX] locals: {:?}", locals);
+      println!("[RADIX environment: {:?}", environment);
+      if (!locals.contains(name)) && environment.contains(name) {
+        if !env_vars.contains(name) {
+          env_vars.push(name.clone());
+        }
+        Ok(Some(AST::DerefCell(Box::new(AST::Variable(name.clone())))))
+      } else {
+        Ok(None)
+      }
+    }
+    // Specifically avoid recursing into function definitions, we're only doing one at a time.
+    // TODO: actually we need to closurize these too!!!???
+    AST::DefineFn(_) => Ok(Some(ast.clone())),
+    _ => Ok(None),
+  }
 }
 
 fn transform_outer_func(
@@ -163,42 +177,8 @@ fn transform_outer_func(
     all_used_free_vars.extend(bindings.iter().cloned());
   }
   let code = {
-    let mut transformer = |ast: &AST| {
-      match ast {
-        // Variable definitions need to wrap their expression in Cell.
-        AST::Let(name, expr) => {
-          if all_used_free_vars.contains(name) {
-            Ok(Some(AST::Let(
-              name.clone(),
-              Box::new(AST::Cell(expr.clone())),
-            )))
-          } else {
-            Ok(None)
-          }
-        }
-        // Variable *usage* needs to be wrapped in a DerefCell.
-        AST::Variable(ref name) => {
-          if all_used_free_vars.contains(name) {
-            Ok(Some(AST::DerefCell(Box::new(AST::Variable(name.clone())))))
-          } else if let Some(params) = closure_bindings.get(name) {
-            if params.len() > 0 {
-              Ok(Some(AST::PartialApply(
-                Box::new(AST::Variable(format!("{}:(closure)", name))),
-                params.iter().cloned().map(AST::Variable).collect(),
-              )))
-            } else {
-              Ok(Some(AST::Variable(format!("{}:(closure)", name))))
-            }
-          } else {
-            Ok(None)
-          }
-        }
-        // Specifically avoid recursing into function definitions, we're only doing one at a time.
-        // TODO: actually we need to closurize these too!!!???
-        AST::DefineFn(_) => Ok(Some(ast.clone())),
-        _ => Ok(None),
-      }
-    };
+    let mut transformer =
+      |ast: &AST| _outer_func_transform(ast, &mut all_used_free_vars, closure_bindings);
     transform_multi(func.code.iter(), &mut transformer)?
   };
   Ok(Function {
@@ -206,6 +186,47 @@ fn transform_outer_func(
     params: func.params.clone(),
     code,
   })
+}
+
+fn _outer_func_transform(
+  ast: &AST,
+  all_used_free_vars: &mut HashSet<String>,
+  closure_bindings: &HashMap<String, Vec<String>>,
+) -> Result<Option<AST>, String> {
+  match ast {
+    // Variable definitions need to wrap their expression in Cell.
+    AST::Let(name, expr) => {
+      if all_used_free_vars.contains(name) {
+        Ok(Some(AST::Let(
+          name.clone(),
+          Box::new(AST::Cell(expr.clone())),
+        )))
+      } else {
+        Ok(None)
+      }
+    }
+    // Variable *usage* needs to be wrapped in a DerefCell.
+    AST::Variable(ref name) => {
+      if all_used_free_vars.contains(name) {
+        Ok(Some(AST::DerefCell(Box::new(AST::Variable(name.clone())))))
+      } else if let Some(params) = closure_bindings.get(name) {
+        if params.len() > 0 {
+          Ok(Some(AST::PartialApply(
+            Box::new(AST::Variable(format!("{}:(closure)", name))),
+            params.iter().cloned().map(AST::Variable).collect(),
+          )))
+        } else {
+          Ok(Some(AST::Variable(format!("{}:(closure)", name))))
+        }
+      } else {
+        Ok(None)
+      }
+    }
+    // Specifically avoid recursing into function definitions, we're only doing one at a time.
+    // TODO: actually we need to closurize these too!!!???
+    AST::DefineFn(_) => Ok(Some(ast.clone())),
+    _ => Ok(None),
+  }
 }
 
 // General transformation machinery
