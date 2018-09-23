@@ -10,8 +10,9 @@ extern crate serde_derive;
 extern crate pretty_assertions;
 
 pub mod builtins;
+pub mod closure;
 pub mod compiler;
 pub mod interpreter;
 pub mod parser;
-pub mod transforms;
+pub mod transform;
 

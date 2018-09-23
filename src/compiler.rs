@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use parser::{self, Identifier, AST};
-use transforms::transform_closures_in_module;
+use closure::transform_closures_in_module;
 
 /// A Package can either represent a "program" or a "library".
 /// If a `main` is provided, then it can be executed as a program directly.
