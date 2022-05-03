@@ -228,7 +228,7 @@ fn _outer_func_transform(
 #[cfg(test)]
 mod test {
   use super::*;
-  use crate::parser::read_multiple;
+  use crate::parser::{read_multiple, Identifier};
 
   #[test]
   fn transformed_closure() -> Result<(), String> {
@@ -289,8 +289,8 @@ mod test {
           ),
           Let(
             "b".to_string(),
-            Box::new(Call(
-              Box::new(Variable("+".to_string())),
+            Box::new(CallFixed(
+              Identifier::Bare("+".to_string()),
               vec![DerefCell(Box::new(Variable("par".to_string()))), Int(1)],
             )),
           ),
@@ -388,8 +388,8 @@ mod test {
         code: vec![
           Let(
             "a".to_string(),
-            Box::new(Call(
-              Box::new(Variable("+".to_string())),
+            Box::new(CallFixed(
+              Identifier::Bare("+".to_string()),
               vec![DerefCell(Box::new(Variable("a".to_string()))), Int(1)],
             )),
           ),
