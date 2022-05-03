@@ -241,7 +241,7 @@ where
 
 fn place_locals(
   stack: &mut Stack,
-  locals: &mut Vec<Rc<SLVal>>,
+  locals: &mut [Rc<SLVal>],
   start: usize,
   func: &Function,
 ) -> Result<(), String> {
