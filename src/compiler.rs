@@ -274,7 +274,7 @@ fn compile_expr(
   let mut instructions = vec![];
   match ast {
     AST::Call(callable_expr, _arg_exprs) => {
-      return Err(format!("NYI: non-constant functions: {:?}", callable_expr))
+      return Err(format!("NYI: non-constant functions: {callable_expr:?} -- {_arg_exprs:?}"))
     }
     AST::CallFixed(identifier, arg_exprs) => {
       for expr in arg_exprs {

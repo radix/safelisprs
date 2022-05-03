@@ -97,7 +97,20 @@ fn parse_call(form: &Expr) -> Result<AST, String> {
     return Err("Empty call".to_string())
   }
   let args: Result<Vec<AST>, _> = form[1..].iter().map(AST::from_atoms).collect();
-  Ok(AST::Call(Box::new(AST::from_atoms(&form[0])?), args?))
+  if let AValue::Symbol(ref name) = form[0] {
+    return Ok(AST::CallFixed(parse_identifier(&name), args?));
+  } else {
+    return Ok(AST::Call(Box::new(AST::from_atoms(&form[0])?), args?))
+  }
+}
+
+fn parse_identifier(name: &str) -> Identifier {
+  let parts: Vec<&str> = name.splitn(2, ".").collect();
+  if parts.len() == 1 {
+    return Identifier::Bare(name.to_string())
+  } else {
+    return Identifier::Qualified(parts[0].to_string(), parts[1].to_string());
+  }
 }
 
 fn parse_let(right: &Expr) -> Result<AST, String> {
