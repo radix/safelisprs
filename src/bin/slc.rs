@@ -8,49 +8,37 @@ use std::io::prelude::*;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Result};
-use clap::{App, Arg};
+use clap::Parser;
 
 use safelisp::compiler::{compile_executable_from_sources, compile_from_sources};
 
-fn main() -> Result<()> {
-  let args = App::new("SafeLisp Compiler")
-    .arg(Arg::with_name("output").long("output").takes_value(true))
-    .arg(Arg::with_name("format").long("format").takes_value(true))
-    .arg(
-      Arg::with_name("main-module")
-        .long("main-module")
-        .takes_value(true)
-        .help("Override the default name of the main module"),
-    )
-    .arg(
-      Arg::with_name("main-function")
-        .long("main-function")
-        .takes_value(true)
-        .default_value("main")
-        .help("Override the default name of the main function"),
-    )
-    .arg(
-      Arg::with_name("no-main")
-        .long("no-main")
-        .help("Don't set a main function, even if there's a main.rs with a main function inside."),
-    )
-    .arg(
-      Arg::with_name("INPUT")
-        .required(true)
-        .index(1)
-        .multiple(true)
-        .help("Input files. Each one will count as a module."),
-    )
-    .get_matches();
+#[derive(Parser)]
+#[clap(author, version, about, long_about = None)]
+struct Args {
+  #[clap(long)]
+  output: String,
 
-  let input_files: Vec<&str> = args
-    .values_of("INPUT")
-    .ok_or_else(|| anyhow!("Must provide input files on the command line."))?
-    .collect();
-  let format = args.value_of("format").unwrap_or("bincode");
-  let output_file = args
-    .value_of("output")
-    .ok_or_else(|| anyhow!("Must specify output file"))?;
+  #[clap(long, default_value = "bincode")]
+  format: String,
+
+  #[clap(long)]
+  main_module: Option<String>,
+  #[clap(long, default_value = "main")]
+  main_function: String,
+
+  #[clap(long)]
+  no_main: bool,
+
+  #[clap()]
+  input_files: Vec<String>,
+}
+
+fn main() -> Result<()> {
+  let args = Args::parse();
+
+  let input_files = args.input_files;
+  let format = args.format;
+  let output_file = args.output;
 
   println!("Compiling {:?} to {}", input_files, output_file);
 
@@ -76,20 +64,18 @@ fn main() -> Result<()> {
     module_sources.push((module_name.to_string_lossy().to_string(), input_data));
   }
 
-  let package = if args.is_present("no-main") {
+  let package = if args.no_main {
     compile_from_sources(&module_sources)
   } else {
     let main_mod = args
-      .value_of("main-module")
+      .main_module
       .ok_or_else(|| anyhow!("There must be a main module"))?;
-    let main_func = args
-      .value_of("main-function")
-      .ok_or_else(|| anyhow!("There must be a main function"))?;
-    compile_executable_from_sources(&module_sources, (main_mod, main_func))
+    let main_func = args.main_function;
+    compile_executable_from_sources(&module_sources, (&main_mod, &main_func))
   }
   .map_err(|e| anyhow!("{}", e))?;
 
-  let output = match format {
+  let output = match format.as_str() {
     "yaml" => serde_yaml::to_string(&package)?.into_bytes(),
     "bincode" => bincode::serialize(&package)?,
     _ => panic!("Invalid format: {}", format),
