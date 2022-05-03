@@ -80,7 +80,7 @@ fn main() -> Result<(), failure::Error> {
     _ => panic!("Invalid format: {}", format),
   };
   let mut outfile =
-    File::create(&output_file).expect(&format!("Couldn't create file {}", output_file));
+    File::create(&output_file).unwrap_or_else(|_| panic!("Couldn't create file {}", output_file));
   outfile.write_all(&output)?;
   Ok(())
 }

@@ -280,7 +280,7 @@ fn compile_expr(
       for expr in arg_exprs {
         instructions.extend(compile_expr(
           module_name,
-          &expr,
+          expr,
           num_locals,
           locals,
           scope_name,
@@ -291,14 +291,14 @@ fn compile_expr(
         Identifier::Qualified(mname, fname) => (mname.to_string(), fname.to_string()),
       };
       instructions.push(Instruction::Call((
-        module_name.to_string(),
-        function_name.to_string(),
+        module_name,
+        function_name,
       )))
     }
     AST::Cell(expr) => {
       instructions.extend(compile_expr(
         module_name,
-        &expr,
+        expr,
         num_locals,
         locals,
         scope_name,
@@ -315,7 +315,7 @@ fn compile_expr(
     AST::DerefCell(expr) => {
       instructions.extend(compile_expr(
         module_name,
-        &expr,
+        expr,
         num_locals,
         locals,
         scope_name,
@@ -346,7 +346,7 @@ fn compile_expr(
       for expr in args {
         instructions.extend(compile_expr(
           module_name,
-          &expr,
+          expr,
           num_locals,
           locals,
           scope_name,
@@ -354,7 +354,7 @@ fn compile_expr(
       }
       instructions.extend(compile_expr(
         module_name,
-        &expr,
+        expr,
         num_locals,
         locals,
         scope_name,
@@ -379,23 +379,23 @@ pub fn compile_executable_from_sources(
   module_sources: &[(String, String)],
   main: (&str, &str),
 ) -> Result<Package, String> {
-  Ok(Package::from_modules_with_main(
+  Package::from_modules_with_main(
     _compile_from_sources(module_sources)?,
     main,
-  )?)
+  )
 }
 
 pub fn compile_from_sources(module_sources: &[(String, String)]) -> Result<Package, String> {
-  Ok(Package::from_modules(_compile_from_sources(
+  Package::from_modules(_compile_from_sources(
     module_sources,
-  )?)?)
+  )?)
 }
 
 fn _compile_from_sources(module_sources: &[(String, String)]) -> Result<CompilingModules, String> {
   let mut compiling_modules: CompilingModules = vec![];
   for (mod_name, mod_data) in module_sources {
-    let asts = parser::read_multiple(&mod_data)?;
-    let compiling_module = compile_module(&mod_name, &asts)?;
+    let asts = parser::read_multiple(mod_data)?;
+    let compiling_module = compile_module(mod_name, &asts)?;
     compiling_modules.push((mod_name.to_string(), compiling_module));
   }
   Ok(compiling_modules)

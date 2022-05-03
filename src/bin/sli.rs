@@ -21,17 +21,17 @@ fn main() -> Result<(), Error> {
 
   let input_file = args.value_of("INPUT").unwrap();
 
-  let mut f = File::open(input_file).expect(&format!("Couldn't open {}", input_file));
+  let mut f = File::open(input_file).unwrap_or_else(|_| panic!("Couldn't open {}", input_file));
   let package: Package = match args.value_of("format") {
     Some("bincode") => {
       let mut v = vec![];
-      f.read_to_end(&mut v).expect(&format!("Couldn't read from file {}", input_file));
+      f.read_to_end(&mut v).unwrap_or_else(|_| panic!("Couldn't read from file {}", input_file));
       let package: Result<Package, Error> = bincode::deserialize(&v[..]).map_err(|e| e.into());
       package
     }
     Some("yaml") => {
       let mut s = String::new();
-      f.read_to_string(&mut s).expect(&format!("Couldn't read from file {}", input_file));
+      f.read_to_string(&mut s).unwrap_or_else(|_| panic!("Couldn't read from file {}", input_file));
       let package: Result<Package, Error> = serde_yaml::from_str(&s).map_err(|e| e.into());
       package
     }
@@ -41,7 +41,7 @@ fn main() -> Result<(), Error> {
   let mut interpreter = Interpreter::new(package);
   let result = interpreter
     .call_main()
-    .expect(&format!("Error calling main"));
+    .expect("Error calling main");
   println!("Result: {:?}", result);
   Ok(())
 }

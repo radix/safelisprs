@@ -84,15 +84,15 @@ fn _closure_code_transform(
       // TODO: handle name mangling / uniquification in a better way.
       let new_name = format!("{}:(closure)", inner_func.name);
       let (used_env_vars, inner_func) = transform_inner_func(inner_func, locals)?;
-      all_closure_bindings.insert(inner_func.name.clone(), used_env_vars.clone());
+      all_closure_bindings.insert(inner_func.name.clone(), used_env_vars);
       top_level.push(AST::DefineFn(Function {
-        name: new_name.clone(),
+        name: new_name,
         ..inner_func
       }));
       // Replace the definition of the function with a reference to its name.
       // Later we will transform this Variable to a PartialApply(variable, cell_args...),
       // *if* it uses variables from the environment.
-      Some(AST::Variable(inner_func.name.clone()))
+      Some(AST::Variable(inner_func.name))
     }
     _ => None,
   };
@@ -206,7 +206,7 @@ fn _outer_func_transform(
       if all_used_free_vars.contains(name) {
         Ok(Some(AST::DerefCell(Box::new(AST::Variable(name.clone())))))
       } else if let Some(params) = closure_bindings.get(name) {
-        if params.len() > 0 {
+        if !params.is_empty() {
           Ok(Some(AST::PartialApply(
             Box::new(AST::Variable(format!("{}:(closure)", name))),
             params.iter().cloned().map(AST::Variable).collect(),
@@ -425,7 +425,7 @@ mod test {
     ";
     let asts = read_multiple(source)?;
     let new_asts = transform_closures_in_module(&asts)?;
-    use crate::parser::AST::*;
+    
     let expected = vec![
       //TODO: fill in
 

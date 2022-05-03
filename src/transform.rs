@@ -24,7 +24,7 @@ where
   let result = match transformer(ast)? {
     Some(replacement) => replacement,
     None => match ast {
-      AST::Let(name, expr) => AST::Let(name.to_string(), Box::new(transform(&expr, transformer)?)),
+      AST::Let(name, expr) => AST::Let(name.to_string(), Box::new(transform(expr, transformer)?)),
       AST::DefineFn(func) => {
         let code = transform_multi(func.code.iter(), transformer)?;
         AST::DefineFn(Function {
@@ -35,16 +35,16 @@ where
       }
       AST::Call(func_expr, args) => {
         let new_args = transform_multi(args.iter(), transformer)?;
-        AST::Call(Box::new(transform(&func_expr, transformer)?), new_args)
+        AST::Call(Box::new(transform(func_expr, transformer)?), new_args)
       }
       AST::CallFixed(ident, args) => {
         let new_args = transform_multi(args.iter(), transformer)?;
         AST::CallFixed(ident.clone(), new_args)
       }
-      AST::Cell(expr) => AST::Cell(Box::new(transform(&expr, transformer)?)),
-      AST::DerefCell(expr) => AST::DerefCell(Box::new(transform(&expr, transformer)?)),
+      AST::Cell(expr) => AST::Cell(Box::new(transform(expr, transformer)?)),
+      AST::DerefCell(expr) => AST::DerefCell(Box::new(transform(expr, transformer)?)),
       AST::PartialApply(call_expr, args) => AST::PartialApply(
-        Box::new(transform(&call_expr, transformer)?),
+        Box::new(transform(call_expr, transformer)?),
         transform_multi(args.iter(), transformer)?,
       ),
 

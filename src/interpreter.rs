@@ -36,7 +36,7 @@ impl Stack {
     self
       .items
       .pop()
-      .ok_or_else(|| format!("POP on an empty stack"))
+      .ok_or_else(|| "POP on an empty stack".to_string())
   }
   pub fn push(&mut self, item: Rc<SLVal>) {
     self.items.push(item);
@@ -46,7 +46,7 @@ impl Stack {
       .items
       .last()
       .cloned()
-      .ok_or_else(|| format!("PEEK on an empty stack"))
+      .ok_or_else(|| "PEEK on an empty stack".to_string())
   }
 }
 
@@ -94,7 +94,7 @@ where
         ))
       }
     } else {
-      Err(format!("This package has no main function."))
+      Err("This package has no main function.".to_string())
     }
   }
 
@@ -169,7 +169,7 @@ fn partial_apply(stack: &mut Stack, num_args: u16) -> Result<(), String> {
       function: (*mod_index, *func_index),
       args,
     }))),
-    _ => Err(format!("make_closure needs a function at TOS")),
+    _ => Err("make_closure needs a function at TOS".to_string()),
   }?;
   stack.push(closure);
   Ok(())
@@ -202,7 +202,7 @@ where
           stack.push(eval_code(package, func, locals, builtins)?);
           Ok(())
         }
-        Callable::Builtin => Err(format!("Can't invoke a builtin as a closure")),
+        Callable::Builtin => Err("Can't invoke a builtin as a closure".to_string()),
       }
     }
     x => Err(format!("Can't call a non-callable! {:?}", x)),
@@ -228,7 +228,7 @@ where
   match callable {
     Callable::Function(func) => {
       let mut locals = alloc_locals(func);
-      place_locals(stack, &mut locals, 0, &func)?;
+      place_locals(stack, &mut locals, 0, func)?;
       stack.push(eval_code(package, func, locals, builtins)?);
     }
     Callable::Builtin => {

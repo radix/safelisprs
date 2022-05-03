@@ -78,13 +78,13 @@ impl AST {
       AValue::Cons(left, right) => {
         if let AValue::Symbol(ref s) = **left {
           match s.as_ref() {
-            "let" => return parse_let(&right),
-            "fn" => return parse_fn(&right),
-            "decl" => return parse_decl(&right),
+            "let" => return parse_let(right),
+            "fn" => return parse_fn(right),
+            "decl" => return parse_decl(right),
             _ => {}
           }
         }
-        parse_call(&form)
+        parse_call(form)
       }
       _ => Err(format!("Sorry, didn't implement {:?} yet", form)),
     }
@@ -94,9 +94,9 @@ impl AST {
 fn parse_call(form: &Expr) -> Result<AST, String> {
   let form = flatten_list(form)?;
   if form.is_empty() {
-    return Err(format!("Empty call"))
+    return Err("Empty call".to_string())
   }
-  let args: Result<Vec<AST>, _> = form[1..].iter().map(|f| AST::from_atoms(f)).collect();
+  let args: Result<Vec<AST>, _> = form[1..].iter().map(AST::from_atoms).collect();
   Ok(AST::Call(Box::new(AST::from_atoms(&form[0])?), args?))
 }
 
