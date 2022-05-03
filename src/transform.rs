@@ -62,7 +62,7 @@ where
 #[cfg(test)]
 mod test {
   use super::*;
-  use crate::parser::{AST};
+  use crate::parser::AST;
 
   #[test]
   fn test_transform_replacement_id() {

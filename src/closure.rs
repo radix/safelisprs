@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
+use crate::parser::{Function, AST};
 use crate::transform::{transform, transform_multi};
-use crate::parser::{AST, Function};
 
 pub fn transform_closures_in_module(items: &[AST]) -> Result<Vec<AST>, String> {
   //! There isn't technically anything called a "closure" in either the runtime or compile time of
@@ -34,9 +34,9 @@ fn closurize_function(outer_func: &Function) -> Result<Vec<AST>, String> {
   //!    functions.
   //! 4. then, transform the outer function to wrap those inner-used variables in Cell.
   let mut top_level = vec![];
-  let mut locals = hashset!{};
+  let mut locals = hashset! {};
   locals.extend(outer_func.params.iter().cloned());
-  let mut all_closure_bindings = hashmap!{};
+  let mut all_closure_bindings = hashmap! {};
 
   let code = transform_multi(outer_func.code.iter(), &mut |ast: &AST| {
     _closure_code_transform(ast, &mut locals, &mut all_closure_bindings, &mut top_level)
@@ -106,7 +106,7 @@ fn transform_inner_func(
   //! Transform a function so that any free variables are converted to Celled parameters.
   //! Also returns the names of any variables used in the function that come from the environment.
   //! * `environment` - the names that are defined in the containing function.
-  let mut locals = hashset!{};
+  let mut locals = hashset! {};
   let mut env_vars = vec![]; // the *used* env vars
   let code = {
     let mut transformer =
@@ -168,7 +168,7 @@ fn transform_outer_func(
   //! 2. used in any inner functions
   //! are wrapped in Cells.
 
-  let mut all_used_free_vars = hashset!{};
+  let mut all_used_free_vars = hashset! {};
   for bindings in closure_bindings.values() {
     all_used_free_vars.extend(bindings.iter().cloned());
   }
@@ -425,7 +425,7 @@ mod test {
     ";
     let asts = read_multiple(source)?;
     let new_asts = transform_closures_in_module(&asts)?;
-    
+
     let expected = vec![
       //TODO: fill in
 
@@ -433,5 +433,4 @@ mod test {
     assert_eq!(new_asts, expected);
     Ok(())
   }
-
 }

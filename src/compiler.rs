@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
-use crate::parser::{self, Identifier, AST};
 use crate::closure::transform_closures_in_module;
+use crate::parser::{self, Identifier, AST};
 
 /// A Package can either represent a "program" or a "library".
 /// If a `main` is provided, then it can be executed as a program directly.
@@ -118,9 +118,9 @@ impl Package {
 fn index_modules<'a>(
   modules: impl Iterator<Item = &'a (String, Vec<(String, CompilingCallable)>)>,
 ) -> ModuleIndex {
-  let mut module_table = hashmap!{};
+  let mut module_table = hashmap! {};
   for (mod_index, (mod_name, functions)) in modules.enumerate() {
-    module_table.insert(mod_name.to_string(), (mod_index as u32, hashmap!{}));
+    module_table.insert(mod_name.to_string(), (mod_index as u32, hashmap! {}));
     for (func_index, (func_name, _)) in functions.iter().enumerate() {
       module_table
         .get_mut(mod_name)
@@ -146,7 +146,8 @@ fn link(module_table: &ModuleIndex, modules: CompilingModules) -> Result<Compile
           Callable::Builtin => Callable::Builtin,
         };
         Ok((func_name, new_callable))
-      }).collect::<Result<Vec<(String, CompiledCallable)>, String>>()?;
+      })
+      .collect::<Result<Vec<(String, CompiledCallable)>, String>>()?;
     result.push((mod_name, new_functions));
   }
   Ok(result)
@@ -274,7 +275,9 @@ fn compile_expr(
   let mut instructions = vec![];
   match ast {
     AST::Call(callable_expr, _arg_exprs) => {
-      return Err(format!("NYI: non-constant functions: {callable_expr:?} -- {_arg_exprs:?}"))
+      return Err(format!(
+        "NYI: non-constant functions: {callable_expr:?} -- {_arg_exprs:?}"
+      ))
     }
     AST::CallFixed(identifier, arg_exprs) => {
       for expr in arg_exprs {
@@ -290,10 +293,7 @@ fn compile_expr(
         Identifier::Bare(fname) => (module_name.to_string(), fname.to_string()),
         Identifier::Qualified(mname, fname) => (mname.to_string(), fname.to_string()),
       };
-      instructions.push(Instruction::Call((
-        module_name,
-        function_name,
-      )))
+      instructions.push(Instruction::Call((module_name, function_name)))
     }
     AST::Cell(expr) => {
       instructions.extend(compile_expr(
@@ -379,16 +379,11 @@ pub fn compile_executable_from_sources(
   module_sources: &[(String, String)],
   main: (&str, &str),
 ) -> Result<Package, String> {
-  Package::from_modules_with_main(
-    _compile_from_sources(module_sources)?,
-    main,
-  )
+  Package::from_modules_with_main(_compile_from_sources(module_sources)?, main)
 }
 
 pub fn compile_from_sources(module_sources: &[(String, String)]) -> Result<Package, String> {
-  Package::from_modules(_compile_from_sources(
-    module_sources,
-  )?)
+  Package::from_modules(_compile_from_sources(module_sources)?)
 }
 
 fn _compile_from_sources(module_sources: &[(String, String)]) -> Result<CompilingModules, String> {

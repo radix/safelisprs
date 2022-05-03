@@ -294,7 +294,7 @@ mod test {
       (decl add2 (n))
       (fn main () (add2 3))
     "
-      .to_string();
+    .to_string();
     let package =
       compile_executable_from_sources(&[("main".to_string(), source)], ("main", "main")).unwrap();
 
@@ -353,11 +353,10 @@ mod test {
       )
       (fn main () ((outer)))
     "
-      .to_string();
+    .to_string();
     let pkg =
       compile_executable_from_sources(&[("main".to_string(), source)], ("main", "main")).unwrap();
     let mut interp = Interpreter::new(pkg);
     assert_eq!(interp.call_main().unwrap(), Rc::new(SLVal::Int(1)));
   }
-
 }
