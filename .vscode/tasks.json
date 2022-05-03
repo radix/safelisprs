@@ -6,10 +6,7 @@
         {
             "type": "cargo",
             "label": "cargo test",
-            "command": "cargo",
-            "args": [
-                "test"
-            ],
+            "command": "test",
             "problemMatcher": [
                 "$rustc"
             ],
