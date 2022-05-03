@@ -7,34 +7,38 @@ use std::fs::File;
 use std::io::prelude::*;
 
 use anyhow::{anyhow, Result};
-use clap::{App, Arg};
+use clap::Parser;
 
 use safelisp::compiler::Package;
 use safelisp::interpreter::Interpreter;
 
-fn main() -> Result<()> {
-  let args = App::new("SafeLisp Interpreter")
-    .arg(Arg::with_name("INPUT").required(true).index(1))
-    .arg(
-      Arg::with_name("format")
-        .long("format")
-        .takes_value(true)
-        .default_value("bincode"),
-    )
-    .get_matches();
 
-  let input_file = args.value_of("INPUT").unwrap();
+
+#[derive(Parser)]
+#[clap(author, version, about, long_about = None)]
+struct Args {
+  #[clap(long, default_value = "bincode", help="either yaml or bincode")]
+  format: String,
+
+  #[clap(help="A .slc file to interpret")]
+  input_file: String
+}
+
+fn main() -> Result<()> {
+  let args = Args::parse();
+
+  let input_file = &args.input_file;
 
   let mut f = File::open(input_file).unwrap_or_else(|_| panic!("Couldn't open {}", input_file));
-  let package: Package = match args.value_of("format") {
-    Some("bincode") => {
+  let package: Package = match args.format.as_str() {
+    "bincode" => {
       let mut v = vec![];
       f.read_to_end(&mut v)
         .unwrap_or_else(|_| panic!("Couldn't read from file {}", input_file));
       let package: Result<Package> = bincode::deserialize(&v[..]).map_err(|e| e.into());
       package
     }
-    Some("yaml") => {
+    "yaml" => {
       let mut s = String::new();
       f.read_to_string(&mut s)
         .unwrap_or_else(|_| panic!("Couldn't read from file {}", input_file));
