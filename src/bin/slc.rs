@@ -18,18 +18,18 @@ struct Args {
   #[clap(long)]
   output: String,
 
-  #[clap(long, default_value = "bincode")]
+  #[clap(long, default_value = "bincode", help="either yaml or bincode")]
   format: String,
 
-  #[clap(long)]
+  #[clap(long, help="the name of the main module (filename without the .sl)")]
   main_module: Option<String>,
-  #[clap(long, default_value = "main")]
+  #[clap(long, default_value = "main", help="name of the main function")]
   main_function: String,
 
-  #[clap(long)]
+  #[clap(long, help="skip main generation")]
   no_main: bool,
 
-  #[clap()]
+  #[clap(help="list of .sl files")]
   input_files: Vec<String>,
 }
 
