@@ -15,4 +15,4 @@ bincode = "1.0"
 anyhow = "1.0.56"
 
 [dev-dependencies]
-pretty_assertions = "0.5.1"
+pretty_assertions = "1.2.1"
