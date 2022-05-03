@@ -1,7 +1,5 @@
 extern crate bincode;
 extern crate clap;
-#[macro_use]
-extern crate failure;
 extern crate safelisp;
 extern crate serde_yaml;
 
@@ -9,11 +7,12 @@ use std::fs::File;
 use std::io::prelude::*;
 use std::path::{Path, PathBuf};
 
+use anyhow::{anyhow, Result};
 use clap::{App, Arg};
 
 use safelisp::compiler::{compile_executable_from_sources, compile_from_sources};
 
-fn main() -> Result<(), failure::Error> {
+fn main() -> Result<()> {
   let args = App::new("SafeLisp Compiler")
     .arg(Arg::with_name("output").long("output").takes_value(true))
     .arg(Arg::with_name("format").long("format").takes_value(true))
@@ -46,12 +45,12 @@ fn main() -> Result<(), failure::Error> {
 
   let input_files: Vec<&str> = args
     .values_of("INPUT")
-    .ok_or_else(|| format_err!("Must provide input files on the command line."))?
+    .ok_or_else(|| anyhow!("Must provide input files on the command line."))?
     .collect();
   let format = args.value_of("format").unwrap_or("bincode");
   let output_file = args
     .value_of("output")
-    .ok_or_else(|| format_err!("Must specify output file"))?;
+    .ok_or_else(|| anyhow!("Must specify output file"))?;
 
   println!("Compiling {:?} to {}", input_files, output_file);
 
@@ -62,10 +61,10 @@ fn main() -> Result<(), failure::Error> {
     let module_name = Path::new(
       input_filename
         .file_stem()
-        .ok_or_else(|| format_err!("{:?} is not a file", input_filename))?,
+        .ok_or_else(|| anyhow!("{:?} is not a file", input_filename))?,
     )
     .file_name()
-    .ok_or_else(|| format_err!("Couldn't get file name of {:?}", input_filename))?;
+    .ok_or_else(|| anyhow!("Couldn't get file name of {:?}", input_filename))?;
 
     let input_data = {
       let mut f = File::open(&input_filename)?;
@@ -82,13 +81,13 @@ fn main() -> Result<(), failure::Error> {
   } else {
     let main_mod = args
       .value_of("main-module")
-      .ok_or_else(|| format_err!("There must be a main module"))?;
+      .ok_or_else(|| anyhow!("There must be a main module"))?;
     let main_func = args
       .value_of("main-function")
-      .ok_or_else(|| format_err!("There must be a main function"))?;
+      .ok_or_else(|| anyhow!("There must be a main function"))?;
     compile_executable_from_sources(&module_sources, (main_mod, main_func))
   }
-  .map_err(|e| format_err!("{}", e))?;
+  .map_err(|e| anyhow!("{}", e))?;
 
   let output = match format {
     "yaml" => serde_yaml::to_string(&package)?.into_bytes(),

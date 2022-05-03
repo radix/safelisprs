@@ -1,20 +1,18 @@
 extern crate bincode;
 extern crate clap;
-#[macro_use]
-extern crate failure;
 extern crate safelisp;
 extern crate serde_yaml;
 
 use std::fs::File;
 use std::io::prelude::*;
 
+use anyhow::{anyhow, Result};
 use clap::{App, Arg};
-use failure::Error;
 
 use safelisp::compiler::Package;
 use safelisp::interpreter::Interpreter;
 
-fn main() -> Result<(), Error> {
+fn main() -> Result<()> {
   let args = App::new("SafeLisp Interpreter")
     .arg(Arg::with_name("INPUT").required(true).index(1))
     .arg(
@@ -33,17 +31,17 @@ fn main() -> Result<(), Error> {
       let mut v = vec![];
       f.read_to_end(&mut v)
         .unwrap_or_else(|_| panic!("Couldn't read from file {}", input_file));
-      let package: Result<Package, Error> = bincode::deserialize(&v[..]).map_err(|e| e.into());
+      let package: Result<Package> = bincode::deserialize(&v[..]).map_err(|e| e.into());
       package
     }
     Some("yaml") => {
       let mut s = String::new();
       f.read_to_string(&mut s)
         .unwrap_or_else(|_| panic!("Couldn't read from file {}", input_file));
-      let package: Result<Package, Error> = serde_yaml::from_str(&s).map_err(|e| e.into());
+      let package: Result<Package> = serde_yaml::from_str(&s).map_err(|e| e.into());
       package
     }
-    format => Err(format_err!("invalid format: {:?}", format)),
+    format => Err(anyhow!("invalid format: {:?}", format)),
   }?;
 
   let mut interpreter = Interpreter::new(package);
