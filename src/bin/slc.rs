@@ -43,7 +43,6 @@ fn main() -> Result<(), failure::Error> {
         .help("Input files. Each one will count as a module."),
     )
     .get_matches();
-  println!("args is {:?}", args);
 
   let input_files: Vec<&str> = args
     .values_of("INPUT")
