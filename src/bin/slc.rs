@@ -77,7 +77,7 @@ fn main() -> Result<(), failure::Error> {
   let output = match format {
     "yaml" => serde_yaml::to_string(&package)?.into_bytes(),
     "bincode" => bincode::serialize(&package)?,
-    _ => panic!(format!("Invalid format: {}", format)),
+    _ => panic!("Invalid format: {}", format),
   };
   let mut outfile =
     File::create(&output_file).expect(&format!("Couldn't create file {}", output_file));

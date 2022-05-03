@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
-use transform::{transform, transform_multi};
-use parser::{AST, Function};
+use crate::transform::{transform, transform_multi};
+use crate::parser::{AST, Function};
 
 pub fn transform_closures_in_module(items: &[AST]) -> Result<Vec<AST>, String> {
   //! There isn't technically anything called a "closure" in either the runtime or compile time of
@@ -228,7 +228,7 @@ fn _outer_func_transform(
 #[cfg(test)]
 mod test {
   use super::*;
-  use parser::read_multiple;
+  use crate::parser::read_multiple;
 
   #[test]
   fn transformed_closure() -> Result<(), String> {
@@ -238,7 +238,7 @@ mod test {
         (fn inner () a))";
     let asts = read_multiple(source)?;
     let new_asts = transform_closures_in_module(&asts)?;
-    use parser::AST::*;
+    use crate::parser::AST::*;
     let expected = vec![
       AST::DefineFn(Function {
         name: "inner:(closure)".to_string(),
@@ -272,7 +272,7 @@ mod test {
         (fn inner () par))";
     let asts = read_multiple(source)?;
     let new_asts = transform_closures_in_module(&asts)?;
-    use parser::AST::*;
+    use crate::parser::AST::*;
     let expected = vec![
       AST::DefineFn(Function {
         name: "inner:(closure)".to_string(),
@@ -314,7 +314,7 @@ mod test {
         (fn inner () 1))";
     let asts = read_multiple(source)?;
     let new_asts = transform_closures_in_module(&asts)?;
-    use parser::AST::*;
+    use crate::parser::AST::*;
     let expected = vec![
       AST::DefineFn(Function {
         name: "inner:(closure)".to_string(),
@@ -344,7 +344,7 @@ mod test {
           a))";
     let asts = read_multiple(source)?;
     let new_asts = transform_closures_in_module(&asts)?;
-    use parser::AST::*;
+    use crate::parser::AST::*;
     let expected = vec![
       AST::DefineFn(Function {
         name: "inner:(closure)".to_string(),
@@ -380,7 +380,7 @@ mod test {
           a))";
     let asts = read_multiple(source)?;
     let new_asts = transform_closures_in_module(&asts)?;
-    use parser::AST::*;
+    use crate::parser::AST::*;
     let expected = vec![
       AST::DefineFn(Function {
         name: "inner:(closure)".to_string(),
@@ -425,7 +425,7 @@ mod test {
     ";
     let asts = read_multiple(source)?;
     let new_asts = transform_closures_in_module(&asts)?;
-    use parser::AST::*;
+    use crate::parser::AST::*;
     let expected = vec![
       //TODO: fill in
 

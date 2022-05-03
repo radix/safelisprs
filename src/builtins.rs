@@ -1,6 +1,6 @@
 use std::rc::Rc;
 
-use interpreter::{BuiltinResult, SLVal, Stack};
+use crate::interpreter::{BuiltinResult, SLVal, Stack};
 
 pub fn builtin_builtins(mod_name: &str, name: &str, stack: &mut Stack) -> BuiltinResult {
   // This must be kept up-to-date with std.sl

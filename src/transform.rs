@@ -1,6 +1,6 @@
 //! Machinery for transforming ASTs
 
-use parser::{Function, AST};
+use crate::parser::{Function, AST};
 
 pub fn transform_multi<'a, T>(
   asts: impl Iterator<Item = &'a AST>,
@@ -62,7 +62,7 @@ where
 #[cfg(test)]
 mod test {
   use super::*;
-  use parser::{AST};
+  use crate::parser::{AST};
 
   #[test]
   fn test_transform_replacement_id() {

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
-use parser::{self, Identifier, AST};
-use closure::transform_closures_in_module;
+use crate::parser::{self, Identifier, AST};
+use crate::closure::transform_closures_in_module;
 
 /// A Package can either represent a "program" or a "library".
 /// If a `main` is provided, then it can be executed as a program directly.
@@ -392,7 +392,6 @@ pub fn compile_from_sources(module_sources: &[(String, String)]) -> Result<Packa
 }
 
 fn _compile_from_sources(module_sources: &[(String, String)]) -> Result<CompilingModules, String> {
-  use parser;
   let mut compiling_modules: CompilingModules = vec![];
   for (mod_name, mod_data) in module_sources {
     let asts = parser::read_multiple(&mod_data)?;

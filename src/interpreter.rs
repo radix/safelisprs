@@ -1,8 +1,8 @@
 use std::default::Default;
 use std::rc::Rc; // TODO: use Manishearth/rust-gc
 
-use builtins::builtin_builtins;
-use compiler::{Callable, CompiledFunction as Function, Instruction, Package};
+use crate::builtins::builtin_builtins;
+use crate::compiler::{Callable, CompiledFunction as Function, Instruction, Package};
 
 #[derive(Debug, Default)]
 pub struct Stack {
@@ -256,7 +256,7 @@ fn place_locals(
 #[cfg(test)]
 mod test {
   use super::*;
-  use compiler::{self, *};
+  use crate::compiler::{self, *};
 
   #[test]
   fn test_interpret_id() {
