@@ -371,6 +371,7 @@ fn compile_expr(
     AST::Int(i) => instructions.push(Instruction::PushInt(*i)),
     AST::Float(f) => instructions.push(Instruction::PushFloat(*f)),
     AST::String(s) => instructions.push(Instruction::PushString(s.clone())),
+    x => return Err(format!("Unexpected form at top-level: {:?}", x)),
   }
   Ok(instructions)
 }

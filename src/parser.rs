@@ -4,7 +4,7 @@ type Expr = AValue<String>;
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum AST {
-  // Import(String),
+  Import(String),
   Let(String, Box<AST>),
   DeclareFn(FunctionDecl),
   DefineFn(Function),
@@ -80,6 +80,7 @@ impl AST {
             "let" => return parse_let(right),
             "fn" => return parse_fn(right),
             "decl" => return parse_decl(right),
+            "use" => return parse_import(right),
             _ => {}
           }
         }
@@ -87,6 +88,20 @@ impl AST {
       }
       _ => Err(format!("Sorry, didn't implement {:?} yet", form)),
     }
+  }
+}
+
+fn parse_import(form: &Expr) -> Result<AST, String> {
+  match form {
+    AValue::Cons(module_name_box, nothing_else) => match (&**module_name_box, &**nothing_else) {
+      (AValue::Str(ref module_name), AValue::Nil) => Ok(AST::Import((*module_name).to_string())),
+      x => Err(format!(
+        "`import` must have a single string as its argument. Got: {x:?}"
+      )),
+    },
+    x => Err(format!(
+      "`import` must have a single string as its argument. Got: {x:?}"
+    )),
   }
 }
 
@@ -210,5 +225,11 @@ mod test {
   fn test_read_multiple() {
     let result = read_multiple("5 3").unwrap();
     assert_eq!(result, vec![AST::Int(5), AST::Int(3)]);
+  }
+
+  #[test]
+  fn test_import() {
+    let result = read_multiple("(use \"std.sl\")").unwrap();
+    assert_eq!(result, vec![AST::Import("std.sl".to_string())]);
   }
 }
