@@ -10,14 +10,14 @@ pub struct Package {
   /// While the names here *can* be used for function lookup, they are only
   /// included for debugging purposes. In a complete "executable" package, all
   /// calls will be represented with index-based function offsets.
-  pub functions: Vec<(String, Vec<(String, CompiledCallable)>)>,
+  pub modules: LinkedModules,
   pub main: Option<(u32, u32)>,
 }
 
-pub type CompiledCallable = Callable<(u32, u32)>;
-type CompilingCallable = Callable<(String, String)>;
+pub type LinkedCallable = Callable<(u32, u32)>;
+type CompiledCallable = Callable<(String, String)>;
 
-/// Packages contain Callables, which can either be CompiledFunctions or
+/// Packages contain Callables, which can either be LinkedFunctions or
 /// Builtins. This is so the interpreter can know whether it should fall back to
 /// the builtins when invoking a function. Builtin doesn't need a name because
 /// it's already in the Package::functions data.
@@ -27,18 +27,12 @@ pub enum Callable<CallType> {
   Builtin,
 }
 
-pub type CompiledFunction = Function<(u32, u32)>;
-type CompilingFunction = Function<(String, String)>;
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Function<CallType> {
   pub num_params: u16,
   pub num_locals: u16,
   pub instructions: Vec<Instruction<CallType>>,
 }
-
-type CompiledInstruction = Instruction<(u32, u32)>;
-type CompilingInstruction = Instruction<(String, String)>;
 
 /// Instructions are parameterized by the representation of function calls.
 /// During compilation, functions are referenced by name, but they are later
@@ -74,41 +68,56 @@ pub enum Instruction<CallType> {
   PartialApply(u16),
 }
 
-type CompilingModules = Vec<(String, Vec<(String, CompilingCallable)>)>;
-pub type CompiledModules = Vec<(String, Vec<(String, CompiledCallable)>)>;
+pub type LinkedFunction = Function<(u32, u32)>;
+type CompiledFunction = Function<(String, String)>;
+
+type LinkedInstruction = Instruction<(u32, u32)>;
+type CompiledInstruction = Instruction<(String, String)>;
+
+type CompiledModule = Vec<(String, CompiledCallable)>;
+type CompiledModules = Vec<(String, CompiledModule)>;
+pub type LinkedModule = Vec<(String, LinkedCallable)>;
+pub type LinkedModules = Vec<(String, LinkedModule)>;
 
 type ModuleIndex = HashMap<String, (u32, HashMap<String, u32>)>;
 
+// This is what a Module should actually be, instead of a (u32, HashMap<String, u32>)
+// struct Module {
+//   name: String,
+//   index: u32,
+//   functions: HashMap<String, u32>
+// }
+
 impl Package {
-  pub fn from_modules(modules: CompilingModules) -> Result<Self, String> {
+  pub fn from_modules(modules: CompiledModules) -> Result<Self, String> {
     let index = index_modules(modules.iter());
     Ok(Package {
-      functions: link(&index, modules)?,
+      modules: link(&index, modules)?,
       main: None,
     })
   }
 
   pub fn from_modules_with_main(
-    modules: CompilingModules,
+    compiled_modules: CompiledModules,
     main: (&str, &str),
   ) -> Result<Self, String> {
-    let index = index_modules(modules.iter());
-    let functions = link(&index, modules)?;
+    let index = index_modules(compiled_modules.iter());
+    let linked_modules = link(&index, compiled_modules)?;
     let main = find_function(&index, main.0, main.1);
     if main.is_none() {
       Err(format!("Main function {:?} was not found!", main))
     } else {
-      Ok(Package { functions, main })
+      Ok(Package { modules: linked_modules, main })
     }
   }
 
-  pub fn get_module(&self, mod_index: u32) -> Option<&(String, Vec<(String, CompiledCallable)>)> {
-    self.functions.get(mod_index as usize)
+  pub fn get_module(&self, mod_index: u32) -> Option<&(String, LinkedModule)> {
+    self.modules.get(mod_index as usize)
   }
 
-  pub fn get_function(&self, module: u32, function: u32) -> Option<&CompiledCallable> {
+  pub fn get_function(&self, module: u32, function: u32) -> Option<&LinkedCallable> {
     self
-      .functions
+      .modules
       .get(module as usize)
       .and_then(|(_, m)| m.get(function as usize))
       .map(|(_, f)| f)
@@ -116,7 +125,7 @@ impl Package {
 }
 
 fn index_modules<'a>(
-  modules: impl Iterator<Item = &'a (String, Vec<(String, CompilingCallable)>)>,
+  modules: impl Iterator<Item = &'a (String, CompiledModule)>,
 ) -> ModuleIndex {
   let mut module_table = hashmap! {};
   for (mod_index, (mod_name, functions)) in modules.enumerate() {
@@ -132,7 +141,9 @@ fn index_modules<'a>(
   module_table
 }
 
-fn link(module_table: &ModuleIndex, modules: CompilingModules) -> Result<CompiledModules, String> {
+fn link(module_table: &ModuleIndex, modules: CompiledModules) -> Result<LinkedModules, String> {
+  //! In a set of modules, replace all String-based references to functions and modules with
+  //! index-based references.
   let mut result = vec![];
   for (mod_name, functions) in modules {
     // consuming
@@ -147,7 +158,7 @@ fn link(module_table: &ModuleIndex, modules: CompilingModules) -> Result<Compile
         };
         Ok((func_name, new_callable))
       })
-      .collect::<Result<Vec<(String, CompiledCallable)>, String>>()?;
+      .collect::<Result<LinkedModule, String>>()?;
     result.push((mod_name, new_functions));
   }
   Ok(result)
@@ -155,14 +166,16 @@ fn link(module_table: &ModuleIndex, modules: CompilingModules) -> Result<Compile
 
 fn link_instructions(
   module_table: &ModuleIndex,
-  function: CompilingFunction,
-) -> Result<CompiledFunction, String> {
+  function: CompiledFunction,
+) -> Result<LinkedFunction, String> {
+  //! In a function, replace all string-based references to functions and modules with index-based
+  //! references.
   let instructions = function
     .instructions
     .into_iter()
     .map(|i| link_instruction(module_table, i))
     .collect::<Result<Vec<_>, _>>()?;
-  Ok(CompiledFunction {
+  Ok(LinkedFunction {
     num_params: function.num_params,
     num_locals: function.num_locals,
     instructions,
@@ -171,8 +184,8 @@ fn link_instructions(
 
 fn link_instruction(
   module_table: &ModuleIndex,
-  instruction: CompilingInstruction,
-) -> Result<CompiledInstruction, String> {
+  instruction: CompiledInstruction,
+) -> Result<LinkedInstruction, String> {
   Ok(match instruction {
     Instruction::Call((mod_name, func_name)) => {
       let (mod_idx, func_idx) = find_function(module_table, &mod_name, &func_name)
@@ -208,26 +221,29 @@ pub fn find_function(
   module_name: &str,
   function_name: &str,
 ) -> Option<(u32, u32)> {
-  index.get(module_name).and_then(|(mod_index, m)| {
-    m.get(function_name)
+  index.get(module_name).and_then(|(mod_index, functions)| {
+    functions.get(function_name)
       .map(|func_index| (*mod_index, *func_index))
   })
 }
 
 pub fn compile_module(
-  name: &str,
   asts: &[AST],
-) -> Result<Vec<(String, CompilingCallable)>, String> {
+) -> Result<(CompiledModule, Vec<String>), String> {
   let asts = transform_closures_in_module(asts)?;
   let mut functions = vec![];
+  let mut imports = vec![];
   for ast in &asts {
     match ast {
-      AST::DefineFn(func) => functions.extend(compile_function(name, "", func)?),
+      AST::Import(filename) => {
+        imports.push(filename.to_owned());
+      }
+      AST::DefineFn(func) => functions.extend(compile_function("main", "", func)?),
       AST::DeclareFn(decl) => functions.push((decl.name.clone(), Callable::Builtin)),
       x => return Err(format!("Unexpected form at top-level: {:?}", x)),
     };
   }
-  Ok(functions)
+  Ok((functions, imports))
 }
 
 /// Compile a function.
@@ -236,7 +252,7 @@ fn compile_function(
   module_name: &str,
   func_prefix: &str,
   f: &parser::Function,
-) -> Result<Vec<(String, CompilingCallable)>, String> {
+) -> Result<CompiledModule, String> {
   let mut num_locals = f.params.len() as u16;
   // Map of local-name to local-index
   let mut locals = HashMap::new();
@@ -271,7 +287,7 @@ fn compile_expr(
   num_locals: &mut u16,
   locals: &mut HashMap<String, u16>,
   scope_name: &str,
-) -> Result<Vec<CompilingInstruction>, String> {
+) -> Result<Vec<CompiledInstruction>, String> {
   let mut instructions = vec![];
   match ast {
     AST::Call(callable_expr, _arg_exprs) => {
@@ -376,25 +392,28 @@ fn compile_expr(
   Ok(instructions)
 }
 
-pub fn compile_executable_from_sources(
-  module_sources: &[(String, String)],
+pub fn compile_executable_from_source(
+  module_source: &str,
   main: (&str, &str),
 ) -> Result<Package, String> {
-  Package::from_modules_with_main(_compile_from_sources(module_sources)?, main)
+  Package::from_modules_with_main(_compile_from_source(module_source)?, main)
 }
 
-pub fn compile_from_sources(module_sources: &[(String, String)]) -> Result<Package, String> {
-  Package::from_modules(_compile_from_sources(module_sources)?)
+pub fn compile_from_source(module_source: &str) -> Result<Package, String> {
+  Package::from_modules(_compile_from_source(module_source)?)
 }
 
-fn _compile_from_sources(module_sources: &[(String, String)]) -> Result<CompilingModules, String> {
-  let mut compiling_modules: CompilingModules = vec![];
-  for (mod_name, mod_data) in module_sources {
-    let asts = parser::read_multiple(mod_data)?;
-    let compiling_module = compile_module(mod_name, &asts)?;
-    compiling_modules.push((mod_name.to_string(), compiling_module));
-  }
-  Ok(compiling_modules)
+fn _compile_from_source(module_source: &str) -> Result<CompiledModules, String> {
+  let _compiled_modules: CompiledModules = vec![];
+  let asts = parser::read_multiple(module_source)?;
+  let compiled_modules = compile_modules(&asts)?;
+  Ok(compiled_modules)
+}
+
+fn compile_modules(asts: &[AST]) -> Result<CompiledModules, String> {
+  // like how should I do this
+  let (compiled_module, _imports) = compile_module(asts)?;
+  Ok(vec![("main".to_string(), compiled_module)])
 }
 
 #[cfg(test)]
