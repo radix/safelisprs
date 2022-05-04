@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use crate::closure::transform_closures_in_module;
 use crate::parser::{self, Identifier, AST};
@@ -107,7 +107,10 @@ impl Package {
     if main.is_none() {
       Err(format!("Main function {:?} was not found!", main))
     } else {
-      Ok(Package { modules: linked_modules, main })
+      Ok(Package {
+        modules: linked_modules,
+        main,
+      })
     }
   }
 
@@ -124,9 +127,7 @@ impl Package {
   }
 }
 
-fn index_modules<'a>(
-  modules: impl Iterator<Item = &'a (String, CompiledModule)>,
-) -> ModuleIndex {
+fn index_modules<'a>(modules: impl Iterator<Item = &'a (String, CompiledModule)>) -> ModuleIndex {
   let mut module_table = hashmap! {};
   for (mod_index, (mod_name, functions)) in modules.enumerate() {
     module_table.insert(mod_name.to_string(), (mod_index as u32, hashmap! {}));
@@ -222,14 +223,13 @@ pub fn find_function(
   function_name: &str,
 ) -> Option<(u32, u32)> {
   index.get(module_name).and_then(|(mod_index, functions)| {
-    functions.get(function_name)
+    functions
+      .get(function_name)
       .map(|func_index| (*mod_index, *func_index))
   })
 }
 
-pub fn compile_module(
-  asts: &[AST],
-) -> Result<(CompiledModule, Vec<String>), String> {
+pub fn compile_module(asts: &[AST]) -> Result<(CompiledModule, Vec<String>), String> {
   let asts = transform_closures_in_module(asts)?;
   let mut functions = vec![];
   let mut imports = vec![];
@@ -404,16 +404,47 @@ pub fn compile_from_source(module_source: &str) -> Result<Package, String> {
 }
 
 fn _compile_from_source(module_source: &str) -> Result<CompiledModules, String> {
-  let _compiled_modules: CompiledModules = vec![];
   let asts = parser::read_multiple(module_source)?;
   let compiled_modules = compile_modules(&asts)?;
   Ok(compiled_modules)
 }
 
 fn compile_modules(asts: &[AST]) -> Result<CompiledModules, String> {
-  // like how should I do this
-  let (compiled_module, _imports) = compile_module(asts)?;
-  Ok(vec![("main".to_string(), compiled_module)])
+  // TODO: move file IO out of this function and into a trait implementation
+  use std::fs::File;
+  use std::io::prelude::*;
+  use std::path::PathBuf;
+
+  let mut compiled_modules = vec![];
+  let mut imports: VecDeque<String> = VecDeque::new();
+  println!("Compiling main module");
+  let (compiled_module, initial_imports) = compile_module(asts)?;
+  imports.extend(initial_imports);
+  compiled_modules.push(("main".to_string(), compiled_module));
+  while !imports.is_empty() {
+    let import = imports.pop_front().unwrap();
+    let mut import_filepath = PathBuf::from(import);
+    import_filepath.set_extension("sl");
+    let module_name = import_filepath
+      .file_stem()
+      .ok_or_else(|| format!("Couldn't figure out module name for {import_filepath:?}"))?
+      .to_str()
+      .ok_or_else(|| format!("Not UTF-8: {import_filepath:?}"))?;
+    let source = {
+      let mut buffer = String::new();
+      let mut f = File::open(&import_filepath)
+        .map_err(|e| format!("Error opening {import_filepath:?}: {e:?}"))?;
+      f.read_to_string(&mut buffer).map_err(|e| e.to_string())?;
+      buffer
+    };
+    let asts = parser::read_multiple(&source)?;
+    println!("Compiling additional file {import_filepath:?} as module {module_name:?}");
+    let (compiled_module, more_imports) = compile_module(&asts)?;
+    compiled_modules.push((module_name.to_owned(), compiled_module));
+    imports.extend(more_imports);
+  }
+  println!("Done compiling.");
+  Ok(compiled_modules)
 }
 
 #[cfg(test)]

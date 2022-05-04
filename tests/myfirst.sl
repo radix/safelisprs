@@ -1,3 +1,5 @@
+(use "src/std")
+
 (fn add1 (n) (std.+ n 1))
 
 

@@ -38,7 +38,7 @@ fn main() -> Result<()> {
   let format = args.format;
   let output_file = args.output;
 
-  println!("Compiling {:?} to {}", input_file, output_file);
+  println!("Building {:?} to {}", input_file, output_file);
 
   let input_filename = PathBuf::from(input_file);
 
