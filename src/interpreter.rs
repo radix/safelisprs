@@ -2,7 +2,7 @@ use std::default::Default;
 use std::rc::Rc; // TODO: use Manishearth/rust-gc
 
 use crate::builtins::builtin_builtins;
-use crate::compiler::{Callable, LinkedFunction as Function, Instruction, Package};
+use crate::compiler::{Callable, Instruction, LinkedFunction as Function, Package};
 
 #[derive(Debug, Default)]
 pub struct Stack {
@@ -295,8 +295,7 @@ mod test {
       (fn main () (add2 3))
     "
     .to_string();
-    let package =
-      compile_executable_from_source(&source, ("main", "main")).unwrap();
+    let package = compile_executable_from_source(&source, ("main", "main")).unwrap();
 
     let mut interpreter = Interpreter::with_builtins(package, mybuiltins);
     assert_eq!(interpreter.call_main().unwrap(), Rc::new(SLVal::Int(5)));
@@ -354,8 +353,7 @@ mod test {
       (fn main () ((outer)))
     "
     .to_string();
-    let pkg =
-      compile_executable_from_source(&source, ("main", "main")).unwrap();
+    let pkg = compile_executable_from_source(&source, ("main", "main")).unwrap();
     let mut interp = Interpreter::new(pkg);
     assert_eq!(interp.call_main().unwrap(), Rc::new(SLVal::Int(1)));
   }

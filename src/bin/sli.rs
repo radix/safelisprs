@@ -12,16 +12,14 @@ use clap::Parser;
 use safelisp::compiler::Package;
 use safelisp::interpreter::Interpreter;
 
-
-
 #[derive(Parser)]
 #[clap(author, version, about, long_about = None)]
 struct Args {
-  #[clap(long, default_value = "bincode", help="either yaml or bincode")]
+  #[clap(long, default_value = "bincode", help = "either yaml or bincode")]
   format: String,
 
-  #[clap(help="A .slc file to interpret")]
-  input_file: String
+  #[clap(help = "A .slc file to interpret")]
+  input_file: String,
 }
 
 fn main() -> Result<()> {

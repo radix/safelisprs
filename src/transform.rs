@@ -25,7 +25,9 @@ where
     Some(replacement) => replacement,
     None => match ast {
       AST::Let(name, expr) => AST::Let(name.to_string(), Box::new(transform(expr, transformer)?)),
-      AST::Import(filename) => {panic!("NYI: Import for {filename:?}")}
+      AST::Import(filename) => {
+        panic!("NYI: Import for {filename:?}")
+      }
       AST::DefineFn(func) => {
         let code = transform_multi(func.code.iter(), transformer)?;
         AST::DefineFn(Function {
