@@ -98,8 +98,8 @@ where
     }
   }
 
-  /// Call a FunctionRef or a Partial in an SLVal, returning the result.
   pub fn call_slval(&mut self, slval: Rc<SLVal>) -> Result<Rc<SLVal>, String> {
+    //! Call a FunctionRef or a Partial in an SLVal, returning the result.
     let mut stack: Stack = Default::default();
     stack.push(slval);
     call_dynamic(&self.package, &mut stack, &mut self.builtins)?;
@@ -179,6 +179,7 @@ fn call_dynamic<B>(package: &Package, stack: &mut Stack, builtins: &mut B) -> Re
 where
   B: for<'r, 's> FnMut(&'r str, &'r str, &'s mut Stack) -> BuiltinResult,
 {
+  //! Call the function that's on the top of stack.
   let callable = stack.pop()?;
   match &*callable {
     SLVal::FunctionRef(mod_index, func_index) => {

@@ -238,7 +238,7 @@ pub fn compile_module(asts: &[AST]) -> Result<(CompiledModule, Vec<String>), Str
       AST::Import(filename) => {
         imports.push(filename.to_owned());
       }
-      AST::DefineFn(func) => functions.extend(compile_function("main", "", func)?),
+      AST::DefineFn(func) => functions.extend(compile_function("main", func)?),
       AST::DeclareFn(decl) => functions.push((decl.name.clone(), Callable::Builtin)),
       x => return Err(format!("Unexpected form at top-level: {:?}", x)),
     };
@@ -250,7 +250,6 @@ pub fn compile_module(asts: &[AST]) -> Result<(CompiledModule, Vec<String>), Str
 /// Returns a vec of functions in case any of them contain nested functions.
 fn compile_function(
   module_name: &str,
-  func_prefix: &str,
   f: &parser::Function,
 ) -> Result<CompiledModule, String> {
   let mut num_locals = f.params.len() as u16;
@@ -260,14 +259,12 @@ fn compile_function(
     locals.insert(param.clone(), idx as u16);
   }
   let mut instructions = vec![];
-  let nsp = vec![func_prefix, &f.name].join("(");
   for ast in &f.code {
     instructions.extend(compile_expr(
       module_name,
       ast,
       &mut num_locals,
       &mut locals,
-      &nsp,
     )?);
   }
   instructions.push(Instruction::Return);
@@ -286,7 +283,6 @@ fn compile_expr(
   ast: &AST,
   num_locals: &mut u16,
   locals: &mut HashMap<String, u16>,
-  scope_name: &str,
 ) -> Result<Vec<CompiledInstruction>, String> {
   let mut instructions = vec![];
   match ast {
@@ -302,7 +298,6 @@ fn compile_expr(
           expr,
           num_locals,
           locals,
-          scope_name,
         )?);
       }
       let (module_name, function_name) = match identifier {
@@ -317,7 +312,6 @@ fn compile_expr(
         expr,
         num_locals,
         locals,
-        scope_name,
       )?);
       instructions.push(Instruction::MakeCell);
     }
@@ -334,7 +328,6 @@ fn compile_expr(
         expr,
         num_locals,
         locals,
-        scope_name,
       )?);
       instructions.push(Instruction::DerefCell);
     }
@@ -354,7 +347,6 @@ fn compile_expr(
         expr,
         num_locals,
         locals,
-        scope_name,
       )?);
       instructions.push(Instruction::SetLocal(locals[name]))
     }
@@ -365,7 +357,6 @@ fn compile_expr(
           expr,
           num_locals,
           locals,
-          scope_name,
         )?);
       }
       instructions.extend(compile_expr(
@@ -373,7 +364,6 @@ fn compile_expr(
         expr,
         num_locals,
         locals,
-        scope_name,
       )?);
       instructions.push(Instruction::PartialApply(args.len() as u16));
     }
@@ -458,7 +448,7 @@ mod test {
       params: vec!["a".to_string()],
       code: vec![AST::Variable("a".to_string())],
     };
-    let code = compile_function("main", "", &func).unwrap();
+    let code = compile_function("main", &func).unwrap();
     assert_eq!(
       code,
       vec![(

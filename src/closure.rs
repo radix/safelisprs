@@ -8,7 +8,7 @@ pub fn transform_closures_in_module(items: &[AST]) -> Result<Vec<AST>, String> {
   //! Safelisp. We represent closures as more general-purpose things: top-level functions, Cells,
   //! and Partial Applications.
   //!
-  //! Nested functions are represented as top-level functions. Any variables they use from their
+  //! Nested functions are lifted to top-level functions. Any variables they use from their
   //! definition environment are passed in as parameters. However, to allow shared mutation, they
   //! are wrapped up in Cells and all usage both inside the nested function and in the outer
   //! function is transformed to deref the contents from the cell. Then, to actually represent the
@@ -427,8 +427,24 @@ mod test {
     let new_asts = transform_closures_in_module(&asts)?;
 
     let expected = vec![
-      //TODO: fill in
-
+      AST::DefineFn(Function {
+        name: "inner:(closure)".to_string(),
+        params: vec![],
+        code: vec![AST::Variable("a".to_string())],
+      }),
+      AST::DefineFn(Function {
+        name: "intermediate:(closure)".to_string(),
+        params: vec![],
+        code: vec![AST::Variable("inner:(closure)".to_string())],
+      }),
+      AST::DefineFn(Function {
+        name: "outer".to_string(),
+        params: vec![],
+        code: vec![
+          AST::Let("a".to_string(), Box::new(AST::Int(1))),
+          AST::Variable("intermediate:(closure)".to_string()),
+        ],
+      }),
     ];
     assert_eq!(new_asts, expected);
     Ok(())
