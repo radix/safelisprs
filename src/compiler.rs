@@ -252,7 +252,6 @@ fn compile_function(
   module_name: &str,
   f: &parser::Function,
 ) -> Result<CompiledModule, String> {
-  let mut num_locals = f.params.len() as u16;
   // Map of local-name to local-index
   let mut locals = HashMap::new();
   for (idx, param) in f.params.iter().enumerate() {
@@ -263,7 +262,6 @@ fn compile_function(
     instructions.extend(compile_expr(
       module_name,
       ast,
-      &mut num_locals,
       &mut locals,
     )?);
   }
@@ -272,7 +270,7 @@ fn compile_function(
     f.name.to_string(),
     Callable::Function(Function {
       num_params: f.params.len() as u16,
-      num_locals: num_locals as u16,
+      num_locals: locals.len() as u16,
       instructions,
     }),
   )])
@@ -281,7 +279,6 @@ fn compile_function(
 fn compile_expr(
   module_name: &str,
   ast: &AST,
-  num_locals: &mut u16,
   locals: &mut HashMap<String, u16>,
 ) -> Result<Vec<CompiledInstruction>, String> {
   let mut instructions = vec![];
@@ -296,7 +293,6 @@ fn compile_expr(
         instructions.extend(compile_expr(
           module_name,
           expr,
-          num_locals,
           locals,
         )?);
       }
@@ -310,7 +306,6 @@ fn compile_expr(
       instructions.extend(compile_expr(
         module_name,
         expr,
-        num_locals,
         locals,
       )?);
       instructions.push(Instruction::MakeCell);
@@ -326,7 +321,6 @@ fn compile_expr(
       instructions.extend(compile_expr(
         module_name,
         expr,
-        num_locals,
         locals,
       )?);
       instructions.push(Instruction::DerefCell);
@@ -339,13 +333,11 @@ fn compile_expr(
     }
     AST::Let(name, expr) => {
       if !locals.contains_key(name) {
-        locals.insert(name.clone(), *num_locals);
-        *num_locals += 1;
+        locals.insert(name.clone(), locals.len() as u16);
       }
       instructions.extend(compile_expr(
         module_name,
         expr,
-        num_locals,
         locals,
       )?);
       instructions.push(Instruction::SetLocal(locals[name]))
@@ -355,14 +347,12 @@ fn compile_expr(
         instructions.extend(compile_expr(
           module_name,
           expr,
-          num_locals,
           locals,
         )?);
       }
       instructions.extend(compile_expr(
         module_name,
         expr,
-        num_locals,
         locals,
       )?);
       instructions.push(Instruction::PartialApply(args.len() as u16));
