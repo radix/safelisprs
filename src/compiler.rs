@@ -229,8 +229,11 @@ pub fn find_function(
   })
 }
 
-pub fn compile_module(asts: &[AST]) -> Result<(CompiledModule, Vec<String>), String> {
-  let asts = transform_closures_in_module(asts)?;
+pub fn compile_module(
+  module_name: &str,
+  asts: &[AST],
+) -> Result<(CompiledModule, Vec<String>), String> {
+  let asts = transform_closures_in_module(module_name, asts)?;
   let mut functions = vec![];
   let mut imports = vec![];
   for ast in &asts {
@@ -238,7 +241,7 @@ pub fn compile_module(asts: &[AST]) -> Result<(CompiledModule, Vec<String>), Str
       AST::Import(filename) => {
         imports.push(filename.to_owned());
       }
-      AST::DefineFn(func) => functions.extend(compile_function("main", func)?),
+      AST::DefineFn(func) => functions.extend(compile_function(module_name, func)?),
       AST::DeclareFn(decl) => functions.push((decl.name.clone(), Callable::Builtin)),
       x => return Err(format!("Unexpected form at top-level: {:?}", x)),
     };
@@ -248,10 +251,7 @@ pub fn compile_module(asts: &[AST]) -> Result<(CompiledModule, Vec<String>), Str
 
 /// Compile a function.
 /// Returns a vec of functions in case any of them contain nested functions.
-fn compile_function(
-  module_name: &str,
-  f: &parser::Function,
-) -> Result<CompiledModule, String> {
+fn compile_function(module_name: &str, f: &parser::Function) -> Result<CompiledModule, String> {
   // Map of local-name to local-index
   let mut locals = HashMap::new();
   for (idx, param) in f.params.iter().enumerate() {
@@ -259,11 +259,7 @@ fn compile_function(
   }
   let mut instructions = vec![];
   for ast in &f.code {
-    instructions.extend(compile_expr(
-      module_name,
-      ast,
-      &mut locals,
-    )?);
+    instructions.extend(compile_expr(module_name, ast, &mut locals)?);
   }
   instructions.push(Instruction::Return);
   Ok(vec![(
@@ -283,18 +279,16 @@ fn compile_expr(
 ) -> Result<Vec<CompiledInstruction>, String> {
   let mut instructions = vec![];
   match ast {
-    AST::Call(callable_expr, _arg_exprs) => {
-      return Err(format!(
-        "NYI: non-constant functions: {callable_expr:?} -- {_arg_exprs:?}"
-      ))
+    AST::Call(callable_expr, arg_exprs) => {
+      for expr in arg_exprs {
+        instructions.extend(compile_expr(module_name, expr, locals)?);
+      }
+      instructions.extend(compile_expr(module_name, callable_expr, locals)?);
+      instructions.push(Instruction::CallDynamic)
     }
     AST::CallFixed(identifier, arg_exprs) => {
       for expr in arg_exprs {
-        instructions.extend(compile_expr(
-          module_name,
-          expr,
-          locals,
-        )?);
+        instructions.extend(compile_expr(module_name, expr, locals)?);
       }
       let (module_name, function_name) = match identifier {
         Identifier::Bare(fname) => (module_name.to_string(), fname.to_string()),
@@ -303,11 +297,7 @@ fn compile_expr(
       instructions.push(Instruction::Call((module_name, function_name)))
     }
     AST::Cell(expr) => {
-      instructions.extend(compile_expr(
-        module_name,
-        expr,
-        locals,
-      )?);
+      instructions.extend(compile_expr(module_name, expr, locals)?);
       instructions.push(Instruction::MakeCell);
     }
     AST::DeclareFn(decl) => {
@@ -318,11 +308,7 @@ fn compile_expr(
     }
     AST::DefineFn(func) => return Err(format!("[BUG] DefineFn in an expression: {}", func.name)),
     AST::DerefCell(expr) => {
-      instructions.extend(compile_expr(
-        module_name,
-        expr,
-        locals,
-      )?);
+      instructions.extend(compile_expr(module_name, expr, locals)?);
       instructions.push(Instruction::DerefCell);
     }
     AST::FunctionRef(mname, fname) => {
@@ -335,26 +321,14 @@ fn compile_expr(
       if !locals.contains_key(name) {
         locals.insert(name.clone(), locals.len() as u16);
       }
-      instructions.extend(compile_expr(
-        module_name,
-        expr,
-        locals,
-      )?);
+      instructions.extend(compile_expr(module_name, expr, locals)?);
       instructions.push(Instruction::SetLocal(locals[name]))
     }
     AST::PartialApply(expr, args) => {
       for expr in args {
-        instructions.extend(compile_expr(
-          module_name,
-          expr,
-          locals,
-        )?);
+        instructions.extend(compile_expr(module_name, expr, locals)?);
       }
-      instructions.extend(compile_expr(
-        module_name,
-        expr,
-        locals,
-      )?);
+      instructions.extend(compile_expr(module_name, expr, locals)?);
       instructions.push(Instruction::PartialApply(args.len() as u16));
     }
     AST::Variable(name) => {
@@ -398,7 +372,7 @@ fn compile_modules(asts: &[AST]) -> Result<CompiledModules, String> {
   let mut compiled_modules = vec![];
   let mut imports: VecDeque<String> = VecDeque::new();
   println!("Compiling main module");
-  let (compiled_module, initial_imports) = compile_module(asts)?;
+  let (compiled_module, initial_imports) = compile_module("main", asts)?;
   imports.extend(initial_imports);
   compiled_modules.push(("main".to_string(), compiled_module));
   while !imports.is_empty() {
@@ -419,7 +393,7 @@ fn compile_modules(asts: &[AST]) -> Result<CompiledModules, String> {
     };
     let asts = parser::read_multiple(&source)?;
     println!("Compiling additional file {import_filepath:?} as module {module_name:?}");
-    let (compiled_module, more_imports) = compile_module(&asts)?;
+    let (compiled_module, more_imports) = compile_module(module_name, &asts)?;
     compiled_modules.push((module_name.to_owned(), compiled_module));
     imports.extend(more_imports);
   }

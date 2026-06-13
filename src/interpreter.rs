@@ -164,6 +164,7 @@ fn partial_apply(stack: &mut Stack, num_args: u16) -> Result<(), String> {
   for _ in 0..num_args {
     args.push(stack.pop()?)
   }
+  args.reverse();
   let closure = match &*func {
     SLVal::FunctionRef(mod_index, func_index) => Ok(Rc::new(SLVal::Partial(Partial {
       function: (*mod_index, *func_index),
@@ -258,6 +259,12 @@ fn place_locals(
 mod test {
   use super::*;
   use crate::compiler::{self, *};
+
+  fn eval_main(source: &str) -> Rc<SLVal> {
+    let pkg = compile_executable_from_source(&source.to_string(), ("main", "main")).unwrap();
+    let mut interp = Interpreter::new(pkg);
+    interp.call_main().unwrap()
+  }
 
   #[test]
   fn test_interpret_id() {
@@ -357,5 +364,56 @@ mod test {
     let pkg = compile_executable_from_source(&source, ("main", "main")).unwrap();
     let mut interp = Interpreter::new(pkg);
     assert_eq!(interp.call_main().unwrap(), Rc::new(SLVal::Int(1)));
+  }
+
+  #[test]
+  fn nested_closure_end_to_end() {
+    let source = "
+      (fn outer ()
+        (let a 1)
+        (fn middle ()
+          (fn inner () a)
+          inner)
+        middle)
+      (fn main () (((outer))))
+    ";
+    assert_eq!(eval_main(source), Rc::new(SLVal::Int(1)));
+  }
+
+  #[test]
+  fn closure_captures_outer_parameter() {
+    let source = "
+      (fn outer (a)
+        (fn inner () a)
+        inner)
+      (fn main () ((outer 7)))
+    ";
+    assert_eq!(eval_main(source), Rc::new(SLVal::Int(7)));
+  }
+
+  #[test]
+  fn closure_capture_order() {
+    let source = "
+      (fn outer ()
+        (let a 1)
+        (let b 2)
+        (fn inner ()
+          (let ignore b)
+          a)
+        inner)
+      (fn main () ((outer)))
+    ";
+    assert_eq!(eval_main(source), Rc::new(SLVal::Int(1)));
+  }
+
+  #[test]
+  fn non_capturing_closure_end_to_end() {
+    let source = "
+      (fn outer ()
+        (fn inner () 5)
+        inner)
+      (fn main () ((outer)))
+    ";
+    assert_eq!(eval_main(source), Rc::new(SLVal::Int(5)));
   }
 }
