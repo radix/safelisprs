@@ -416,4 +416,14 @@ mod test {
     ";
     assert_eq!(eval_main(source), Rc::new(SLVal::Int(5)));
   }
+
+  #[test]
+  fn function_definition_expression_returns_function() {
+    let source = "
+      (fn outer ()
+        (fn inner () 5))
+      (fn main () ((outer)))
+    ";
+    assert_eq!(eval_main(source), Rc::new(SLVal::Int(5)));
+  }
 }
