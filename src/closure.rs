@@ -1,9 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::parser::{Function, AST};
-use crate::transform::{transform, transform_multi};
 
-pub fn transform_closures_in_module(items: &[AST]) -> Result<Vec<AST>, String> {
+pub fn transform_closures_in_module(module_name: &str, items: &[AST]) -> Result<Vec<AST>, String> {
   //! There isn't technically anything called a "closure" in either the runtime or compile time of
   //! Safelisp. We represent closures as more general-purpose things: top-level functions, Cells,
   //! and Partial Applications.
@@ -18,7 +17,7 @@ pub fn transform_closures_in_module(items: &[AST]) -> Result<Vec<AST>, String> {
   let mut result = vec![];
   for item in items {
     let out = match item {
-      AST::DefineFn(func) => closurize_function(func)?,
+      AST::DefineFn(func) => closurize_function(module_name, func)?,
       x => vec![x.clone()],
     };
     result.extend(out);
@@ -26,203 +25,359 @@ pub fn transform_closures_in_module(items: &[AST]) -> Result<Vec<AST>, String> {
   Ok(result)
 }
 
-fn closurize_function(outer_func: &Function) -> Result<Vec<AST>, String> {
+#[derive(Debug, Clone)]
+struct FunctionAnalysis {
+  captures: Vec<String>,
+  cell_vars: Vec<String>,
+  nested: Vec<NestedFunctionAnalysis>,
+}
+
+#[derive(Debug, Clone)]
+struct NestedFunctionAnalysis {
+  original_name: String,
+  lifted_name: String,
+  analysis: FunctionAnalysis,
+}
+
+#[derive(Debug, Clone)]
+struct FunctionBinding {
+  lifted_name: String,
+  captures: Vec<String>,
+}
+
+fn closurize_function(module_name: &str, outer_func: &Function) -> Result<Vec<AST>, String> {
   //! Do the following things to a top-levele function:
   //! 1. accumulate variable definitions
   //! 2. for any inner function, check for uses of outer variables, and convert them to DerefCell
   //! 3. Remove those inner functions from the outer function and emit them as (mangled) top-level
   //!    functions.
   //! 4. then, transform the outer function to wrap those inner-used variables in Cell.
+  let analysis = analyze_function(outer_func, &hashset! {})?;
   let mut top_level = vec![];
-  let mut locals = hashset! {};
-  locals.extend(outer_func.params.iter().cloned());
-  let mut all_closure_bindings = hashmap! {};
-
-  let code = transform_multi(outer_func.code.iter(), &mut |ast: &AST| {
-    _closure_code_transform(ast, &mut locals, &mut all_closure_bindings, &mut top_level)
-  })?;
-  let outer_func = Function {
-    name: outer_func.name.clone(),
-    params: outer_func.params.clone(),
-    code,
-  };
-  let mut outer_func = transform_outer_func(&outer_func, &all_closure_bindings)?;
-
-  // If a closure uses one of our parameters, we need to insert a `(let param (cell param))` at the
-  // top.
-  let mut rebindings = vec![];
-  for bindings in all_closure_bindings.values() {
-    for binding in bindings {
-      if outer_func.params.contains(binding) {
-        rebindings.push(AST::Let(
-          binding.clone(),
-          Box::new(AST::Cell(Box::new(AST::Variable(binding.clone())))),
-        ));
-      }
-    }
-  }
-  outer_func.code.splice(0..0, rebindings);
-
+  let outer_func = lower_function(
+    module_name,
+    outer_func,
+    outer_func.name.clone(),
+    &analysis,
+    &mut top_level,
+  )?;
   top_level.push(AST::DefineFn(outer_func));
   Ok(top_level)
 }
 
-fn _closure_code_transform(
-  ast: &AST,
-  locals: &mut HashSet<String>,
-  all_closure_bindings: &mut HashMap<String, Vec<String>>,
-  top_level: &mut Vec<AST>,
-) -> Result<Option<AST>, String> {
-  //! This is a transformer suitable for passing to `transform`.
-  //! See `closurize_function`.
-  let new_ast = match ast {
-    AST::Let(name, _v) => {
-      locals.insert(name.clone());
-      None
-    }
-    AST::DefineFn(inner_func) => {
-      // TODO: handle name mangling / uniquification in a better way.
-      let new_name = format!("{}:(closure)", inner_func.name);
-      let (used_env_vars, inner_func) = transform_inner_func(inner_func, locals)?;
-      all_closure_bindings.insert(inner_func.name.clone(), used_env_vars);
-      top_level.push(AST::DefineFn(Function {
-        name: new_name,
-        ..inner_func
-      }));
-      // Replace the definition of the function with a reference to its name.
-      // Later we will transform this Variable to a PartialApply(variable, cell_args...),
-      // *if* it uses variables from the environment.
-      Some(AST::Variable(inner_func.name))
-    }
-    _ => None,
-  };
-  Ok(new_ast)
-}
-
-fn transform_inner_func(
+fn analyze_function(
   func: &Function,
   environment: &HashSet<String>,
-) -> Result<(Vec<String>, Function), String> {
-  //! Transform a function so that any free variables are converted to Celled parameters.
-  //! Also returns the names of any variables used in the function that come from the environment.
-  //! * `environment` - the names that are defined in the containing function.
+) -> Result<FunctionAnalysis, String> {
   let mut locals = hashset! {};
-  let mut env_vars = vec![]; // the *used* env vars
-  let code = {
-    let mut transformer =
-      |ast: &AST| _inner_func_transform(ast, &mut locals, &mut env_vars, environment);
-    transform_multi(func.code.iter(), &mut transformer)?
-  };
-  let mut params = vec![];
-  params.extend(env_vars.iter().cloned());
-  params.extend(func.params.clone());
-  Ok((
-    env_vars,
-    Function {
-      name: func.name.clone(),
-      params,
-      code,
-    },
-  ))
+  locals.extend(func.params.iter().cloned());
+  let mut captures = vec![];
+  let mut cell_vars = vec![];
+  let mut nested = vec![];
+  for ast in &func.code {
+    analyze_ast(
+      ast,
+      &mut locals,
+      environment,
+      &mut captures,
+      &mut cell_vars,
+      &mut nested,
+    )?;
+  }
+  Ok(FunctionAnalysis {
+    captures,
+    cell_vars,
+    nested,
+  })
 }
 
-fn _inner_func_transform(
+fn analyze_ast(
   ast: &AST,
   locals: &mut HashSet<String>,
-  env_vars: &mut Vec<String>,
   environment: &HashSet<String>,
-) -> Result<Option<AST>, String> {
+  captures: &mut Vec<String>,
+  cell_vars: &mut Vec<String>,
+  nested: &mut Vec<NestedFunctionAnalysis>,
+) -> Result<(), String> {
   match ast {
     AST::Let(name, expr) => {
-      let expr = transform(expr, &mut |ast: &AST| {
-        _inner_func_transform(ast, locals, env_vars, environment)
-      })?;
-      // Very important: insert the name into locals *after* transforming the expression!
-      // because: `(let a (+ a 1))`
+      analyze_ast(expr, locals, environment, captures, cell_vars, nested)?;
       locals.insert(name.clone());
-      Ok(Some(AST::Let(name.clone(), Box::new(expr))))
     }
-    AST::Variable(ref name) => {
-      if (!locals.contains(name)) && environment.contains(name) {
-        if !env_vars.contains(name) {
-          env_vars.push(name.clone());
+    AST::DefineFn(inner_func) => {
+      let mut inner_environment = environment.clone();
+      inner_environment.extend(locals.iter().cloned());
+      let inner_analysis = analyze_function(inner_func, &inner_environment)?;
+      for capture in &inner_analysis.captures {
+        if locals.contains(capture) {
+          push_unique(cell_vars, capture.clone());
+        } else if environment.contains(capture) {
+          push_unique(captures, capture.clone());
         }
-        Ok(Some(AST::DerefCell(Box::new(AST::Variable(name.clone())))))
-      } else {
-        Ok(None)
+      }
+      nested.push(NestedFunctionAnalysis {
+        original_name: inner_func.name.clone(),
+        lifted_name: mangle_closure_name(&inner_func.name),
+        analysis: inner_analysis,
+      });
+    }
+    AST::Variable(name) => {
+      if !locals.contains(name) && environment.contains(name) {
+        push_unique(captures, name.clone());
       }
     }
-    // Specifically avoid recursing into function definitions, we're only doing one at a time.
-    // TODO: actually we need to closurize these too!!!???
-    AST::DefineFn(_) => Ok(Some(ast.clone())),
-    _ => Ok(None),
+    AST::Call(callable, args) => {
+      analyze_ast(callable, locals, environment, captures, cell_vars, nested)?;
+      for arg in args {
+        analyze_ast(arg, locals, environment, captures, cell_vars, nested)?;
+      }
+    }
+    AST::CallFixed(_, args) => {
+      for arg in args {
+        analyze_ast(arg, locals, environment, captures, cell_vars, nested)?;
+      }
+    }
+    AST::Cell(expr) | AST::DerefCell(expr) => {
+      analyze_ast(expr, locals, environment, captures, cell_vars, nested)?;
+    }
+    AST::PartialApply(callable, args) => {
+      analyze_ast(callable, locals, environment, captures, cell_vars, nested)?;
+      for arg in args {
+        analyze_ast(arg, locals, environment, captures, cell_vars, nested)?;
+      }
+    }
+    AST::Import(_)
+    | AST::DeclareFn(_)
+    | AST::Int(_)
+    | AST::Float(_)
+    | AST::String(_)
+    | AST::FunctionRef(_, _) => {}
   }
+  Ok(())
 }
 
-fn transform_outer_func(
+fn lower_function(
+  module_name: &str,
   func: &Function,
-  closure_bindings: &HashMap<String, Vec<String>>,
+  lowered_name: String,
+  analysis: &FunctionAnalysis,
+  top_level: &mut Vec<AST>,
 ) -> Result<Function, String> {
-  //! Transform a function which *contains* closures so that any variables that are
-  //! 1. defined in the outer functions
-  //! 2. used in any inner functions
-  //! are wrapped in Cells.
-
-  let mut all_used_free_vars = hashset! {};
-  for bindings in closure_bindings.values() {
-    all_used_free_vars.extend(bindings.iter().cloned());
+  let mut locals = hashset! {};
+  locals.extend(func.params.iter().cloned());
+  let mut bindings = hashmap! {};
+  let mut nested_iter = analysis.nested.iter();
+  let mut code = vec![];
+  for ast in &func.code {
+    code.push(lower_ast(
+      module_name,
+      ast,
+      analysis,
+      &mut locals,
+      &mut bindings,
+      &mut nested_iter,
+      top_level,
+    )?);
   }
-  let code = {
-    let mut transformer =
-      |ast: &AST| _outer_func_transform(ast, &mut all_used_free_vars, closure_bindings);
-    transform_multi(func.code.iter(), &mut transformer)?
-  };
+
+  for param in func.params.iter().rev() {
+    if analysis.cell_vars.contains(param) {
+      code.splice(
+        0..0,
+        [AST::Let(
+          param.clone(),
+          Box::new(AST::Cell(Box::new(AST::Variable(param.clone())))),
+        )],
+      );
+    }
+  }
+
+  let mut params = vec![];
+  params.extend(analysis.captures.iter().cloned());
+  params.extend(func.params.clone());
   Ok(Function {
-    name: func.name.clone(),
-    params: func.params.clone(),
+    name: lowered_name,
+    params,
     code,
   })
 }
 
-fn _outer_func_transform(
+fn lower_ast<'a>(
+  module_name: &str,
   ast: &AST,
-  all_used_free_vars: &mut HashSet<String>,
-  closure_bindings: &HashMap<String, Vec<String>>,
-) -> Result<Option<AST>, String> {
+  analysis: &FunctionAnalysis,
+  locals: &mut HashSet<String>,
+  bindings: &mut HashMap<String, FunctionBinding>,
+  nested_iter: &mut impl Iterator<Item = &'a NestedFunctionAnalysis>,
+  top_level: &mut Vec<AST>,
+) -> Result<AST, String> {
   match ast {
-    // Variable definitions need to wrap their expression in Cell.
     AST::Let(name, expr) => {
-      if all_used_free_vars.contains(name) {
-        Ok(Some(AST::Let(
-          name.clone(),
-          Box::new(AST::Cell(expr.clone())),
-        )))
+      let expr = lower_ast(
+        module_name,
+        expr,
+        analysis,
+        locals,
+        bindings,
+        nested_iter,
+        top_level,
+      )?;
+      locals.insert(name.clone());
+      if analysis.cell_vars.contains(name) {
+        Ok(AST::Let(name.clone(), Box::new(AST::Cell(Box::new(expr)))))
       } else {
-        Ok(None)
+        Ok(AST::Let(name.clone(), Box::new(expr)))
       }
     }
-    // Variable *usage* needs to be wrapped in a DerefCell.
-    AST::Variable(ref name) => {
-      if all_used_free_vars.contains(name) {
-        Ok(Some(AST::DerefCell(Box::new(AST::Variable(name.clone())))))
-      } else if let Some(params) = closure_bindings.get(name) {
-        if !params.is_empty() {
-          Ok(Some(AST::PartialApply(
-            Box::new(AST::Variable(format!("{}:(closure)", name))),
-            params.iter().cloned().map(AST::Variable).collect(),
-          )))
-        } else {
-          Ok(Some(AST::Variable(format!("{}:(closure)", name))))
-        }
+    AST::DefineFn(inner_func) => {
+      let nested_analysis = nested_iter.next().ok_or_else(|| {
+        format!(
+          "Internal error: missing closure analysis for {}",
+          inner_func.name
+        )
+      })?;
+      let lowered = lower_function(
+        module_name,
+        inner_func,
+        nested_analysis.lifted_name.clone(),
+        &nested_analysis.analysis,
+        top_level,
+      )?;
+      top_level.push(AST::DefineFn(lowered));
+      let binding = FunctionBinding {
+        lifted_name: nested_analysis.lifted_name.clone(),
+        captures: nested_analysis.analysis.captures.clone(),
+      };
+      bindings.insert(nested_analysis.original_name.clone(), binding.clone());
+      Ok(closure_expr(module_name, &binding))
+    }
+    AST::Variable(name) => {
+      if let Some(binding) = bindings.get(name) {
+        return Ok(closure_expr(module_name, binding));
+      }
+      if analysis.captures.contains(name) && !locals.contains(name) {
+        Ok(AST::DerefCell(Box::new(AST::Variable(name.clone()))))
+      } else if analysis.cell_vars.contains(name) && locals.contains(name) {
+        Ok(AST::DerefCell(Box::new(AST::Variable(name.clone()))))
       } else {
-        Ok(None)
+        Ok(ast.clone())
       }
     }
-    // Specifically avoid recursing into function definitions, we're only doing one at a time.
-    // TODO: actually we need to closurize these too!!!???
-    AST::DefineFn(_) => Ok(Some(ast.clone())),
-    _ => Ok(None),
+    AST::Call(callable, args) => {
+      let callable = lower_ast(
+        module_name,
+        callable,
+        analysis,
+        locals,
+        bindings,
+        nested_iter,
+        top_level,
+      )?;
+      let mut new_args = vec![];
+      for arg in args {
+        new_args.push(lower_ast(
+          module_name,
+          arg,
+          analysis,
+          locals,
+          bindings,
+          nested_iter,
+          top_level,
+        )?);
+      }
+      Ok(AST::Call(Box::new(callable), new_args))
+    }
+    AST::CallFixed(ident, args) => {
+      let mut new_args = vec![];
+      for arg in args {
+        new_args.push(lower_ast(
+          module_name,
+          arg,
+          analysis,
+          locals,
+          bindings,
+          nested_iter,
+          top_level,
+        )?);
+      }
+      Ok(AST::CallFixed(ident.clone(), new_args))
+    }
+    AST::Cell(expr) => Ok(AST::Cell(Box::new(lower_ast(
+      module_name,
+      expr,
+      analysis,
+      locals,
+      bindings,
+      nested_iter,
+      top_level,
+    )?))),
+    AST::DerefCell(expr) => Ok(AST::DerefCell(Box::new(lower_ast(
+      module_name,
+      expr,
+      analysis,
+      locals,
+      bindings,
+      nested_iter,
+      top_level,
+    )?))),
+    AST::PartialApply(callable, args) => {
+      let callable = lower_ast(
+        module_name,
+        callable,
+        analysis,
+        locals,
+        bindings,
+        nested_iter,
+        top_level,
+      )?;
+      let mut new_args = vec![];
+      for arg in args {
+        new_args.push(lower_ast(
+          module_name,
+          arg,
+          analysis,
+          locals,
+          bindings,
+          nested_iter,
+          top_level,
+        )?);
+      }
+      Ok(AST::PartialApply(Box::new(callable), new_args))
+    }
+    AST::Import(_)
+    | AST::DeclareFn(_)
+    | AST::Int(_)
+    | AST::Float(_)
+    | AST::String(_)
+    | AST::FunctionRef(_, _) => Ok(ast.clone()),
   }
+}
+
+fn closure_expr(module_name: &str, binding: &FunctionBinding) -> AST {
+  let func_ref = AST::FunctionRef(module_name.to_string(), binding.lifted_name.clone());
+  if binding.captures.is_empty() {
+    func_ref
+  } else {
+    AST::PartialApply(
+      Box::new(func_ref),
+      binding
+        .captures
+        .iter()
+        .cloned()
+        .map(AST::Variable)
+        .collect(),
+    )
+  }
+}
+
+fn push_unique(items: &mut Vec<String>, item: String) {
+  if !items.contains(&item) {
+    items.push(item);
+  }
+}
+
+fn mangle_closure_name(name: &str) -> String {
+  format!("{}:(closure)", name)
 }
 
 #[cfg(test)]
@@ -237,7 +392,7 @@ mod test {
         (let a 1)
         (fn inner () a))";
     let asts = read_multiple(source)?;
-    let new_asts = transform_closures_in_module(&asts)?;
+    let new_asts = transform_closures_in_module("main", &asts)?;
     use crate::parser::AST::*;
     let expected = vec![
       AST::DefineFn(Function {
@@ -251,7 +406,10 @@ mod test {
         code: vec![
           Let("a".to_string(), Box::new(Cell(Box::new(Int(1))))),
           PartialApply(
-            Box::new(Variable("inner:(closure)".to_string())),
+            Box::new(FunctionRef(
+              "main".to_string(),
+              "inner:(closure)".to_string(),
+            )),
             vec![AST::Variable("a".to_string())],
           ),
         ],
@@ -271,7 +429,7 @@ mod test {
         (let b (+ par 1))
         (fn inner () par))";
     let asts = read_multiple(source)?;
-    let new_asts = transform_closures_in_module(&asts)?;
+    let new_asts = transform_closures_in_module("main", &asts)?;
     use crate::parser::AST::*;
     let expected = vec![
       AST::DefineFn(Function {
@@ -295,7 +453,10 @@ mod test {
             )),
           ),
           PartialApply(
-            Box::new(Variable("inner:(closure)".to_string())),
+            Box::new(FunctionRef(
+              "main".to_string(),
+              "inner:(closure)".to_string(),
+            )),
             vec![AST::Variable("par".to_string())],
           ),
         ],
@@ -313,7 +474,7 @@ mod test {
       (fn outer ()
         (fn inner () 1))";
     let asts = read_multiple(source)?;
-    let new_asts = transform_closures_in_module(&asts)?;
+    let new_asts = transform_closures_in_module("main", &asts)?;
     use crate::parser::AST::*;
     let expected = vec![
       AST::DefineFn(Function {
@@ -324,7 +485,10 @@ mod test {
       AST::DefineFn(Function {
         name: "outer".to_string(),
         params: vec![],
-        code: vec![Variable("inner:(closure)".to_string())],
+        code: vec![FunctionRef(
+          "main".to_string(),
+          "inner:(closure)".to_string(),
+        )],
       }),
     ];
     assert_eq!(new_asts, expected);
@@ -343,7 +507,7 @@ mod test {
           (let a 2)
           a))";
     let asts = read_multiple(source)?;
-    let new_asts = transform_closures_in_module(&asts)?;
+    let new_asts = transform_closures_in_module("main", &asts)?;
     use crate::parser::AST::*;
     let expected = vec![
       AST::DefineFn(Function {
@@ -359,7 +523,7 @@ mod test {
         params: vec![],
         code: vec![
           Let("a".to_string(), Box::new(Int(1))),
-          Variable("inner:(closure)".to_string()),
+          FunctionRef("main".to_string(), "inner:(closure)".to_string()),
         ],
       }),
     ];
@@ -379,7 +543,7 @@ mod test {
           (let a (+ a 1))
           a))";
     let asts = read_multiple(source)?;
-    let new_asts = transform_closures_in_module(&asts)?;
+    let new_asts = transform_closures_in_module("main", &asts)?;
     use crate::parser::AST::*;
     let expected = vec![
       AST::DefineFn(Function {
@@ -402,7 +566,10 @@ mod test {
         code: vec![
           Let("a".to_string(), Box::new(AST::Cell(Box::new(Int(1))))),
           PartialApply(
-            Box::new(Variable("inner:(closure)".to_string())),
+            Box::new(FunctionRef(
+              "main".to_string(),
+              "inner:(closure)".to_string(),
+            )),
             vec![AST::Variable("a".to_string())],
           ),
         ],
@@ -424,25 +591,44 @@ mod test {
       )
     ";
     let asts = read_multiple(source)?;
-    let new_asts = transform_closures_in_module(&asts)?;
+    let new_asts = transform_closures_in_module("main", &asts)?;
 
     let expected = vec![
       AST::DefineFn(Function {
         name: "inner:(closure)".to_string(),
-        params: vec![],
-        code: vec![AST::Variable("a".to_string())],
+        params: vec!["a".to_string()],
+        code: vec![AST::DerefCell(Box::new(AST::Variable("a".to_string())))],
       }),
       AST::DefineFn(Function {
         name: "intermediate:(closure)".to_string(),
-        params: vec![],
-        code: vec![AST::Variable("inner:(closure)".to_string())],
+        params: vec!["a".to_string()],
+        code: vec![AST::PartialApply(
+          Box::new(AST::FunctionRef(
+            "main".to_string(),
+            "inner:(closure)".to_string(),
+          )),
+          vec![AST::Variable("a".to_string())],
+        )],
       }),
       AST::DefineFn(Function {
         name: "outer".to_string(),
         params: vec![],
         code: vec![
-          AST::Let("a".to_string(), Box::new(AST::Int(1))),
-          AST::Variable("intermediate:(closure)".to_string()),
+          AST::Let("a".to_string(), Box::new(AST::Cell(Box::new(AST::Int(1))))),
+          AST::PartialApply(
+            Box::new(AST::FunctionRef(
+              "main".to_string(),
+              "intermediate:(closure)".to_string(),
+            )),
+            vec![AST::Variable("a".to_string())],
+          ),
+          AST::PartialApply(
+            Box::new(AST::FunctionRef(
+              "main".to_string(),
+              "intermediate:(closure)".to_string(),
+            )),
+            vec![AST::Variable("a".to_string())],
+          ),
         ],
       }),
     ];
