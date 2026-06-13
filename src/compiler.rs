@@ -290,6 +290,13 @@ fn compile_expr(
       for expr in arg_exprs {
         instructions.extend(compile_expr(module_name, expr, locals)?);
       }
+      if let Identifier::Bare(fname) = identifier {
+        if let Some(local_index) = locals.get(fname) {
+          instructions.push(Instruction::LoadLocal(*local_index));
+          instructions.push(Instruction::CallDynamic);
+          return Ok(instructions);
+        }
+      }
       let (module_name, function_name) = match identifier {
         Identifier::Bare(fname) => (module_name.to_string(), fname.to_string()),
         Identifier::Qualified(mname, fname) => (mname.to_string(), fname.to_string()),
@@ -421,6 +428,39 @@ mod test {
           num_params: 1,
           num_locals: 1,
           instructions: vec![Instruction::LoadLocal(0), Instruction::Return],
+        }),
+      )]
+    );
+  }
+
+  #[test]
+  fn compile_call_to_local_function_ref() {
+    let func = parser::Function {
+      name: "main".to_string(),
+      params: vec![],
+      code: vec![
+        AST::Let(
+          "alias".to_string(),
+          Box::new(AST::FunctionRef("main".to_string(), "x".to_string())),
+        ),
+        AST::CallFixed(Identifier::Bare("alias".to_string()), vec![]),
+      ],
+    };
+    let code = compile_function("main", &func).unwrap();
+    assert_eq!(
+      code,
+      vec![(
+        "main".to_string(),
+        Callable::Function(Function {
+          num_params: 0,
+          num_locals: 1,
+          instructions: vec![
+            Instruction::MakeFunctionRef(("main".to_string(), "x".to_string())),
+            Instruction::SetLocal(0),
+            Instruction::LoadLocal(0),
+            Instruction::CallDynamic,
+            Instruction::Return,
+          ],
         }),
       )]
     );

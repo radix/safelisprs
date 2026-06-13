@@ -378,6 +378,7 @@ fn transform_ast<'a>(
 }
 
 fn closure_expr(module_name: &str, binding: &FunctionBinding) -> AST {
+  //! Generate a PartialApply of a closure with its captures
   let func_ref = AST::FunctionRef(module_name.to_string(), binding.lifted_name.clone());
   if binding.captures.is_empty() {
     func_ref
