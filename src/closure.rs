@@ -27,8 +27,11 @@ pub fn transform_closures_in_module(module_name: &str, items: &[AST]) -> Result<
 
 #[derive(Debug, Clone)]
 struct FunctionAnalysis {
+  /// Variables that a function *uses* from outer environment
   captures: Vec<String>,
+  /// Variables that a function *defines* and which are used in nested closures
   cell_vars: Vec<String>,
+  /// Analyses of each function nested inside this function, in order
   nested: Vec<NestedFunctionAnalysis>,
 }
 
@@ -46,15 +49,12 @@ struct FunctionBinding {
 }
 
 fn closurize_function(module_name: &str, outer_func: &Function) -> Result<Vec<AST>, String> {
-  //! Do the following things to a top-levele function:
-  //! 1. accumulate variable definitions
-  //! 2. for any inner function, check for uses of outer variables, and convert them to DerefCell
-  //! 3. Remove those inner functions from the outer function and emit them as (mangled) top-level
-  //!    functions.
-  //! 4. then, transform the outer function to wrap those inner-used variables in Cell.
-  let analysis = analyze_function(outer_func, &hashset! {})?;
+  //! Analyze a function to understand what closures it contains, then transform
+  //! it into a simpler form where all those closures are top-level functions
+  //! with implicit parameters.
+  let analysis = analyze_function(outer_func, &HashSet::new())?;
   let mut top_level = vec![];
-  let outer_func = lower_function(
+  let outer_func = transform_function(
     module_name,
     outer_func,
     outer_func.name.clone(),
@@ -69,6 +69,10 @@ fn analyze_function(
   func: &Function,
   environment: &HashSet<String>,
 ) -> Result<FunctionAnalysis, String> {
+  //! Figure out:
+  //! - what variables this function uses from the environment
+  //! - what variables this function *defines* that are used in nested closures
+  //! - the recursive analyses of all nested closures
   let mut locals = hashset! {};
   locals.extend(func.params.iter().cloned());
   let mut captures = vec![];
@@ -156,20 +160,27 @@ fn analyze_ast(
   Ok(())
 }
 
-fn lower_function(
+fn transform_function(
   module_name: &str,
   func: &Function,
-  lowered_name: String,
+  transformed_name: String,
   analysis: &FunctionAnalysis,
   top_level: &mut Vec<AST>,
 ) -> Result<Function, String> {
+  //! Rewrite a function into simpler AST that the compiler already knows how to
+  //! turn into bytecode:
+  //! - captured variables become hidden leading parameters
+  //! - parameters/local bindings captured by nested functions are wrapped in `Cell`
+  //! - nested `fn` definitions are lifted into `top_level` as separate functions
+  //! - the original nested `fn` expression is replaced with a closure value,
+  //!   represented as `PartialApply(FunctionRef, captured_cells)`
   let mut locals = hashset! {};
   locals.extend(func.params.iter().cloned());
   let mut bindings = hashmap! {};
   let mut nested_iter = analysis.nested.iter();
   let mut code = vec![];
   for ast in &func.code {
-    code.push(lower_ast(
+    code.push(transform_ast(
       module_name,
       ast,
       analysis,
@@ -196,30 +207,43 @@ fn lower_function(
   params.extend(analysis.captures.iter().cloned());
   params.extend(func.params.clone());
   Ok(Function {
-    name: lowered_name,
+    name: transformed_name,
     params,
     code,
   })
 }
 
-fn lower_ast<'a>(
+fn transform_ast<'a>(
   module_name: &str,
   ast: &AST,
   analysis: &FunctionAnalysis,
   locals: &mut HashSet<String>,
   bindings: &mut HashMap<String, FunctionBinding>,
-  nested_iter: &mut impl Iterator<Item = &'a NestedFunctionAnalysis>,
+  nested_analyses: &mut impl Iterator<Item = &'a NestedFunctionAnalysis>,
   top_level: &mut Vec<AST>,
 ) -> Result<AST, String> {
+  //! Do necessary closure transformations on one expression inside a function body.
+  //!
+  //! - `bindings` tracks nested functions that have already been encountered in
+  //! this body, so later references to the closure can be rewritten to partial
+  //! applications of its functions. NOTE: this is kind of crappy! we should
+  //! just leave them as variables and replace the (fn x ...) expressions with
+  //! (let x (partial-apply...)). But this will take some more refactoring.
+  //!
+  //! - `nested_analyses` is an iterator over the sequence of
+  //! NestedFunctionAnalysis produced by analyze_function. We walk this iterator
+  //! as we come across nested function definitions to get the information we
+  //! need to transform and lift those functions. NOTE: it's assumed `nested_analyses`
+  //! gives analyses in the same order as we find function definitions!
   match ast {
     AST::Let(name, expr) => {
-      let expr = lower_ast(
+      let expr = transform_ast(
         module_name,
         expr,
         analysis,
         locals,
         bindings,
-        nested_iter,
+        nested_analyses,
         top_level,
       )?;
       locals.insert(name.clone());
@@ -230,20 +254,20 @@ fn lower_ast<'a>(
       }
     }
     AST::DefineFn(inner_func) => {
-      let nested_analysis = nested_iter.next().ok_or_else(|| {
+      let nested_analysis = nested_analyses.next().ok_or_else(|| {
         format!(
           "Internal error: missing closure analysis for {}",
           inner_func.name
         )
       })?;
-      let lowered = lower_function(
+      let transformed = transform_function(
         module_name,
         inner_func,
         nested_analysis.lifted_name.clone(),
         &nested_analysis.analysis,
         top_level,
       )?;
-      top_level.push(AST::DefineFn(lowered));
+      top_level.push(AST::DefineFn(transformed));
       let binding = FunctionBinding {
         lifted_name: nested_analysis.lifted_name.clone(),
         captures: nested_analysis.analysis.captures.clone(),
@@ -264,24 +288,24 @@ fn lower_ast<'a>(
       }
     }
     AST::Call(callable, args) => {
-      let callable = lower_ast(
+      let callable = transform_ast(
         module_name,
         callable,
         analysis,
         locals,
         bindings,
-        nested_iter,
+        nested_analyses,
         top_level,
       )?;
       let mut new_args = vec![];
       for arg in args {
-        new_args.push(lower_ast(
+        new_args.push(transform_ast(
           module_name,
           arg,
           analysis,
           locals,
           bindings,
-          nested_iter,
+          nested_analyses,
           top_level,
         )?);
       }
@@ -290,55 +314,55 @@ fn lower_ast<'a>(
     AST::CallFixed(ident, args) => {
       let mut new_args = vec![];
       for arg in args {
-        new_args.push(lower_ast(
+        new_args.push(transform_ast(
           module_name,
           arg,
           analysis,
           locals,
           bindings,
-          nested_iter,
+          nested_analyses,
           top_level,
         )?);
       }
       Ok(AST::CallFixed(ident.clone(), new_args))
     }
-    AST::Cell(expr) => Ok(AST::Cell(Box::new(lower_ast(
+    AST::Cell(expr) => Ok(AST::Cell(Box::new(transform_ast(
       module_name,
       expr,
       analysis,
       locals,
       bindings,
-      nested_iter,
+      nested_analyses,
       top_level,
     )?))),
-    AST::DerefCell(expr) => Ok(AST::DerefCell(Box::new(lower_ast(
+    AST::DerefCell(expr) => Ok(AST::DerefCell(Box::new(transform_ast(
       module_name,
       expr,
       analysis,
       locals,
       bindings,
-      nested_iter,
+      nested_analyses,
       top_level,
     )?))),
     AST::PartialApply(callable, args) => {
-      let callable = lower_ast(
+      let callable = transform_ast(
         module_name,
         callable,
         analysis,
         locals,
         bindings,
-        nested_iter,
+        nested_analyses,
         top_level,
       )?;
       let mut new_args = vec![];
       for arg in args {
-        new_args.push(lower_ast(
+        new_args.push(transform_ast(
           module_name,
           arg,
           analysis,
           locals,
           bindings,
-          nested_iter,
+          nested_analyses,
           top_level,
         )?);
       }
