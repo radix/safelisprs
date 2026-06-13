@@ -392,6 +392,34 @@ mod test {
   }
 
   #[test]
+  fn let_expression_returns_bound_value() {
+    let source = "
+      (fn main () (let a 1))
+    ";
+    assert_eq!(eval_main(source), Rc::new(SLVal::Int(1)));
+  }
+
+  #[test]
+  fn later_let_expression_is_returned() {
+    let source = "
+      (fn main ()
+        (let a 1)
+        (let b 2))
+    ";
+    assert_eq!(eval_main(source), Rc::new(SLVal::Int(2)));
+  }
+
+  #[test]
+  fn let_return_value_does_not_shadow_later_variable_result() {
+    let source = "
+      (fn main ()
+        (let a 1)
+        a)
+    ";
+    assert_eq!(eval_main(source), Rc::new(SLVal::Int(1)));
+  }
+
+  #[test]
   fn closure_capture_order() {
     let source = "
       (fn outer ()

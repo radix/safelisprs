@@ -329,7 +329,9 @@ fn compile_expr(
         locals.insert(name.clone(), locals.len() as u16);
       }
       instructions.extend(compile_expr(module_name, expr, locals)?);
-      instructions.push(Instruction::SetLocal(locals[name]))
+      let local_index = locals[name];
+      instructions.push(Instruction::SetLocal(local_index));
+      instructions.push(Instruction::LoadLocal(local_index));
     }
     AST::PartialApply(expr, args) => {
       for expr in args {
@@ -458,7 +460,34 @@ mod test {
             Instruction::MakeFunctionRef(("main".to_string(), "x".to_string())),
             Instruction::SetLocal(0),
             Instruction::LoadLocal(0),
+            Instruction::LoadLocal(0),
             Instruction::CallDynamic,
+            Instruction::Return,
+          ],
+        }),
+      )]
+    );
+  }
+
+  #[test]
+  fn compile_let_returns_bound_value() {
+    let func = parser::Function {
+      name: "main".to_string(),
+      params: vec![],
+      code: vec![AST::Let("a".to_string(), Box::new(AST::Int(1)))],
+    };
+    let code = compile_function("main", &func).unwrap();
+    assert_eq!(
+      code,
+      vec![(
+        "main".to_string(),
+        Callable::Function(Function {
+          num_params: 0,
+          num_locals: 1,
+          instructions: vec![
+            Instruction::PushInt(1),
+            Instruction::SetLocal(0),
+            Instruction::LoadLocal(0),
             Instruction::Return,
           ],
         }),
