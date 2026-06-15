@@ -446,6 +446,29 @@ mod test {
   }
 
   #[test]
+  fn local_nested_function_can_be_called() {
+    let source = "
+      (fn outer ()
+        (fn inner () 5)
+        (inner))
+      (fn main () (outer))
+    ";
+    assert_eq!(eval_main(source), Rc::new(SLVal::Int(5)));
+  }
+
+  #[test]
+  fn captured_local_nested_function_can_be_called() {
+    let source = "
+      (fn outer ()
+        (fn inner () 5)
+        (fn caller () (inner))
+        caller)
+      (fn main () ((outer)))
+    ";
+    assert_eq!(eval_main(source), Rc::new(SLVal::Int(5)));
+  }
+
+  #[test]
   fn function_definition_expression_returns_function() {
     let source = "
       (fn outer ()
