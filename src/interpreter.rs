@@ -1,57 +1,161 @@
-use std::default::Default;
-use std::rc::Rc; // TODO: use Manishearth/rust-gc
 use std::time::{Duration, Instant};
+
+use gc_arena::{collect::Collect, Arena, Gc, Mutation, RefLock, Rootable};
 
 use crate::builtins::DefaultBuiltins;
 use crate::compiler::{Callable, Instruction, LinkedFunction as Function, Package};
 
-#[derive(Debug, Default)]
-pub struct Stack {
-  items: Vec<Rc<SLVal>>,
+/// Per-execution state held inside an `Execution`'s own arena. Each `Execution`
+/// owns a private `Arena` whose root is this type.
+#[derive(Collect, Default)]
+#[collect(no_drop)]
+struct ExecRoot<'gc> {
+  stack: Vec<Gc<'gc, SLVal<'gc>>>,
+  frames: Vec<Frame<'gc>>,
 }
 
-#[derive(Debug, PartialEq, Clone)]
-pub enum SLVal {
+/// A stack frame. The function is stored by value (cloned on entry) so that
+/// the frame is self-contained and can live inside the arena root without
+/// borrowing the `Package`.
+#[derive(Collect, Clone)]
+#[collect(no_drop)]
+struct Frame<'gc> {
+  function: Function,
+  locals: Vec<Gc<'gc, SLVal<'gc>>>,
+  ip: usize,
+}
+
+// `Function` (a.k.a. `LinkedFunction`) is `'static` and holds no `Gc` pointers,
+// so it gets a trivial, empty `Collect` impl.
+gc_arena::static_collect!(Function);
+
+/// A SafeLisp value. This is the in-arena representation: anything that needs
+/// sharing or cycle-detection is held behind a `Gc` pointer.
+#[derive(Debug, PartialEq, Clone, Collect)]
+#[collect(no_drop)]
+pub enum SLVal<'gc> {
   Int(i64),
   Float(f64),
   String(String),
   Bool(bool),
   Void,
   FunctionRef(u32, u32),
-  Partial(Partial),
-  Cell(Rc<SLVal>),
+  Partial(Partial<'gc>),
+  Cell(Gc<'gc, RefLock<SLVal<'gc>>>),
 }
 
-#[derive(Debug, PartialEq, Clone)]
-pub struct Partial {
+#[derive(Debug, PartialEq, Clone, Collect)]
+#[collect(no_drop)]
+pub struct Partial<'gc> {
   function: (u32, u32),
-  args: Vec<Rc<SLVal>>,
+  args: Vec<Gc<'gc, SLVal<'gc>>>,
+}
+
+/// An owned, arena-agnostic value that can escape the arena and be fed back
+/// into any other (or the same) execution. Non-scalar values are represented
+/// recursively with owned `SLValue` sub-values, so converting across the arena
+/// boundary performs a deep copy: `Gc` pointers in one arena are unboxed into
+/// owned values and re-boxed into fresh `Gc` pointers in the destination arena.
+#[derive(Debug, PartialEq, Clone)]
+pub enum SLValue {
+  Int(i64),
+  Float(f64),
+  String(String),
+  Bool(bool),
+  Void,
+  FunctionRef(u32, u32),
+  Partial {
+    function: (u32, u32),
+    args: Vec<SLValue>,
+  },
+  Cell(Box<SLValue>),
+}
+
+impl<'gc> SLVal<'gc> {
+  /// Convert an `SLVal` into an owned `SLValue`, deep-copying any `Gc`-held
+  /// sub-values out of the arena.
+  fn to_value(&self) -> SLValue {
+    match self {
+      SLVal::Int(i) => SLValue::Int(*i),
+      SLVal::Float(x) => SLValue::Float(*x),
+      SLVal::String(s) => SLValue::String(s.clone()),
+      SLVal::Bool(b) => SLValue::Bool(*b),
+      SLVal::Void => SLValue::Void,
+      SLVal::FunctionRef(m, n) => SLValue::FunctionRef(*m, *n),
+      SLVal::Partial(p) => SLValue::Partial {
+        function: p.function,
+        args: p.args.iter().map(|a| a.to_value()).collect(),
+      },
+      SLVal::Cell(r) => SLValue::Cell(Box::new(r.borrow().to_value())),
+    }
+  }
+
+  /// Reconstruct a `Gc<SLVal>` inside the arena from an owned `SLValue`,
+  /// allocating fresh `Gc` pointers for any non-scalar sub-values.
+  fn from_value(mc: &Mutation<'gc>, value: &SLValue) -> Gc<'gc, SLVal<'gc>> {
+    Gc::new(
+      mc,
+      match value {
+        SLValue::Int(i) => SLVal::Int(*i),
+        SLValue::Float(x) => SLVal::Float(*x),
+        SLValue::String(s) => SLVal::String(s.clone()),
+        SLValue::Bool(b) => SLVal::Bool(*b),
+        SLValue::Void => SLVal::Void,
+        SLValue::FunctionRef(m, n) => SLVal::FunctionRef(*m, *n),
+        SLValue::Partial { function, args } => SLVal::Partial(Partial {
+          function: *function,
+          args: args.iter().map(|a| SLVal::from_value(mc, a)).collect(),
+        }),
+        SLValue::Cell(inner) => SLVal::Cell(Gc::new(
+          mc,
+          RefLock::new(SLVal::from_value(mc, inner).as_ref().clone()),
+        )),
+      },
+    )
+  }
+}
+
+/// A view of the value stack passed to builtins. It lives entirely inside a
+/// `mutate` callback, so it carries the branded `'gc` lifetime and provides
+/// access to the `Mutation` context for allocating new `Gc` values. The
+/// `'stack` lifetime is the borrow of the underlying value-stack `Vec` and
+/// may be shorter than `'gc`.
+pub struct Stack<'gc, 'stack> {
+  // This is actually kinda weird; it would probably make more sense for the
+  // Mutation to live on the Execution rather than Stack, but for now the only
+  // user is `push`, which is called by builtin functions, which are only passed
+  // the Stack and not the Execution.
+  mc: &'gc Mutation<'gc>,
+  items: &'stack mut Vec<Gc<'gc, SLVal<'gc>>>,
 }
 
 pub type BuiltinResult = Option<Result<(), String>>;
 
 pub trait Builtins {
-  fn call(&self, mod_name: &str, func_name: &str, stack: &mut Stack) -> BuiltinResult;
+  fn call<'gc, 'stack>(
+    &self,
+    mod_name: &str,
+    func_name: &str,
+    stack: &mut Stack<'gc, 'stack>,
+  ) -> BuiltinResult;
 }
 
-impl Stack {
-  pub fn new() -> Self {
-    Stack { items: vec![] }
-  }
-  pub fn pop(&mut self) -> Result<Rc<SLVal>, String> {
+impl<'gc, 'stack> Stack<'gc, 'stack> {
+  pub fn pop(&mut self) -> Result<Gc<'gc, SLVal<'gc>>, String> {
     self
       .items
       .pop()
       .ok_or_else(|| "POP on an empty stack".to_string())
   }
-  pub fn push(&mut self, item: Rc<SLVal>) {
-    self.items.push(item);
+  /// Allocate a fresh `Gc` pointer for a SLVal and push it onto the stack.
+  pub fn push(&mut self, value: SLVal<'gc>) {
+    self.items.push(Gc::new(self.mc, value));
   }
-  pub fn peek(&self) -> Result<Rc<SLVal>, String> {
+  pub fn peek(&self) -> Result<Gc<'gc, SLVal<'gc>>, String> {
     self
       .items
       .last()
-      .cloned()
+      .copied()
       .ok_or_else(|| "PEEK on an empty stack".to_string())
   }
 }
@@ -69,10 +173,7 @@ impl<B> Interpreter<B> {
 
 impl Interpreter<DefaultBuiltins> {
   pub fn new(package: Package) -> Self {
-    Interpreter {
-      package,
-      builtins: DefaultBuiltins,
-    }
+    Interpreter::with_builtins(package, DefaultBuiltins)
   }
 }
 
@@ -81,15 +182,15 @@ where
   B: Builtins + Clone,
 {
   /// Set up an `Execution` ready to run `main`.
-  pub fn call_main(&self) -> Result<Execution<'_, B>, String> {
+  pub fn call_main(&self) -> Result<Execution<B>, String> {
     if let Some((module, function)) = self.package.main {
       let callable = self
         .package
         .get_function(module, function)
         .ok_or_else(|| format!("Couldn't find module {} function {}", module, function))?;
       if let Callable::Function(function) = callable {
-        let mut exec = Execution::new(&self.package, self.builtins.clone());
-        exec.enter_function(function, vec![])?;
+        let mut exec = Execution::new(self.package.clone(), self.builtins.clone());
+        exec.enter_function(function.clone(), vec![])?;
         Ok(exec)
       } else {
         Err(format!(
@@ -102,11 +203,12 @@ where
     }
   }
 
-  /// Set up an `Execution` ready to call `slval`.
-  pub fn call_slval(&self, slval: Rc<SLVal>) -> Result<Execution<'_, B>, String> {
-    let mut exec = Execution::new(&self.package, self.builtins.clone());
-    exec.stack.push(slval);
-    exec.call_dynamic()?;
+  /// Set up an `Execution` ready to call `slval`. The `SLValue` is deep-copied
+  /// into the new execution's arena, so a value produced by one execution can
+  /// be fed into any other execution (or the same one).
+  pub fn call_slval(&self, slval: SLValue) -> Result<Execution<B>, String> {
+    let mut exec = Execution::new(self.package.clone(), self.builtins.clone());
+    exec.push_and_call_dynamic(slval)?;
     Ok(exec)
   }
 }
@@ -119,67 +221,126 @@ pub enum Status {
   Paused,
   /// Execution completed: the frame stack is empty and the final result
   /// is carried here. The `Execution` should not be resumed after this.
-  Done(Rc<SLVal>),
+  Done(SLValue),
 }
 
-struct Frame<'p> {
-  function: &'p Function,
-  locals: Vec<Rc<SLVal>>,
-  ip: usize,
-}
-
-pub struct Execution<'p, B: Builtins> {
-  pub package: &'p Package,
-  pub builtins: B,
-  pub stack: Stack,
-  frames: Vec<Frame<'p>>,
+/// A single, independent SafeLisp execution. Each `Execution` owns its own
+/// garbage-collected `Arena`, so multiple executions are fully independent
+/// and may be run in parallel (cooperatively interleaved by the caller). The
+/// `Arena` holds the value stack and call frames branded with an invariant
+/// `'gc` lifetime; values that must cross the arena boundary (such as the
+/// result of `run`) are deep-copied to the arena-agnostic `SLValue`.
+pub struct Execution<B> {
+  arena: Arena<Rootable![ExecRoot<'_>]>,
+  package: Package,
+  builtins: B,
   pub executed: u64,
 }
 
-impl<'p, B: Builtins> Execution<'p, B> {
-  pub fn new(package: &'p Package, builtins: B) -> Self {
+impl<B: Builtins + Clone> Execution<B> {
+  pub fn new(package: Package, builtins: B) -> Self {
+    let arena = Arena::new(|_mc| ExecRoot {
+      stack: Vec::new(),
+      frames: Vec::new(),
+    });
     Execution {
+      arena,
       package,
       builtins,
-      stack: Stack::new(),
-      frames: vec![],
       executed: 0,
     }
   }
 
   /// Returns true if the frame stack is empty (execution is complete).
   pub fn is_done(&self) -> bool {
-    self.frames.is_empty()
+    self.arena.mutate(|_, root| root.frames.is_empty())
   }
-}
 
-impl<'p, B> Execution<'p, B>
-where
-  B: Builtins,
-{
+  /// The number of items currently on the value stack.
+  pub fn stack_len(&self) -> usize {
+    self.arena.mutate(|_, root| root.stack.len())
+  }
+
+  /// Peek the top of the value stack as an owned `SLValue`. Returns an error if
+  /// the stack is empty.
+  pub fn peek_value(&self) -> Result<SLValue, String> {
+    let mut result = Err("PEEK on an empty stack".to_string());
+    self.arena.mutate(|_, root| {
+      if let Some(top) = root.stack.last().copied() {
+        result = Ok(top.to_value());
+      }
+    });
+    result
+  }
+
   /// Run up to `n` bytecodes. Returns `Paused` if the budget exhausted before
   /// completion, or `Done(v)` if the program completed. Errors propagate via
   /// `Err`. The cumulative count of executed bytecodes is available on
   /// `Execution::executed` after the call returns.
   pub fn run(&mut self, n: u64) -> Result<Status, String> {
     let start = self.executed;
-    while !self.is_done() && self.executed - start < n {
-      self.step()?;
-    }
-    if self.is_done() {
-      Ok(Status::Done(self.stack.pop()?))
-    } else {
-      Ok(Status::Paused)
-    }
+    let package = &self.package;
+    let builtins = &self.builtins;
+    let mut executed = self.executed;
+    let mut outcome: Result<Status, String> = Ok(Status::Paused);
+    self.arena.mutate_root(|mc, root| {
+      while !root.frames.is_empty() && executed - start < n {
+        match step_inner(mc, root, package, builtins, &mut executed) {
+          Ok(()) => {}
+          Err(e) => {
+            outcome = Err(e);
+            return;
+          }
+        }
+      }
+      if root.frames.is_empty() {
+        let top = match root.stack.pop() {
+          Some(v) => v,
+          None => {
+            outcome = Err("POP on an empty stack".to_string());
+            return;
+          }
+        };
+        outcome = Ok(Status::Done(top.to_value()));
+      } else {
+        outcome = Ok(Status::Paused);
+      }
+    });
+    self.executed = executed;
+    // Run a bit of incremental collection, paced by allocation debt.
+    self.arena.collect_debt();
+    outcome
   }
 
   /// Convenience: run to completion with no instruction limit. Returns the
   /// final value, or errors on a runtime error.
-  pub fn run_until_done(&mut self) -> Result<Rc<SLVal>, String> {
-    while !self.is_done() {
-      self.step()?;
-    }
-    self.stack.pop()
+  pub fn run_until_done(&mut self) -> Result<SLValue, String> {
+    let package = &self.package;
+    let builtins = &self.builtins;
+    let mut executed = self.executed;
+    let mut result: Result<SLValue, String> = Ok(SLValue::Void);
+    self.arena.mutate_root(|mc, root| {
+      while !root.frames.is_empty() {
+        match step_inner(mc, root, package, builtins, &mut executed) {
+          Ok(()) => {}
+          Err(e) => {
+            result = Err(e);
+            return;
+          }
+        }
+      }
+      let top = match root.stack.pop() {
+        Some(v) => v,
+        None => {
+          result = Err("POP on an empty stack".to_string());
+          return;
+        }
+      };
+      result = Ok(top.to_value());
+    });
+    self.executed = executed;
+    self.arena.collect_debt();
+    result
   }
 
   /// Run for up to `duration`, stepping until the deadline is reached or
@@ -189,206 +350,320 @@ where
   /// `Execution::executed` after the call returns.
   pub fn run_for_duration(&mut self, duration: Duration) -> Result<Status, String> {
     let deadline = Instant::now() + duration;
-    while !self.is_done() && Instant::now() < deadline {
-      self.step()?;
-    }
-    if self.is_done() {
-      Ok(Status::Done(self.stack.pop()?))
-    } else {
-      Ok(Status::Paused)
-    }
+    let package = &self.package;
+    let builtins = &self.builtins;
+    let mut executed = self.executed;
+    let mut outcome: Result<Status, String> = Ok(Status::Paused);
+    self.arena.mutate_root(|mc, root| {
+      while !root.frames.is_empty() && Instant::now() < deadline {
+        match step_inner(mc, root, package, builtins, &mut executed) {
+          Ok(()) => {}
+          Err(e) => {
+            outcome = Err(e);
+            return;
+          }
+        }
+      }
+      if root.frames.is_empty() {
+        let top = match root.stack.pop() {
+          Some(v) => v,
+          None => {
+            outcome = Err("POP on an empty stack".to_string());
+            return;
+          }
+        };
+        outcome = Ok(Status::Done(top.to_value()));
+      } else {
+        outcome = Ok(Status::Paused);
+      }
+    });
+    self.executed = executed;
+    self.arena.collect_debt();
+    outcome
   }
 
   /// Execute one bytecode instruction from the current top frame.
   pub fn step(&mut self) -> Result<(), String> {
-    self.executed = self.executed.saturating_add(1);
-    let inst = {
-      let frame = self
-        .frames
-        .last_mut()
-        .ok_or_else(|| "step with no frames".to_string())?;
-      if frame.ip >= frame.function.instructions.len() {
-        return Err("ran past end of function without Return".to_string());
-      }
-      let inst = &frame.function.instructions[frame.ip];
-      frame.ip += 1;
-      inst
-    };
-
-    match inst {
-      Instruction::PushInt(i) => self.stack.push(Rc::new(SLVal::Int(*i))),
-      Instruction::PushFloat(f) => self.stack.push(Rc::new(SLVal::Float(*f))),
-      Instruction::PushString(s) => self.stack.push(Rc::new(SLVal::String(s.clone()))),
-      Instruction::PushBool(b) => self.stack.push(Rc::new(SLVal::Bool(*b))),
-      Instruction::Pop => {
-        self.stack.pop()?;
-      }
-      Instruction::Return => {
-        // Pop the top frame; the return value stays on self.stack.
-        self.frames.pop();
-      }
-      Instruction::SetLocal(i) => {
-        let val = self.stack.pop()?;
-        let frame = self
-          .frames
-          .last_mut()
-          .ok_or_else(|| "SetLocal with no frame".to_string())?;
-        frame.locals[usize::from(*i)] = val;
-      }
-      Instruction::LoadLocal(i) => {
-        let frame = self
-          .frames
-          .last()
-          .ok_or_else(|| "LoadLocal with no frame".to_string())?;
-        self.stack.push(frame.locals[usize::from(*i)].clone());
-      }
-      Instruction::Call((mod_index, func_index)) => {
-        self.call_fixed(*mod_index, *func_index)?;
-      }
-      Instruction::CallDynamic => {
-        self.call_dynamic()?;
-      }
-      Instruction::MakeFunctionRef((mod_index, func_index)) => {
-        self
-          .stack
-          .push(Rc::new(SLVal::FunctionRef(*mod_index, *func_index)));
-      }
-      Instruction::MakeCell => {
-        let val = self.stack.pop()?;
-        self.stack.push(Rc::new(SLVal::Cell(val)));
-      }
-      Instruction::DerefCell => {
-        let val = self.stack.pop()?;
-        match &*val {
-          SLVal::Cell(r) => self.stack.push(r.clone()),
-          other => return Err(format!("Not a cell: {:?}", other)),
-        }
-      }
-      Instruction::PartialApply(num_args) => {
-        self.partial_apply(*num_args)?;
-      }
-      Instruction::Jump(target) => {
-        let frame = self
-          .frames
-          .last_mut()
-          .ok_or_else(|| "Jump with no frame".to_string())?;
-        frame.ip = *target as usize;
-      }
-      Instruction::JumpIfFalse(target) => {
-        let val = self.stack.pop()?;
-        match &*val {
-          SLVal::Bool(false) => {
-            let frame = self
-              .frames
-              .last_mut()
-              .ok_or_else(|| "JumpIfFalse with no frame".to_string())?;
-            frame.ip = *target as usize;
-          }
-          SLVal::Bool(true) => {}
-          other => return Err(format!("`if` condition must be a bool, got {:?}", other)),
-        }
-      }
-    }
-    Ok(())
-  }
-
-  pub fn partial_apply(&mut self, num_args: u16) -> Result<(), String> {
-    let func = self.stack.pop()?;
-    let mut args = vec![];
-    for _ in 0..num_args {
-      args.push(self.stack.pop()?)
-    }
-    args.reverse();
-    let closure = match &*func {
-      SLVal::FunctionRef(mod_index, func_index) => Ok(Rc::new(SLVal::Partial(Partial {
-        function: (*mod_index, *func_index),
-        args,
-      }))),
-      _ => Err("make_closure needs a function at TOS".to_string()),
-    }?;
-    self.stack.push(closure);
-    Ok(())
-  }
-
-  /// Either pushes a frame for the function if it's defined in SafeLisp, or
-  /// just call it immediately if it's a builtin.
-  pub fn call_fixed(&mut self, mod_index: u32, func_index: u32) -> Result<(), String> {
-    let (module_name, functions) = self
-      .package
-      .get_module(mod_index)
-      .ok_or_else(|| format!("Module not found: {}", mod_index))?;
-    let (func_name, callable) = functions
-      .get(func_index as usize)
-      .ok_or_else(|| format!("Function not found: {}/{}", mod_index, func_index))?;
-    match callable {
-      Callable::Function(func) => {
-        self.enter_function(func, vec![])?;
-      }
-      Callable::Builtin => {
-        self
-          .builtins
-          .call(module_name, func_name, &mut self.stack)
-          .ok_or_else(|| format!("No function named {}", func_name))??;
-      }
-    }
-    Ok(())
-  }
-
-  /// Prepare the callable that's on the top of stack to be called. This pushes
-  /// a new frame for function callables. This is both the implementation of the
-  /// `CallDynamic` instruction and the entry point used by
-  /// `Interpreter::call_slval`.
-  pub fn call_dynamic(&mut self) -> Result<(), String> {
-    let callable = self.stack.pop()?;
-    match &*callable {
-      SLVal::FunctionRef(mod_index, func_index) => self.call_fixed(*mod_index, *func_index),
-      SLVal::Partial(Partial {
-        function: (mod_index, func_index),
-        args,
-      }) => {
-        let (_, functions) = self
-          .package
-          .get_module(*mod_index)
-          .ok_or_else(|| format!("Module not found: {}", mod_index))?;
-        let (_, callable) = functions
-          .get(*func_index as usize)
-          .ok_or_else(|| format!("Function not found: {}/{}", mod_index, func_index))?;
-        match callable {
-          Callable::Function(func) => self.enter_function(func, args.clone()),
-          Callable::Builtin => Err("Can't invoke a builtin as a closure".to_string()),
-        }
-      }
-      x => Err(format!("Can't call a non-callable! {:?}", x)),
-    }
-  }
-
-  /// Push a new frame for a function, with optional pre-bound values. The
-  /// remaining params (after the pre-bound ones) are popped from the stack.
-  fn enter_function(
-    &mut self,
-    function: &'p Function,
-    pre_bound: Vec<Rc<SLVal>>,
-  ) -> Result<(), String> {
-    let start = pre_bound.len();
-    let mut locals = pre_bound;
-    locals.extend(alloc_locals(function));
-    // The parameters are "in order" on the stack, so popping will give them to
-    // us in reverse order.
-    for param_idx in (start..usize::from(function.num_params)).rev() {
-      locals[param_idx] = self.stack.pop()?;
-    }
-    self.frames.push(Frame {
-      function,
-      locals,
-      ip: 0,
+    let package = &self.package;
+    let builtins = &self.builtins;
+    let mut executed = self.executed;
+    let mut result = Ok(());
+    self.arena.mutate_root(|mc, root| {
+      result = step_inner(mc, root, package, builtins, &mut executed);
     });
-    Ok(())
+    self.executed = executed;
+    self.arena.collect_debt();
+    result
+  }
+
+  /// Push a frame for a function, with optional pre-bound values given as owned
+  /// `SLValue`s (used by external/test entry points). The remaining params
+  /// (after the pre-bound ones) are popped from the stack.
+  pub fn enter_function(
+    &mut self,
+    function: Function,
+    pre_bound: Vec<SLValue>,
+  ) -> Result<(), String> {
+    let mut result = Ok(());
+    self.arena.mutate_root(|mc, root| {
+      let pre_bound_gc: Vec<Gc<'_, SLVal<'_>>> =
+        pre_bound.iter().map(|v| SLVal::from_value(mc, v)).collect();
+      result = enter_function_inner(mc, root, function.clone(), pre_bound_gc);
+    });
+    result
+  }
+
+  /// Push a value onto the stack and invoke `call_dynamic` (used to set up an
+  /// execution from an external `SLValue`).
+  fn push_and_call_dynamic(&mut self, value: SLValue) -> Result<(), String> {
+    let package = self.package.clone();
+    let builtins = self.builtins.clone();
+    let mut result = Ok(());
+    self.arena.mutate_root(|mc, root| {
+      let gc = SLVal::from_value(mc, &value);
+      root.stack.push(gc);
+      result = call_dynamic_inner(mc, root, &package, &builtins);
+    });
+    result
   }
 }
 
-/// Generate locals, initialized to Void, for a given function.
-fn alloc_locals(code: &Function) -> Vec<Rc<SLVal>> {
-  vec![Rc::new(SLVal::Void); usize::from(code.num_locals)]
+/// Execute one bytecode instruction from the current top frame.
+fn step_inner<'gc>(
+  mc: &'gc Mutation<'gc>,
+  root: &mut ExecRoot<'gc>,
+  package: &Package,
+  builtins: &impl Builtins,
+  executed: &mut u64,
+) -> Result<(), String> {
+  *executed = executed.saturating_add(1);
+  let inst = {
+    let frame = root
+      .frames
+      .last_mut()
+      .ok_or_else(|| "step with no frames".to_string())?;
+    if frame.ip >= frame.function.instructions.len() {
+      return Err("ran past end of function without Return".to_string());
+    }
+    let inst = &frame.function.instructions[frame.ip];
+    frame.ip += 1;
+    inst.clone()
+  };
+
+  match inst {
+    Instruction::PushInt(i) => root.stack.push(Gc::new(mc, SLVal::Int(i))),
+    Instruction::PushFloat(f) => root.stack.push(Gc::new(mc, SLVal::Float(f))),
+    Instruction::PushString(s) => root.stack.push(Gc::new(mc, SLVal::String(s))),
+    Instruction::PushBool(b) => root.stack.push(Gc::new(mc, SLVal::Bool(b))),
+    Instruction::Pop => {
+      pop(root)?;
+    }
+    Instruction::Return => {
+      // Pop the top frame; the return value stays on the stack.
+      root.frames.pop();
+    }
+    Instruction::SetLocal(i) => {
+      let val = pop(root)?;
+      let frame = root
+        .frames
+        .last_mut()
+        .ok_or_else(|| "SetLocal with no frame".to_string())?;
+      frame.locals[usize::from(i)] = val;
+    }
+    Instruction::LoadLocal(i) => {
+      let frame = root
+        .frames
+        .last()
+        .ok_or_else(|| "LoadLocal with no frame".to_string())?;
+      root.stack.push(frame.locals[usize::from(i)]);
+    }
+    Instruction::Call((mod_index, func_index)) => {
+      call_fixed_inner(mc, root, package, builtins, mod_index, func_index)?;
+    }
+    Instruction::CallDynamic => {
+      call_dynamic_inner(mc, root, package, builtins)?;
+    }
+    Instruction::MakeFunctionRef((mod_index, func_index)) => {
+      root
+        .stack
+        .push(Gc::new(mc, SLVal::FunctionRef(mod_index, func_index)));
+    }
+    Instruction::MakeCell => {
+      let val = pop(root)?;
+      root.stack.push(Gc::new(
+        mc,
+        SLVal::Cell(Gc::new(mc, RefLock::new((*val).clone()))),
+      ));
+    }
+    Instruction::DerefCell => {
+      let val = pop(root)?;
+      match &*val {
+        SLVal::Cell(r) => root.stack.push(r.borrow().clone_value(mc)),
+        other => return Err(format!("Not a cell: {:?}", other)),
+      }
+    }
+    Instruction::PartialApply(num_args) => {
+      partial_apply(mc, root, num_args)?;
+    }
+    Instruction::Jump(target) => {
+      let frame = root
+        .frames
+        .last_mut()
+        .ok_or_else(|| "Jump with no frame".to_string())?;
+      frame.ip = target as usize;
+    }
+    Instruction::JumpIfFalse(target) => {
+      let val = pop(root)?;
+      match &*val {
+        SLVal::Bool(false) => {
+          let frame = root
+            .frames
+            .last_mut()
+            .ok_or_else(|| "JumpIfFalse with no frame".to_string())?;
+          frame.ip = target as usize;
+        }
+        SLVal::Bool(true) => {}
+        other => return Err(format!("`if` condition must be a bool, got {:?}", other)),
+      }
+    }
+  }
+  Ok(())
+}
+
+/// Pop a value off the execution's value stack.
+fn pop<'gc>(root: &mut ExecRoot<'gc>) -> Result<Gc<'gc, SLVal<'gc>>, String> {
+  root
+    .stack
+    .pop()
+    .ok_or_else(|| "POP on an empty stack".to_string())
+}
+
+impl<'gc> SLVal<'gc> {
+  /// Produce a `Gc<SLVal>` for this value. Used when deref-ing a cell: the
+  /// contents come out as a borrowed `SLVal`, and we re-box it onto the GC
+  /// heap so it can go back on the stack.
+  fn clone_value(&self, mc: &Mutation<'gc>) -> Gc<'gc, SLVal<'gc>> {
+    Gc::new(mc, self.clone())
+  }
+}
+
+fn partial_apply<'gc>(
+  mc: &Mutation<'gc>,
+  root: &mut ExecRoot<'gc>,
+  num_args: u16,
+) -> Result<(), String> {
+  let func = pop(root)?;
+  let mut args = vec![];
+  for _ in 0..num_args {
+    args.push(pop(root)?);
+  }
+  args.reverse();
+  let closure = match &*func {
+    SLVal::FunctionRef(mod_index, func_index) => Gc::new(
+      mc,
+      SLVal::Partial(Partial {
+        function: (*mod_index, *func_index),
+        args,
+      }),
+    ),
+    _ => return Err("make_closure needs a function at TOS".to_string()),
+  };
+  root.stack.push(closure);
+  Ok(())
+}
+
+/// Either pushes a frame for the function if it's defined in SafeLisp, or
+/// just call it immediately if it's a builtin.
+fn call_fixed_inner<'gc>(
+  mc: &'gc Mutation<'gc>,
+  root: &mut ExecRoot<'gc>,
+  package: &Package,
+  builtins: &impl Builtins,
+  mod_index: u32,
+  func_index: u32,
+) -> Result<(), String> {
+  let (module_name, functions) = package
+    .get_module(mod_index)
+    .ok_or_else(|| format!("Module not found: {}", mod_index))?;
+  let (func_name, callable) = functions
+    .get(func_index as usize)
+    .ok_or_else(|| format!("Function not found: {}/{}", mod_index, func_index))?;
+  match callable {
+    Callable::Function(func) => {
+      enter_function_inner(mc, root, func.clone(), vec![])?;
+    }
+    Callable::Builtin => {
+      let mut stack = Stack {
+        mc,
+        items: &mut root.stack,
+      };
+      builtins
+        .call(module_name, func_name, &mut stack)
+        .ok_or_else(|| format!("No function named {}", func_name))??;
+    }
+  }
+  Ok(())
+}
+
+/// Prepare the callable that's on the top of stack to be called. This pushes
+/// a new frame for function callables.
+fn call_dynamic_inner<'gc>(
+  mc: &'gc Mutation<'gc>,
+  root: &mut ExecRoot<'gc>,
+  package: &Package,
+  builtins: &impl Builtins,
+) -> Result<(), String> {
+  let callable = pop(root)?;
+  match &*callable {
+    SLVal::FunctionRef(mod_index, func_index) => {
+      call_fixed_inner(mc, root, package, builtins, *mod_index, *func_index)
+    }
+    SLVal::Partial(Partial {
+      function: (mod_index, func_index),
+      args,
+    }) => {
+      let (_, functions) = package
+        .get_module(*mod_index)
+        .ok_or_else(|| format!("Module not found: {}", mod_index))?;
+      let (_, callable) = functions
+        .get(*func_index as usize)
+        .ok_or_else(|| format!("Function not found: {}/{}", mod_index, func_index))?;
+      match callable {
+        Callable::Function(func) => enter_function_inner(mc, root, func.clone(), args.clone()),
+        Callable::Builtin => Err("Can't invoke a builtin as a closure".to_string()),
+      }
+    }
+    x => Err(format!("Can't call a non-callable! {:?}", x)),
+  }
+}
+
+/// Push a new frame for a function, with optional pre-bound values. The
+/// remaining params (after the pre-bound ones) are popped from the stack.
+fn enter_function_inner<'gc>(
+  mc: &Mutation<'gc>,
+  root: &mut ExecRoot<'gc>,
+  function: Function,
+  pre_bound: Vec<Gc<'gc, SLVal<'gc>>>,
+) -> Result<(), String> {
+  let start = pre_bound.len();
+  let mut locals = pre_bound;
+  // Initialize all remaining local slots to `Void`. `SLVal::Void` holds no
+  // `Gc` pointers, so allocating it on the GC heap is cheap and safe.
+  let void = Gc::new(mc, SLVal::Void);
+  for _ in locals.len()..usize::from(function.num_locals) {
+    locals.push(void);
+  }
+  // The parameters are "in order" on the stack, so popping will give them to
+  // us in reverse order.
+  for param_idx in (start..usize::from(function.num_params)).rev() {
+    locals[param_idx] = pop(root)?;
+  }
+  root.frames.push(Frame {
+    function,
+    locals,
+    ip: 0,
+  });
+  Ok(())
 }
 
 #[cfg(test)]
@@ -396,8 +671,9 @@ mod test {
   use super::*;
   use crate::builtins::DefaultBuiltins;
   use crate::compiler::{self, *};
+  use std::time::Duration;
 
-  fn eval_main(source: &str) -> Rc<SLVal> {
+  fn eval_main(source: &str) -> SLValue {
     let pkg = compile_executable_from_source(&source.to_string(), ("main", "main")).unwrap();
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
@@ -434,7 +710,7 @@ mod test {
     };
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
-    assert_eq!(exec.run_until_done().unwrap(), Rc::new(SLVal::Int(42)));
+    assert_eq!(exec.run_until_done().unwrap(), SLValue::Int(42));
   }
 
   #[test]
@@ -442,17 +718,18 @@ mod test {
     #[derive(Clone)]
     struct MyBuiltins;
     impl Builtins for MyBuiltins {
-      fn call(&self, mod_name: &str, name: &str, stack: &mut Stack) -> BuiltinResult {
-        match (mod_name, name) {
-          ("main", "add2") => {
-            if let Ok(SLVal::Int(n)) = stack.pop().map(|x| (&*x).clone()) {
-              stack.push(Rc::new(SLVal::Int(n + 2)));
-              Some(Ok(()))
-            } else {
-              Some(Err("nope".to_string()))
-            }
-          }
-          _ => None,
+      fn call<'gc, 'stack>(
+        &self,
+        _mod_name: &str,
+        _name: &str,
+        stack: &mut Stack<'gc, 'stack>,
+      ) -> BuiltinResult {
+        let top = stack.pop().ok()?;
+        if let SLVal::Int(n) = &*top {
+          stack.push(SLVal::Int(n + 2));
+          Some(Ok(()))
+        } else {
+          Some(Err("nope".to_string()))
         }
       }
     }
@@ -466,7 +743,7 @@ mod test {
 
     let interpreter = Interpreter::with_builtins(package, MyBuiltins);
     let mut exec = interpreter.call_main().unwrap();
-    assert_eq!(exec.run_until_done().unwrap(), Rc::new(SLVal::Int(5)));
+    assert_eq!(exec.run_until_done().unwrap(), SLValue::Int(5));
   }
 
   #[test]
@@ -509,7 +786,7 @@ mod test {
     let result = exec.run_until_done().unwrap();
     let mut exec2 = interp.call_slval(result).unwrap();
     let result2 = exec2.run_until_done().unwrap();
-    assert_eq!(result2, Rc::new(SLVal::Int(42)));
+    assert_eq!(result2, SLValue::Int(42));
   }
 
   #[test]
@@ -526,7 +803,7 @@ mod test {
     let pkg = compile_executable_from_source(&source, ("main", "main")).unwrap();
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
-    assert_eq!(exec.run_until_done().unwrap(), Rc::new(SLVal::Int(1)));
+    assert_eq!(exec.run_until_done().unwrap(), SLValue::Int(1));
   }
 
   #[test]
@@ -540,7 +817,7 @@ mod test {
         middle)
       (fn main () (((outer))))
     ";
-    assert_eq!(eval_main(source), Rc::new(SLVal::Int(1)));
+    assert_eq!(eval_main(source), SLValue::Int(1));
   }
 
   #[test]
@@ -551,7 +828,7 @@ mod test {
         inner)
       (fn main () ((outer 7)))
     ";
-    assert_eq!(eval_main(source), Rc::new(SLVal::Int(7)));
+    assert_eq!(eval_main(source), SLValue::Int(7));
   }
 
   #[test]
@@ -559,7 +836,7 @@ mod test {
     let source = "
       (fn main () (let a 1))
     ";
-    assert_eq!(eval_main(source), Rc::new(SLVal::Int(1)));
+    assert_eq!(eval_main(source), SLValue::Int(1));
   }
 
   #[test]
@@ -569,7 +846,7 @@ mod test {
         (let a 1)
         (let b 2))
     ";
-    assert_eq!(eval_main(source), Rc::new(SLVal::Int(2)));
+    assert_eq!(eval_main(source), SLValue::Int(2));
   }
 
   #[test]
@@ -579,7 +856,7 @@ mod test {
         (let a 1)
         a)
     ";
-    assert_eq!(eval_main(source), Rc::new(SLVal::Int(1)));
+    assert_eq!(eval_main(source), SLValue::Int(1));
   }
 
   #[test]
@@ -594,7 +871,7 @@ mod test {
         inner)
       (fn main () ((outer)))
     ";
-    assert_eq!(eval_main(source), Rc::new(SLVal::Int(1)));
+    assert_eq!(eval_main(source), SLValue::Int(1));
   }
 
   #[test]
@@ -605,7 +882,7 @@ mod test {
         inner)
       (fn main () ((outer)))
     ";
-    assert_eq!(eval_main(source), Rc::new(SLVal::Int(5)));
+    assert_eq!(eval_main(source), SLValue::Int(5));
   }
 
   #[test]
@@ -616,7 +893,7 @@ mod test {
         (inner))
       (fn main () (outer))
     ";
-    assert_eq!(eval_main(source), Rc::new(SLVal::Int(5)));
+    assert_eq!(eval_main(source), SLValue::Int(5));
   }
 
   #[test]
@@ -628,7 +905,7 @@ mod test {
         caller)
       (fn main () ((outer)))
     ";
-    assert_eq!(eval_main(source), Rc::new(SLVal::Int(5)));
+    assert_eq!(eval_main(source), SLValue::Int(5));
   }
 
   #[test]
@@ -638,7 +915,7 @@ mod test {
         (fn inner () 5))
       (fn main () ((outer)))
     ";
-    assert_eq!(eval_main(source), Rc::new(SLVal::Int(5)));
+    assert_eq!(eval_main(source), SLValue::Int(5));
   }
 
   #[test]
@@ -649,20 +926,19 @@ mod test {
       num_params: 0,
       instructions: vec![Instruction::PushInt(7), Instruction::Return],
     };
-    let mut exec = Execution::new(&pkg, DefaultBuiltins);
-    exec.enter_function(&code, vec![]).unwrap();
+    let mut exec = Execution::new(pkg, DefaultBuiltins);
+    exec.enter_function(code, vec![]).unwrap();
     // After pushing the initial frame, there's one frame at ip 0.
-    assert_eq!(exec.frames.len(), 1);
+    assert_eq!(exec.stack_len(), 0);
     exec.step().unwrap();
     // PushInt executed: stack has the value, frame still on the stack.
-    assert_eq!(exec.stack.peek().unwrap(), Rc::new(SLVal::Int(7)));
-    assert_eq!(exec.frames.len(), 1);
+    assert_eq!(exec.peek_value().unwrap(), SLValue::Int(7));
     exec.step().unwrap();
     // Return popped the frame; the value remains on the stack.
-    assert_eq!(exec.frames.len(), 0);
-    assert_eq!(exec.stack.peek().unwrap(), Rc::new(SLVal::Int(7)));
+    assert!(exec.is_done());
+    assert_eq!(exec.peek_value().unwrap(), SLValue::Int(7));
     let result = exec.run_until_done().unwrap();
-    assert_eq!(result, Rc::new(SLVal::Int(7)));
+    assert_eq!(result, SLValue::Int(7));
   }
 
   #[test]
@@ -673,12 +949,12 @@ mod test {
       num_params: 0,
       instructions: vec![Instruction::PushInt(99), Instruction::Return],
     };
-    let mut exec = Execution::new(&pkg, DefaultBuiltins);
-    exec.enter_function(&code, vec![]).unwrap();
+    let mut exec = Execution::new(pkg, DefaultBuiltins);
+    exec.enter_function(code, vec![]).unwrap();
     let result = exec.run_until_done().unwrap();
-    assert_eq!(result, Rc::new(SLVal::Int(99)));
+    assert_eq!(result, SLValue::Int(99));
     // The stack should be empty after run_until_done pops the final value.
-    assert!(exec.stack.peek().is_err());
+    assert_eq!(exec.stack_len(), 0);
   }
 
   #[test]
@@ -689,8 +965,8 @@ mod test {
       num_params: 0,
       instructions: vec![Instruction::PushInt(1)],
     };
-    let mut exec = Execution::new(&pkg, DefaultBuiltins);
-    exec.enter_function(&code, vec![]).unwrap();
+    let mut exec = Execution::new(pkg, DefaultBuiltins);
+    exec.enter_function(code, vec![]).unwrap();
     exec.step().unwrap(); // PushInt
     let err = exec.step().unwrap_err();
     assert!(err.contains("ran past end"), "unexpected error: {}", err);
@@ -699,7 +975,7 @@ mod test {
   #[test]
   fn step_with_no_frames_errors() {
     let pkg = Package::default();
-    let mut exec = Execution::new(&pkg, DefaultBuiltins);
+    let mut exec = Execution::new(pkg, DefaultBuiltins);
     let err = exec.step().unwrap_err();
     assert!(err.contains("no frames"), "unexpected error: {}", err);
   }
@@ -707,9 +983,10 @@ mod test {
   #[test]
   fn call_dynamic_on_non_callable_errors() {
     let pkg = Package::default();
-    let mut exec = Execution::new(&pkg, DefaultBuiltins);
-    exec.stack.push(Rc::new(SLVal::Int(3)));
-    let err = exec.call_dynamic().unwrap_err();
+    let mut exec = Execution::new(pkg, DefaultBuiltins);
+    let err = exec
+      .push_and_call_dynamic(SLValue::Int(3))
+      .expect_err("expected an error calling a non-callable");
     assert!(err.contains("non-callable"), "unexpected error: {}", err);
   }
 
@@ -721,8 +998,8 @@ mod test {
       num_params: 0,
       instructions: vec![Instruction::PushInt(1), Instruction::DerefCell],
     };
-    let mut exec = Execution::new(&pkg, DefaultBuiltins);
-    exec.enter_function(&code, vec![]).unwrap();
+    let mut exec = Execution::new(pkg, DefaultBuiltins);
+    exec.enter_function(code, vec![]).unwrap();
     exec.step().unwrap(); // PushInt
     let err = exec.step().unwrap_err(); // DerefCell
     assert!(err.contains("Not a cell"), "unexpected error: {}", err);
@@ -736,8 +1013,8 @@ mod test {
       num_params: 0,
       instructions: vec![Instruction::Call((0, 0))],
     };
-    let mut exec = Execution::new(&pkg, DefaultBuiltins);
-    exec.enter_function(&code, vec![]).unwrap();
+    let mut exec = Execution::new(pkg, DefaultBuiltins);
+    exec.enter_function(code, vec![]).unwrap();
     let err = exec.step().unwrap_err();
     assert!(
       err.contains("Module not found"),
@@ -778,7 +1055,7 @@ mod test {
     };
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
-    assert_eq!(exec.run_until_done().unwrap(), Rc::new(SLVal::Int(42)));
+    assert_eq!(exec.run_until_done().unwrap(), SLValue::Int(42));
   }
 
   #[test]
@@ -794,7 +1071,7 @@ mod test {
           (std.+ n (triangle (std.- n 1)))))
       (fn main () (triangle 50000))
     ";
-    assert_eq!(eval_main(source), Rc::new(SLVal::Int(1250025000)));
+    assert_eq!(eval_main(source), SLValue::Int(1250025000));
   }
 
   #[test]
@@ -813,14 +1090,14 @@ mod test {
     ";
     let pkg = compile_executable_from_source(&source.to_string(), ("main", "main")).unwrap();
     let (mod_idx, fn_idx) = pkg.main.unwrap();
-    let function = pkg.get_function(mod_idx, fn_idx).unwrap();
+    let function = pkg.get_function(mod_idx, fn_idx).unwrap().clone();
     if let Callable::Function(function) = function {
-      let mut exec = Execution::new(&pkg, DefaultBuiltins);
+      let mut exec = Execution::new(pkg, DefaultBuiltins);
       exec.enter_function(function, vec![]).unwrap();
       let result = exec.run_until_done().unwrap();
-      assert_eq!(result, Rc::new(SLVal::Int(2)));
+      assert_eq!(result, SLValue::Int(2));
       // run_until_done pops the final value, so the stack should be empty.
-      assert_eq!(exec.stack.items, vec![]);
+      assert_eq!(exec.stack_len(), 0);
     }
   }
 
@@ -830,7 +1107,7 @@ mod test {
       (use \"src/std\")
       (fn main () (if (std.== 1 1) 42 0))
     ";
-    assert_eq!(eval_main(source), Rc::new(SLVal::Int(42)));
+    assert_eq!(eval_main(source), SLValue::Int(42));
   }
 
   #[test]
@@ -839,7 +1116,7 @@ mod test {
       (use \"src/std\")
       (fn main () (if (std.== 1 2) 42 0))
     ";
-    assert_eq!(eval_main(source), Rc::new(SLVal::Int(0)));
+    assert_eq!(eval_main(source), SLValue::Int(0));
   }
 
   #[test]
@@ -852,15 +1129,15 @@ mod test {
       (decl boom (n))
       (fn main () (if (std.== 1 1) 42 (boom 0)))
     ";
-    assert_eq!(eval_main(source), Rc::new(SLVal::Int(42)));
+    assert_eq!(eval_main(source), SLValue::Int(42));
   }
 
   #[test]
   fn bool_literals_evaluate() {
     let source = "(fn main () true)";
-    assert_eq!(eval_main(source), Rc::new(SLVal::Bool(true)));
+    assert_eq!(eval_main(source), SLValue::Bool(true));
     let source = "(fn main () false)";
-    assert_eq!(eval_main(source), Rc::new(SLVal::Bool(false)));
+    assert_eq!(eval_main(source), SLValue::Bool(false));
   }
 
   #[test]
@@ -869,12 +1146,12 @@ mod test {
       (use \"src/std\")
       (fn main () (std.== 3 3))
     ";
-    assert_eq!(eval_main(source), Rc::new(SLVal::Bool(true)));
+    assert_eq!(eval_main(source), SLValue::Bool(true));
     let source = "
       (use \"src/std\")
       (fn main () (std.== 3 4))
     ";
-    assert_eq!(eval_main(source), Rc::new(SLVal::Bool(false)));
+    assert_eq!(eval_main(source), SLValue::Bool(false));
   }
 
   #[test]
@@ -894,7 +1171,7 @@ mod test {
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
     let status = exec.run(1_000).unwrap();
-    assert_eq!(status, Status::Done(Rc::new(SLVal::Int(5))));
+    assert_eq!(status, Status::Done(SLValue::Int(5)));
   }
 
   #[test]
@@ -910,7 +1187,7 @@ mod test {
     assert_eq!(exec.executed, 3);
     assert!(!exec.is_done());
     let status = exec.run(1_000).unwrap();
-    assert_eq!(status, Status::Done(Rc::new(SLVal::Int(5))));
+    assert_eq!(status, Status::Done(SLValue::Int(5)));
   }
 
   #[test]
@@ -921,7 +1198,7 @@ mod test {
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
     let status = exec.run(4).unwrap();
-    assert_eq!(status, Status::Done(Rc::new(SLVal::Int(3))));
+    assert_eq!(status, Status::Done(SLValue::Int(3)));
     assert_eq!(exec.executed, 4);
   }
 
@@ -934,7 +1211,7 @@ mod test {
     let status = exec.run(2).unwrap();
     assert_eq!(status, Status::Paused);
     let status = exec.run(1_000).unwrap();
-    assert_eq!(status, Status::Done(Rc::new(SLVal::Int(3))));
+    assert_eq!(status, Status::Done(SLValue::Int(3)));
     assert_eq!(exec.executed, 4);
   }
 
@@ -984,8 +1261,8 @@ mod test {
     assert_eq!(exec_b.executed, 1);
 
     // Run both to completion in the same interleaved fashion.
-    assert_eq!(exec_a.run(1_000).unwrap(), Status::Done(Rc::new(SLVal::Int(3))));
-    assert_eq!(exec_b.run(1_000).unwrap(), Status::Done(Rc::new(SLVal::Int(3))));
+    assert_eq!(exec_a.run(1_000).unwrap(), Status::Done(SLValue::Int(3)));
+    assert_eq!(exec_b.run(1_000).unwrap(), Status::Done(SLValue::Int(3)));
     assert!(exec_a.is_done());
     assert!(exec_b.is_done());
   }
@@ -997,10 +1274,8 @@ mod test {
     let pkg = compile_executable_from_source(&source.to_string(), ("main", "main")).unwrap();
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
-    let status = exec
-      .run_for_duration(Duration::from_secs(1))
-      .unwrap();
-    assert_eq!(status, Status::Done(Rc::new(SLVal::Int(5))));
+    let status = exec.run_for_duration(Duration::from_secs(1)).unwrap();
+    assert_eq!(status, Status::Done(SLValue::Int(5)));
   }
 
   #[test]
@@ -1010,9 +1285,7 @@ mod test {
     let pkg = compile_executable_from_source(&source.to_string(), ("main", "main")).unwrap();
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
-    let status = exec
-      .run_for_duration(Duration::from_millis(50))
-      .unwrap();
+    let status = exec.run_for_duration(Duration::from_millis(50)).unwrap();
     assert_eq!(status, Status::Paused);
     assert!(!exec.is_done());
     // It should have made progress.

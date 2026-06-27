@@ -1,12 +1,15 @@
-use std::rc::Rc;
-
-use crate::interpreter::{Builtins, BuiltinResult, SLVal, Stack};
+use crate::interpreter::{BuiltinResult, Builtins, SLVal, Stack};
 
 #[derive(Clone)]
 pub struct DefaultBuiltins;
 
 impl Builtins for DefaultBuiltins {
-  fn call(&self, mod_name: &str, name: &str, stack: &mut Stack) -> BuiltinResult {
+  fn call<'gc, 'stack>(
+    &self,
+    mod_name: &str,
+    name: &str,
+    stack: &mut Stack<'gc, 'stack>,
+  ) -> BuiltinResult {
     // This must be kept up-to-date with std.sl
     match (mod_name, name) {
       ("std", "+") => Some(builtin_add(stack)),
@@ -17,34 +20,36 @@ impl Builtins for DefaultBuiltins {
   }
 }
 
-fn builtin_add(stack: &mut Stack) -> Result<(), String> {
+fn builtin_add<'gc, 'stack>(stack: &mut Stack<'gc, 'stack>) -> Result<(), String> {
+  // Pop both operands before borrowing `mc` from `stack`, to avoid overlapping
+  // the immutable `mc` borrow with the mutable `pop`/`push` borrows.
   let one = stack.pop()?;
   let two = stack.pop()?;
   let result = match (&*one, &*two) {
-    (SLVal::Int(one), SLVal::Int(two)) => Rc::new(SLVal::Int(one + two)),
-    (SLVal::Float(one), SLVal::Float(two)) => Rc::new(SLVal::Float(one + two)),
+    (SLVal::Int(one), SLVal::Int(two)) => SLVal::Int(one + two),
+    (SLVal::Float(one), SLVal::Float(two)) => SLVal::Float(one + two),
     _ => return Err(format!("Couldn't add {:?} and {:?}", one, two)),
   };
   stack.push(result);
   Ok(())
 }
 
-fn builtin_sub(stack: &mut Stack) -> Result<(), String> {
+fn builtin_sub<'gc, 'stack>(stack: &mut Stack<'gc, 'stack>) -> Result<(), String> {
   let one = stack.pop()?;
   let two = stack.pop()?;
   let result = match (&*one, &*two) {
-    (SLVal::Int(one), SLVal::Int(two)) => Rc::new(SLVal::Int(two - one)),
-    (SLVal::Float(one), SLVal::Float(two)) => Rc::new(SLVal::Float(two - one)),
+    (SLVal::Int(one), SLVal::Int(two)) => SLVal::Int(two - one),
+    (SLVal::Float(one), SLVal::Float(two)) => SLVal::Float(two - one),
     _ => return Err(format!("Couldn't sub {:?} and {:?}", one, two)),
   };
   stack.push(result);
   Ok(())
 }
 
-fn builtin_eq(stack: &mut Stack) -> Result<(), String> {
+fn builtin_eq<'gc, 'stack>(stack: &mut Stack<'gc, 'stack>) -> Result<(), String> {
   let one = stack.pop()?;
   let two = stack.pop()?;
-  let result = Rc::new(SLVal::Bool(one == two));
+  let result = SLVal::Bool(one == two);
   stack.push(result);
   Ok(())
 }
