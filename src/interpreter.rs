@@ -14,6 +14,7 @@ pub enum SLVal {
   Int(i64),
   Float(f64),
   String(String),
+  Bool(bool),
   Void,
   FunctionRef(u32, u32),
   Partial(Partial),
@@ -163,6 +164,7 @@ where
       Instruction::PushInt(i) => self.stack.push(Rc::new(SLVal::Int(*i))),
       Instruction::PushFloat(f) => self.stack.push(Rc::new(SLVal::Float(*f))),
       Instruction::PushString(s) => self.stack.push(Rc::new(SLVal::String(s.clone()))),
+      Instruction::PushBool(b) => self.stack.push(Rc::new(SLVal::Bool(*b))),
       Instruction::Pop => {
         self.stack.pop()?;
       }
@@ -209,6 +211,27 @@ where
       }
       Instruction::PartialApply(num_args) => {
         self.partial_apply(*num_args)?;
+      }
+      Instruction::Jump(target) => {
+        let frame = self
+          .frames
+          .last_mut()
+          .ok_or_else(|| "Jump with no frame".to_string())?;
+        frame.ip = *target as usize;
+      }
+      Instruction::JumpIfFalse(target) => {
+        let val = self.stack.pop()?;
+        match &*val {
+          SLVal::Bool(false) => {
+            let frame = self
+              .frames
+              .last_mut()
+              .ok_or_else(|| "JumpIfFalse with no frame".to_string())?;
+            frame.ip = *target as usize;
+          }
+          SLVal::Bool(true) => {}
+          other => return Err(format!("`if` condition must be a bool, got {:?}", other)),
+        }
       }
     }
     Ok(())
@@ -697,21 +720,18 @@ mod test {
 
   #[test]
   fn deep_recursion_does_not_overflow() {
-    // A recursive countdown: counts down from N to 0 using CallDynamic on
-    // itself. With N = 5000 this would overflow the native Rust stack under
-    // the old recursive eval_code; the frame-stack model handles it.
-    //
-    // TODO: this doesn't actually recurse — `count` just returns n. Needs a
-    // real recursive body (with arithmetic/conditional builtins) to exercise
-    // the frame stack depth. Left as a smoke test for now.
+    // Under the old recursive eval_code each Safelisp call was a Rust stack
+    // frame, so this would have overflowed. This ensures we can handle very
+    // large stack sizes.
     let source = "
-      (decl + (a b))
-      (fn count (n)
-        (let unused n)
-        n)
-      (fn main () (count 5000))
+      (use \"src/std\")
+      (fn triangle (n)
+        (if (std.== n 0)
+          0
+          (std.+ n (triangle (std.- n 1)))))
+      (fn main () (triangle 50000))
     ";
-    assert_eq!(eval_main(source), Rc::new(SLVal::Int(5000)));
+    assert_eq!(eval_main(source), Rc::new(SLVal::Int(1250025000)));
   }
 
   #[test]
@@ -739,5 +759,67 @@ mod test {
       // run_until_done pops the final value, so the stack should be empty.
       assert_eq!(exec.stack.items, vec![]);
     }
+  }
+
+  #[test]
+  fn if_selects_then_branch_when_true() {
+    let source = "
+      (use \"src/std\")
+      (fn main () (if (std.== 1 1) 42 0))
+    ";
+    assert_eq!(eval_main(source), Rc::new(SLVal::Int(42)));
+  }
+
+  #[test]
+  fn if_selects_else_branch_when_false() {
+    let source = "
+      (use \"src/std\")
+      (fn main () (if (std.== 1 2) 42 0))
+    ";
+    assert_eq!(eval_main(source), Rc::new(SLVal::Int(0)));
+  }
+
+  #[test]
+  fn if_does_not_evaluate_unselected_branch() {
+    // If the else branch were evaluated, calling the declared-but-unimplemented
+    // `boom` builtin would error at runtime. Since the then branch is selected,
+    // `boom` is never called and the program returns 42 cleanly.
+    let source = "
+      (use \"src/std\")
+      (decl boom (n))
+      (fn main () (if (std.== 1 1) 42 (boom 0)))
+    ";
+    assert_eq!(eval_main(source), Rc::new(SLVal::Int(42)));
+  }
+
+  #[test]
+  fn bool_literals_evaluate() {
+    let source = "(fn main () true)";
+    assert_eq!(eval_main(source), Rc::new(SLVal::Bool(true)));
+    let source = "(fn main () false)";
+    assert_eq!(eval_main(source), Rc::new(SLVal::Bool(false)));
+  }
+
+  #[test]
+  fn equality_returns_bool() {
+    let source = "
+      (use \"src/std\")
+      (fn main () (std.== 3 3))
+    ";
+    assert_eq!(eval_main(source), Rc::new(SLVal::Bool(true)));
+    let source = "
+      (use \"src/std\")
+      (fn main () (std.== 3 4))
+    ";
+    assert_eq!(eval_main(source), Rc::new(SLVal::Bool(false)));
+  }
+
+  #[test]
+  fn if_rejects_non_bool_condition() {
+    let source = "(fn main () (if 1 42 0))";
+    let pkg = compile_executable_from_source(&source.to_string(), ("main", "main")).unwrap();
+    let mut interp = Interpreter::new(pkg);
+    let err = interp.call_main().unwrap_err();
+    assert_eq!(err, "`if` condition must be a bool, got Int(1)");
   }
 }
