@@ -258,8 +258,17 @@ fn compile_function(module_name: &str, f: &parser::Function) -> Result<CompiledM
     locals.insert(param.clone(), idx as u16);
   }
   let mut instructions = vec![];
-  for ast in &f.code {
+  let last_idx = f.code.len().saturating_sub(1);
+  for (i, ast) in f.code.iter().enumerate() {
     instructions.extend(compile_expr(module_name, ast, &mut locals)?);
+    // Non-final body expressions are in statement position: their value is
+    // discarded, so pop it off the stack to keep the stack clean. It would be
+    // really nice to avoid pushing things to the stack entirely if we know they
+    // are not going to be used, but that will probably take some more
+    // thought/refactoring.
+    if i != last_idx {
+      instructions.push(Instruction::Pop);
+    }
   }
   instructions.push(Instruction::Return);
   Ok(vec![(
@@ -460,6 +469,7 @@ mod test {
             Instruction::MakeFunctionRef(("main".to_string(), "x".to_string())),
             Instruction::SetLocal(0),
             Instruction::LoadLocal(0),
+            Instruction::Pop,
             Instruction::LoadLocal(0),
             Instruction::CallDynamic,
             Instruction::Return,
