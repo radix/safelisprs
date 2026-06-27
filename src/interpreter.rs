@@ -6,7 +6,12 @@ use crate::builtins::DefaultBuiltins;
 use crate::compiler::{Callable, Instruction, LinkedFunction as Function, Package};
 
 /// Per-execution state held inside an `Execution`'s own arena. Each `Execution`
-/// owns a private `Arena` whose root is this type.
+/// owns a private `Arena` whose root is this type. All interpreter logic lives
+/// as methods on `ExecRoot`, so that stepping a single bytecode or running to
+/// completion can call `self.step(mc, …)`, `self.pop()`, `self.is_done()`, etc.
+/// — the same shape the original `Rc`-based `Execution` had, just branded with
+/// the gc-arena invariant `'gc` lifetime so that `Gc` pointers never escape a
+/// single `mutate_root` callback.
 #[derive(Collect, Default)]
 #[collect(no_drop)]
 struct ExecRoot<'gc> {
@@ -112,6 +117,13 @@ impl<'gc> SLVal<'gc> {
         )),
       },
     )
+  }
+
+  /// Produce a `Gc<SLVal>` for this value. Used when deref-ing a cell: the
+  /// contents come out as a borrowed `SLVal`, and we re-box it onto the GC
+  /// heap so it can go back on the stack.
+  fn clone_value(&self, mc: &Mutation<'gc>) -> Gc<'gc, SLVal<'gc>> {
+    Gc::new(mc, self.clone())
   }
 }
 
@@ -230,6 +242,11 @@ pub enum Status {
 /// `Arena` holds the value stack and call frames branded with an invariant
 /// `'gc` lifetime; values that must cross the arena boundary (such as the
 /// result of `run`) are deep-copied to the arena-agnostic `SLValue`.
+///
+/// `Execution` is a thin shell owning the `Arena`/`Package`/`builtins`; the
+/// interpreter logic (`step`, `pop`, `push`, `partial_apply`, `call_fixed`,
+/// `call_dynamic`, `enter_function`) lives as methods on the in-arena
+/// `ExecRoot`, which is only reachable inside `arena.mutate_root` callbacks.
 pub struct Execution<B> {
   arena: Arena<Rootable![ExecRoot<'_>]>,
   package: Package,
@@ -253,7 +270,7 @@ impl<B: Builtins + Clone> Execution<B> {
 
   /// Returns true if the frame stack is empty (execution is complete).
   pub fn is_done(&self) -> bool {
-    self.arena.mutate(|_, root| root.frames.is_empty())
+    self.arena.mutate(|_, root| root.is_done())
   }
 
   /// The number of items currently on the value stack.
@@ -284,8 +301,8 @@ impl<B: Builtins + Clone> Execution<B> {
     let mut executed = self.executed;
     let mut outcome: Result<Status, String> = Ok(Status::Paused);
     self.arena.mutate_root(|mc, root| {
-      while !root.frames.is_empty() && executed - start < n {
-        match step_inner(mc, root, package, builtins, &mut executed) {
+      while !root.is_done() && executed - start < n {
+        match root.step(mc, package, builtins, &mut executed) {
           Ok(()) => {}
           Err(e) => {
             outcome = Err(e);
@@ -293,15 +310,11 @@ impl<B: Builtins + Clone> Execution<B> {
           }
         }
       }
-      if root.frames.is_empty() {
-        let top = match root.stack.pop() {
-          Some(v) => v,
-          None => {
-            outcome = Err("POP on an empty stack".to_string());
-            return;
-          }
-        };
-        outcome = Ok(Status::Done(top.to_value()));
+      if root.is_done() {
+        match root.pop() {
+          Ok(top) => outcome = Ok(Status::Done(top.to_value())),
+          Err(e) => outcome = Err(e),
+        }
       } else {
         outcome = Ok(Status::Paused);
       }
@@ -320,8 +333,8 @@ impl<B: Builtins + Clone> Execution<B> {
     let mut executed = self.executed;
     let mut result: Result<SLValue, String> = Ok(SLValue::Void);
     self.arena.mutate_root(|mc, root| {
-      while !root.frames.is_empty() {
-        match step_inner(mc, root, package, builtins, &mut executed) {
+      while !root.is_done() {
+        match root.step(mc, package, builtins, &mut executed) {
           Ok(()) => {}
           Err(e) => {
             result = Err(e);
@@ -329,14 +342,10 @@ impl<B: Builtins + Clone> Execution<B> {
           }
         }
       }
-      let top = match root.stack.pop() {
-        Some(v) => v,
-        None => {
-          result = Err("POP on an empty stack".to_string());
-          return;
-        }
-      };
-      result = Ok(top.to_value());
+      match root.pop() {
+        Ok(top) => result = Ok(top.to_value()),
+        Err(e) => result = Err(e),
+      }
     });
     self.executed = executed;
     self.arena.collect_debt();
@@ -355,8 +364,8 @@ impl<B: Builtins + Clone> Execution<B> {
     let mut executed = self.executed;
     let mut outcome: Result<Status, String> = Ok(Status::Paused);
     self.arena.mutate_root(|mc, root| {
-      while !root.frames.is_empty() && Instant::now() < deadline {
-        match step_inner(mc, root, package, builtins, &mut executed) {
+      while !root.is_done() && Instant::now() < deadline {
+        match root.step(mc, package, builtins, &mut executed) {
           Ok(()) => {}
           Err(e) => {
             outcome = Err(e);
@@ -364,15 +373,11 @@ impl<B: Builtins + Clone> Execution<B> {
           }
         }
       }
-      if root.frames.is_empty() {
-        let top = match root.stack.pop() {
-          Some(v) => v,
-          None => {
-            outcome = Err("POP on an empty stack".to_string());
-            return;
-          }
-        };
-        outcome = Ok(Status::Done(top.to_value()));
+      if root.is_done() {
+        match root.pop() {
+          Ok(top) => outcome = Ok(Status::Done(top.to_value())),
+          Err(e) => outcome = Err(e),
+        }
       } else {
         outcome = Ok(Status::Paused);
       }
@@ -389,7 +394,7 @@ impl<B: Builtins + Clone> Execution<B> {
     let mut executed = self.executed;
     let mut result = Ok(());
     self.arena.mutate_root(|mc, root| {
-      result = step_inner(mc, root, package, builtins, &mut executed);
+      result = root.step(mc, package, builtins, &mut executed);
     });
     self.executed = executed;
     self.arena.collect_debt();
@@ -408,7 +413,7 @@ impl<B: Builtins + Clone> Execution<B> {
     self.arena.mutate_root(|mc, root| {
       let pre_bound_gc: Vec<Gc<'_, SLVal<'_>>> =
         pre_bound.iter().map(|v| SLVal::from_value(mc, v)).collect();
-      result = enter_function_inner(mc, root, function.clone(), pre_bound_gc);
+      result = root.enter_function(mc, function.clone(), pre_bound_gc);
     });
     result
   }
@@ -422,248 +427,244 @@ impl<B: Builtins + Clone> Execution<B> {
     self.arena.mutate_root(|mc, root| {
       let gc = SLVal::from_value(mc, &value);
       root.stack.push(gc);
-      result = call_dynamic_inner(mc, root, &package, &builtins);
+      result = root.call_dynamic(mc, &package, &builtins);
     });
     result
   }
 }
 
-/// Execute one bytecode instruction from the current top frame.
-fn step_inner<'gc>(
-  mc: &'gc Mutation<'gc>,
-  root: &mut ExecRoot<'gc>,
-  package: &Package,
-  builtins: &impl Builtins,
-  executed: &mut u64,
-) -> Result<(), String> {
-  *executed = executed.saturating_add(1);
-  let inst = {
-    let frame = root
-      .frames
-      .last_mut()
-      .ok_or_else(|| "step with no frames".to_string())?;
-    if frame.ip >= frame.function.instructions.len() {
-      return Err("ran past end of function without Return".to_string());
-    }
-    let inst = &frame.function.instructions[frame.ip];
-    frame.ip += 1;
-    inst.clone()
-  };
+impl<'gc> ExecRoot<'gc> {
+  /// Returns true if the frame stack is empty (execution is complete).
+  fn is_done(&self) -> bool {
+    self.frames.is_empty()
+  }
 
-  match inst {
-    Instruction::PushInt(i) => root.stack.push(Gc::new(mc, SLVal::Int(i))),
-    Instruction::PushFloat(f) => root.stack.push(Gc::new(mc, SLVal::Float(f))),
-    Instruction::PushString(s) => root.stack.push(Gc::new(mc, SLVal::String(s))),
-    Instruction::PushBool(b) => root.stack.push(Gc::new(mc, SLVal::Bool(b))),
-    Instruction::Pop => {
-      pop(root)?;
-    }
-    Instruction::Return => {
-      // Pop the top frame; the return value stays on the stack.
-      root.frames.pop();
-    }
-    Instruction::SetLocal(i) => {
-      let val = pop(root)?;
-      let frame = root
+  /// Pop a value off the execution's value stack.
+  fn pop(&mut self) -> Result<Gc<'gc, SLVal<'gc>>, String> {
+    self
+      .stack
+      .pop()
+      .ok_or_else(|| "POP on an empty stack".to_string())
+  }
+
+  /// Execute one bytecode instruction from the current top frame.
+  fn step(
+    &mut self,
+    mc: &'gc Mutation<'gc>,
+    package: &Package,
+    builtins: &impl Builtins,
+    executed: &mut u64,
+  ) -> Result<(), String> {
+    *executed = executed.saturating_add(1);
+    let inst = {
+      let frame = self
         .frames
         .last_mut()
-        .ok_or_else(|| "SetLocal with no frame".to_string())?;
-      frame.locals[usize::from(i)] = val;
-    }
-    Instruction::LoadLocal(i) => {
-      let frame = root
-        .frames
-        .last()
-        .ok_or_else(|| "LoadLocal with no frame".to_string())?;
-      root.stack.push(frame.locals[usize::from(i)]);
-    }
-    Instruction::Call((mod_index, func_index)) => {
-      call_fixed_inner(mc, root, package, builtins, mod_index, func_index)?;
-    }
-    Instruction::CallDynamic => {
-      call_dynamic_inner(mc, root, package, builtins)?;
-    }
-    Instruction::MakeFunctionRef((mod_index, func_index)) => {
-      root
-        .stack
-        .push(Gc::new(mc, SLVal::FunctionRef(mod_index, func_index)));
-    }
-    Instruction::MakeCell => {
-      let val = pop(root)?;
-      root.stack.push(Gc::new(
-        mc,
-        SLVal::Cell(Gc::new(mc, RefLock::new((*val).clone()))),
-      ));
-    }
-    Instruction::DerefCell => {
-      let val = pop(root)?;
-      match &*val {
-        SLVal::Cell(r) => root.stack.push(r.borrow().clone_value(mc)),
-        other => return Err(format!("Not a cell: {:?}", other)),
+        .ok_or_else(|| "step with no frames".to_string())?;
+      if frame.ip >= frame.function.instructions.len() {
+        return Err("ran past end of function without Return".to_string());
       }
-    }
-    Instruction::PartialApply(num_args) => {
-      partial_apply(mc, root, num_args)?;
-    }
-    Instruction::Jump(target) => {
-      let frame = root
-        .frames
-        .last_mut()
-        .ok_or_else(|| "Jump with no frame".to_string())?;
-      frame.ip = target as usize;
-    }
-    Instruction::JumpIfFalse(target) => {
-      let val = pop(root)?;
-      match &*val {
-        SLVal::Bool(false) => {
-          let frame = root
-            .frames
-            .last_mut()
-            .ok_or_else(|| "JumpIfFalse with no frame".to_string())?;
-          frame.ip = target as usize;
+      let inst = &frame.function.instructions[frame.ip];
+      frame.ip += 1;
+      inst.clone()
+    };
+
+    match inst {
+      Instruction::PushInt(i) => self.stack.push(Gc::new(mc, SLVal::Int(i))),
+      Instruction::PushFloat(f) => self.stack.push(Gc::new(mc, SLVal::Float(f))),
+      Instruction::PushString(s) => self.stack.push(Gc::new(mc, SLVal::String(s))),
+      Instruction::PushBool(b) => self.stack.push(Gc::new(mc, SLVal::Bool(b))),
+      Instruction::Pop => {
+        self.pop()?;
+      }
+      Instruction::Return => {
+        // Pop the top frame; the return value stays on self.stack.
+        self.frames.pop();
+      }
+      Instruction::SetLocal(i) => {
+        let val = self.pop()?;
+        let frame = self
+          .frames
+          .last_mut()
+          .ok_or_else(|| "SetLocal with no frame".to_string())?;
+        frame.locals[usize::from(i)] = val;
+      }
+      Instruction::LoadLocal(i) => {
+        let frame = self
+          .frames
+          .last()
+          .ok_or_else(|| "LoadLocal with no frame".to_string())?;
+        self.stack.push(frame.locals[usize::from(i)]);
+      }
+      Instruction::Call((mod_index, func_index)) => {
+        self.call_fixed(mc, package, builtins, mod_index, func_index)?;
+      }
+      Instruction::CallDynamic => {
+        self.call_dynamic(mc, package, builtins)?;
+      }
+      Instruction::MakeFunctionRef((mod_index, func_index)) => {
+        self
+          .stack
+          .push(Gc::new(mc, SLVal::FunctionRef(mod_index, func_index)));
+      }
+      Instruction::MakeCell => {
+        let val = self.pop()?;
+        self.stack.push(Gc::new(
+          mc,
+          SLVal::Cell(Gc::new(mc, RefLock::new((*val).clone()))),
+        ));
+      }
+      Instruction::DerefCell => {
+        let val = self.pop()?;
+        match &*val {
+          SLVal::Cell(r) => self.stack.push(r.borrow().clone_value(mc)),
+          other => return Err(format!("Not a cell: {:?}", other)),
         }
-        SLVal::Bool(true) => {}
-        other => return Err(format!("`if` condition must be a bool, got {:?}", other)),
+      }
+      Instruction::PartialApply(num_args) => {
+        self.partial_apply(mc, num_args)?;
+      }
+      Instruction::Jump(target) => {
+        let frame = self
+          .frames
+          .last_mut()
+          .ok_or_else(|| "Jump with no frame".to_string())?;
+        frame.ip = target as usize;
+      }
+      Instruction::JumpIfFalse(target) => {
+        let val = self.pop()?;
+        match &*val {
+          SLVal::Bool(false) => {
+            let frame = self
+              .frames
+              .last_mut()
+              .ok_or_else(|| "JumpIfFalse with no frame".to_string())?;
+            frame.ip = target as usize;
+          }
+          SLVal::Bool(true) => {}
+          other => return Err(format!("`if` condition must be a bool, got {:?}", other)),
+        }
       }
     }
+    Ok(())
   }
-  Ok(())
-}
 
-/// Pop a value off the execution's value stack.
-fn pop<'gc>(root: &mut ExecRoot<'gc>) -> Result<Gc<'gc, SLVal<'gc>>, String> {
-  root
-    .stack
-    .pop()
-    .ok_or_else(|| "POP on an empty stack".to_string())
-}
-
-impl<'gc> SLVal<'gc> {
-  /// Produce a `Gc<SLVal>` for this value. Used when deref-ing a cell: the
-  /// contents come out as a borrowed `SLVal`, and we re-box it onto the GC
-  /// heap so it can go back on the stack.
-  fn clone_value(&self, mc: &Mutation<'gc>) -> Gc<'gc, SLVal<'gc>> {
-    Gc::new(mc, self.clone())
-  }
-}
-
-fn partial_apply<'gc>(
-  mc: &Mutation<'gc>,
-  root: &mut ExecRoot<'gc>,
-  num_args: u16,
-) -> Result<(), String> {
-  let func = pop(root)?;
-  let mut args = vec![];
-  for _ in 0..num_args {
-    args.push(pop(root)?);
-  }
-  args.reverse();
-  let closure = match &*func {
-    SLVal::FunctionRef(mod_index, func_index) => Gc::new(
-      mc,
-      SLVal::Partial(Partial {
-        function: (*mod_index, *func_index),
-        args,
-      }),
-    ),
-    _ => return Err("make_closure needs a function at TOS".to_string()),
-  };
-  root.stack.push(closure);
-  Ok(())
-}
-
-/// Either pushes a frame for the function if it's defined in SafeLisp, or
-/// just call it immediately if it's a builtin.
-fn call_fixed_inner<'gc>(
-  mc: &'gc Mutation<'gc>,
-  root: &mut ExecRoot<'gc>,
-  package: &Package,
-  builtins: &impl Builtins,
-  mod_index: u32,
-  func_index: u32,
-) -> Result<(), String> {
-  let (module_name, functions) = package
-    .get_module(mod_index)
-    .ok_or_else(|| format!("Module not found: {}", mod_index))?;
-  let (func_name, callable) = functions
-    .get(func_index as usize)
-    .ok_or_else(|| format!("Function not found: {}/{}", mod_index, func_index))?;
-  match callable {
-    Callable::Function(func) => {
-      enter_function_inner(mc, root, func.clone(), vec![])?;
+  fn partial_apply(&mut self, mc: &'gc Mutation<'gc>, num_args: u16) -> Result<(), String> {
+    let func = self.pop()?;
+    let mut args = vec![];
+    for _ in 0..num_args {
+      args.push(self.pop()?);
     }
-    Callable::Builtin => {
-      let mut stack = Stack {
+    args.reverse();
+    let closure = match &*func {
+      SLVal::FunctionRef(mod_index, func_index) => Gc::new(
         mc,
-        items: &mut root.stack,
-      };
-      builtins
-        .call(module_name, func_name, &mut stack)
-        .ok_or_else(|| format!("No function named {}", func_name))??;
-    }
+        SLVal::Partial(Partial {
+          function: (*mod_index, *func_index),
+          args,
+        }),
+      ),
+      _ => return Err("make_closure needs a function at TOS".to_string()),
+    };
+    self.stack.push(closure);
+    Ok(())
   }
-  Ok(())
-}
 
-/// Prepare the callable that's on the top of stack to be called. This pushes
-/// a new frame for function callables.
-fn call_dynamic_inner<'gc>(
-  mc: &'gc Mutation<'gc>,
-  root: &mut ExecRoot<'gc>,
-  package: &Package,
-  builtins: &impl Builtins,
-) -> Result<(), String> {
-  let callable = pop(root)?;
-  match &*callable {
-    SLVal::FunctionRef(mod_index, func_index) => {
-      call_fixed_inner(mc, root, package, builtins, *mod_index, *func_index)
-    }
-    SLVal::Partial(Partial {
-      function: (mod_index, func_index),
-      args,
-    }) => {
-      let (_, functions) = package
-        .get_module(*mod_index)
-        .ok_or_else(|| format!("Module not found: {}", mod_index))?;
-      let (_, callable) = functions
-        .get(*func_index as usize)
-        .ok_or_else(|| format!("Function not found: {}/{}", mod_index, func_index))?;
-      match callable {
-        Callable::Function(func) => enter_function_inner(mc, root, func.clone(), args.clone()),
-        Callable::Builtin => Err("Can't invoke a builtin as a closure".to_string()),
+  /// Either pushes a frame for the function if it's defined in SafeLisp, or
+  /// just call it immediately if it's a builtin.
+  fn call_fixed(
+    &mut self,
+    mc: &'gc Mutation<'gc>,
+    package: &Package,
+    builtins: &impl Builtins,
+    mod_index: u32,
+    func_index: u32,
+  ) -> Result<(), String> {
+    let (module_name, functions) = package
+      .get_module(mod_index)
+      .ok_or_else(|| format!("Module not found: {}", mod_index))?;
+    let (func_name, callable) = functions
+      .get(func_index as usize)
+      .ok_or_else(|| format!("Function not found: {}/{}", mod_index, func_index))?;
+    match callable {
+      Callable::Function(func) => {
+        self.enter_function(mc, func.clone(), vec![])?;
+      }
+      Callable::Builtin => {
+        let mut stack = Stack {
+          mc,
+          items: &mut self.stack,
+        };
+        builtins
+          .call(module_name, func_name, &mut stack)
+          .ok_or_else(|| format!("No function named {}", func_name))??;
       }
     }
-    x => Err(format!("Can't call a non-callable! {:?}", x)),
+    Ok(())
   }
-}
 
-/// Push a new frame for a function, with optional pre-bound values. The
-/// remaining params (after the pre-bound ones) are popped from the stack.
-fn enter_function_inner<'gc>(
-  mc: &Mutation<'gc>,
-  root: &mut ExecRoot<'gc>,
-  function: Function,
-  pre_bound: Vec<Gc<'gc, SLVal<'gc>>>,
-) -> Result<(), String> {
-  let start = pre_bound.len();
-  let mut locals = pre_bound;
-  // Initialize all remaining local slots to `Void`. `SLVal::Void` holds no
-  // `Gc` pointers, so allocating it on the GC heap is cheap and safe.
-  let void = Gc::new(mc, SLVal::Void);
-  for _ in locals.len()..usize::from(function.num_locals) {
-    locals.push(void);
+  /// Prepare the callable that's on the top of stack to be called. This pushes
+  /// a new frame for function callables. This is both the implementation of the
+  /// `CallDynamic` instruction and the entry point used by
+  /// `Interpreter::call_slval`.
+  fn call_dynamic(
+    &mut self,
+    mc: &'gc Mutation<'gc>,
+    package: &Package,
+    builtins: &impl Builtins,
+  ) -> Result<(), String> {
+    let callable = self.pop()?;
+    match &*callable {
+      SLVal::FunctionRef(mod_index, func_index) => {
+        self.call_fixed(mc, package, builtins, *mod_index, *func_index)
+      }
+      SLVal::Partial(Partial {
+        function: (mod_index, func_index),
+        args,
+      }) => {
+        let (_, functions) = package
+          .get_module(*mod_index)
+          .ok_or_else(|| format!("Module not found: {}", mod_index))?;
+        let (_, callable) = functions
+          .get(*func_index as usize)
+          .ok_or_else(|| format!("Function not found: {}/{}", mod_index, func_index))?;
+        match callable {
+          Callable::Function(func) => self.enter_function(mc, func.clone(), args.clone()),
+          Callable::Builtin => Err("Can't invoke a builtin as a closure".to_string()),
+        }
+      }
+      x => Err(format!("Can't call a non-callable! {:?}", x)),
+    }
   }
-  // The parameters are "in order" on the stack, so popping will give them to
-  // us in reverse order.
-  for param_idx in (start..usize::from(function.num_params)).rev() {
-    locals[param_idx] = pop(root)?;
+
+  /// Push a new frame for a function, with optional pre-bound values. The
+  /// remaining params (after the pre-bound ones) are popped from the stack.
+  fn enter_function(
+    &mut self,
+    mc: &Mutation<'gc>,
+    function: Function,
+    pre_bound: Vec<Gc<'gc, SLVal<'gc>>>,
+  ) -> Result<(), String> {
+    let start = pre_bound.len();
+    let mut locals = pre_bound;
+    // Initialize all remaining local slots to `Void`. `SLVal::Void` holds no
+    // `Gc` pointers, so allocating it on the GC heap is cheap and safe.
+    let void = Gc::new(mc, SLVal::Void);
+    for _ in locals.len()..usize::from(function.num_locals) {
+      locals.push(void);
+    }
+    // The parameters are "in order" on the stack, so popping will give them to
+    // us in reverse order.
+    for param_idx in (start..usize::from(function.num_params)).rev() {
+      locals[param_idx] = self.pop()?;
+    }
+    self.frames.push(Frame {
+      function,
+      locals,
+      ip: 0,
+    });
+    Ok(())
   }
-  root.frames.push(Frame {
-    function,
-    locals,
-    ip: 0,
-  });
-  Ok(())
 }
 
 #[cfg(test)]
@@ -1285,7 +1286,9 @@ mod test {
     let pkg = compile_executable_from_source(&source.to_string(), ("main", "main")).unwrap();
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
-    let status = exec.run_for_duration(Duration::from_millis(50)).unwrap();
+    let status = exec
+      .run_for_duration(Duration::from_millis(50))
+      .unwrap();
     assert_eq!(status, Status::Paused);
     assert!(!exec.is_done());
     // It should have made progress.
