@@ -5,6 +5,7 @@ extern crate serde_yaml;
 
 use std::fs::File;
 use std::io::prelude::*;
+use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use clap::Parser;
@@ -23,6 +24,12 @@ struct Args {
     help = "maximum number of bytecodes to execute (default: unlimited)"
   )]
   instruction_limit: Option<u64>,
+
+  #[clap(
+    long,
+    help = "maximum number of milliseconds to execute (default: unlimited)"
+  )]
+  time_limit_ms: Option<u64>,
 
   #[clap(help = "A .slc file to interpret")]
   input_file: String,
@@ -54,12 +61,12 @@ fn main() -> Result<()> {
 
   let interpreter = Interpreter::new(package);
   let mut exec = interpreter.call_main().expect("Error setting up main");
-  match args.instruction_limit {
-    None => {
+  match (args.instruction_limit, args.time_limit_ms) {
+    (None, None) => {
       let result = exec.run_until_done().map_err(|e| anyhow!("{}", e))?;
       println!("Result: {:?}", result);
     }
-    Some(limit) => {
+    (Some(limit), None) => {
       let status = exec.run(limit).map_err(|e| anyhow!("{}", e))?;
       match status {
         Status::Done(v) => println!("Result: {:?}", v),
@@ -71,6 +78,26 @@ fn main() -> Result<()> {
           std::process::exit(1);
         }
       }
+    }
+    (None, Some(ms)) => {
+      let status = exec
+        .run_for_duration(Duration::from_millis(ms))
+        .map_err(|e| anyhow!("{}", e))?;
+      match status {
+        Status::Done(v) => println!("Result: {:?}", v),
+        Status::Paused => {
+          eprintln!(
+            "time limit exceeded: {} instructions executed (limit {}ms)",
+            exec.executed, ms
+          );
+          std::process::exit(1);
+        }
+      }
+    }
+    (Some(_), Some(_)) => {
+      return Err(anyhow!(
+        "--instruction-limit and --time-limit-ms are mutually exclusive"
+      ));
     }
   }
   Ok(())

@@ -1,5 +1,6 @@
 use std::default::Default;
 use std::rc::Rc; // TODO: use Manishearth/rust-gc
+use std::time::{Duration, Instant};
 
 use crate::builtins::DefaultBuiltins;
 use crate::compiler::{Callable, Instruction, LinkedFunction as Function, Package};
@@ -179,6 +180,23 @@ where
       self.step()?;
     }
     self.stack.pop()
+  }
+
+  /// Run for up to `duration`, stepping until the deadline is reached or
+  /// execution completes. Returns `Paused` if the deadline expired before
+  /// completion, or `Done(v)` if the program completed. Errors propagate via
+  /// `Err`. The cumulative count of executed bytecodes is available on
+  /// `Execution::executed` after the call returns.
+  pub fn run_for_duration(&mut self, duration: Duration) -> Result<Status, String> {
+    let deadline = Instant::now() + duration;
+    while !self.is_done() && Instant::now() < deadline {
+      self.step()?;
+    }
+    if self.is_done() {
+      Ok(Status::Done(self.stack.pop()?))
+    } else {
+      Ok(Status::Paused)
+    }
   }
 
   /// Execute one bytecode instruction from the current top frame.
@@ -970,5 +988,34 @@ mod test {
     assert_eq!(exec_b.run(1_000).unwrap(), Status::Done(Rc::new(SLVal::Int(3))));
     assert!(exec_a.is_done());
     assert!(exec_b.is_done());
+  }
+
+  #[test]
+  fn run_for_duration_completes() {
+    // A trivial program completes well within a generous duration.
+    let source = "(fn main () 5)";
+    let pkg = compile_executable_from_source(&source.to_string(), ("main", "main")).unwrap();
+    let interp = Interpreter::new(pkg);
+    let mut exec = interp.call_main().unwrap();
+    let status = exec
+      .run_for_duration(Duration::from_secs(1))
+      .unwrap();
+    assert_eq!(status, Status::Done(Rc::new(SLVal::Int(5))));
+  }
+
+  #[test]
+  fn run_for_duration_pauses_on_infinite_recursion() {
+    // A non-terminating program is bounded by the time budget and pauses.
+    let source = "(fn loop (n) (loop n)) (fn main () (loop 1))";
+    let pkg = compile_executable_from_source(&source.to_string(), ("main", "main")).unwrap();
+    let interp = Interpreter::new(pkg);
+    let mut exec = interp.call_main().unwrap();
+    let status = exec
+      .run_for_duration(Duration::from_millis(50))
+      .unwrap();
+    assert_eq!(status, Status::Paused);
+    assert!(!exec.is_done());
+    // It should have made progress.
+    assert!(exec.executed > 0);
   }
 }
