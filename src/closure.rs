@@ -257,11 +257,18 @@ fn transform_ast(
       }
       Ok(AST::PartialApply(Box::new(callable), new_args))
     }
+    AST::If(cond, then, els) => {
+      let cond = transform_ast(module_name, cond, environment, locals, captures, cell_vars, lifted)?;
+      let then = transform_ast(module_name, then, environment, locals, captures, cell_vars, lifted)?;
+      let els = transform_ast(module_name, els, environment, locals, captures, cell_vars, lifted)?;
+      Ok(AST::If(Box::new(cond), Box::new(then), Box::new(els)))
+    }
     AST::Import(_)
     | AST::DeclareFn(_)
     | AST::Int(_)
     | AST::Float(_)
     | AST::String(_)
+    | AST::Bool(_)
     | AST::FunctionRef(_, _) => Ok(ast.clone()),
   }
 }
@@ -330,12 +337,18 @@ fn patch_cell_access(
       let callable = patch_cell_access(callable, captures, cell_vars, locals)?;
       Ok(AST::PartialApply(Box::new(callable), args.clone()))
     }
+    AST::If(cond, then, els) => Ok(AST::If(
+      Box::new(patch_cell_access(cond, captures, cell_vars, locals)?),
+      Box::new(patch_cell_access(then, captures, cell_vars, locals)?),
+      Box::new(patch_cell_access(els, captures, cell_vars, locals)?),
+    )),
     AST::DefineFn(_)
     | AST::Import(_)
     | AST::DeclareFn(_)
     | AST::Int(_)
     | AST::Float(_)
     | AST::String(_)
+    | AST::Bool(_)
     | AST::FunctionRef(_, _) => Ok(ast.clone()),
   }
 }

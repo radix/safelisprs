@@ -14,6 +14,7 @@ pub enum AST {
   Int(i64),
   Float(f64),
   String(String),
+  Bool(bool),
 
   // The following variants aren't represented in the syntax, but are produced
   // by transformations on the previous variants.
@@ -26,6 +27,8 @@ pub enum AST {
   PartialApply(Box<AST>, Vec<AST>),
   /// Get a reference to a function.
   FunctionRef(String, String),
+  /// Conditional: evaluate `cond`; if truthy, evaluate `then`, else evaluate `els`.
+  If(Box<AST>, Box<AST>, Box<AST>),
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -73,7 +76,11 @@ impl AST {
       AValue::Str(s) => Ok(AST::String(s.clone())),
       AValue::Int(i) => Ok(AST::Int(*i)),
       AValue::Float(f) => Ok(AST::Float(*f)),
-      AValue::Symbol(s) => Ok(AST::Variable(s.clone())),
+      AValue::Symbol(s) => match s.as_ref() {
+        "true" => Ok(AST::Bool(true)),
+        "false" => Ok(AST::Bool(false)),
+        _ => Ok(AST::Variable(s.clone())),
+      },
       AValue::Cons(left, right) => {
         if let AValue::Symbol(ref s) = **left {
           match s.as_ref() {
@@ -81,6 +88,7 @@ impl AST {
             "fn" => return parse_fn(right),
             "decl" => return parse_decl(right),
             "use" => return parse_import(right),
+            "if" => return parse_if(right),
             _ => {}
           }
         }
@@ -103,6 +111,18 @@ fn parse_import(form: &Expr) -> Result<AST, String> {
       "`import` must have a single string as its argument. Got: {x:?}"
     )),
   }
+}
+
+fn parse_if(right: &Expr) -> Result<AST, String> {
+  let forms = flatten_list(right)?;
+  if forms.len() != 3 {
+    return Err("`if` must have exactly three arguments: cond, then, else".to_string());
+  }
+  Ok(AST::If(
+    Box::new(AST::from_atoms(&forms[0])?),
+    Box::new(AST::from_atoms(&forms[1])?),
+    Box::new(AST::from_atoms(&forms[2])?),
+  ))
 }
 
 fn parse_call(form: &Expr) -> Result<AST, String> {

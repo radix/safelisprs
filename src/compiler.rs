@@ -49,6 +49,7 @@ pub enum Instruction<CallType> {
   PushInt(i64),
   PushFloat(f64),
   PushString(String),
+  PushBool(bool),
   /// discards topmost stack item
   Pop,
   Call(CallType),
@@ -66,6 +67,10 @@ pub enum Instruction<CallType> {
   /// argument: how many arguments to pop from the stack and bind to the function.
   /// TOS: a function reference
   PartialApply(u16),
+  /// Unconditionally jump to the instruction at the given index.
+  Jump(u32),
+  /// Pop the TOS; if it is falsy, jump to the given instruction index.
+  JumpIfFalse(u32),
 }
 
 pub type LinkedFunction = Function<(u32, u32)>;
@@ -209,11 +214,14 @@ fn link_instruction(
     Instruction::PushInt(num) => Instruction::PushInt(num),
     Instruction::PushFloat(f) => Instruction::PushFloat(f),
     Instruction::PushString(string) => Instruction::PushString(string),
+    Instruction::PushBool(b) => Instruction::PushBool(b),
     Instruction::Pop => Instruction::Pop,
     Instruction::Return => Instruction::Return,
     Instruction::MakeCell => Instruction::MakeCell,
     Instruction::DerefCell => Instruction::DerefCell,
     Instruction::PartialApply(size) => Instruction::PartialApply(size),
+    Instruction::Jump(target) => Instruction::Jump(target),
+    Instruction::JumpIfFalse(target) => Instruction::JumpIfFalse(target),
   })
 }
 
@@ -349,6 +357,30 @@ fn compile_expr(
       instructions.extend(compile_expr(module_name, expr, locals)?);
       instructions.push(Instruction::PartialApply(args.len() as u16));
     }
+    AST::If(cond, then, els) => {
+      // <cond>; JumpIfFalse(L_else); <then>; Jump(L_end); L_else: <else>; L_end:
+
+      // Generating the jump targets is a bit weird, since we don't have any
+      // sort of abstraction for "labels" in this compiler (that would be handy!
+      // is there prior art for that?). First, we just generate the sequence of
+      // code but with Jumps pointing to 0. As we do that we remember the
+      // targets by fetching instructions.len(). Then we go back and replace the
+      // jumps to populate the real targets.
+      instructions.extend(compile_expr(module_name, cond, locals)?);
+      let jmp_else = instructions.len();
+      instructions.push(Instruction::JumpIfFalse(0));
+      instructions.extend(compile_expr(module_name, then, locals)?);
+      let jmp_end = instructions.len();
+      instructions.push(Instruction::Jump(0));
+      // L_else:
+      let else_target = instructions.len() as u32;
+      instructions.extend(compile_expr(module_name, els, locals)?);
+      // L_end:
+      let end_target = instructions.len() as u32;
+      // Patch the jumps to actually point at the right positions.
+      instructions[jmp_else] = Instruction::JumpIfFalse(else_target);
+      instructions[jmp_end] = Instruction::Jump(end_target);
+    }
     AST::Variable(name) => {
       if !locals.contains_key(name) {
         return Err(format!("Function accesses unbound variable {}", name));
@@ -359,6 +391,7 @@ fn compile_expr(
     AST::Int(i) => instructions.push(Instruction::PushInt(*i)),
     AST::Float(f) => instructions.push(Instruction::PushFloat(*f)),
     AST::String(s) => instructions.push(Instruction::PushString(s.clone())),
+    AST::Bool(b) => instructions.push(Instruction::PushBool(*b)),
     x => return Err(format!("Unexpected form at top-level: {:?}", x)),
   }
   Ok(instructions)
