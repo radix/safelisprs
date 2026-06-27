@@ -1,7 +1,7 @@
 use std::default::Default;
 use std::rc::Rc; // TODO: use Manishearth/rust-gc
 
-use crate::builtins::builtin_builtins;
+use crate::builtins::DefaultBuiltins;
 use crate::compiler::{Callable, Instruction, LinkedFunction as Function, Package};
 
 #[derive(Debug, Default)]
@@ -27,6 +27,10 @@ pub struct Partial {
 }
 
 pub type BuiltinResult = Option<Result<(), String>>;
+
+pub trait Builtins {
+  fn call(&mut self, mod_name: &str, func_name: &str, stack: &mut Stack) -> BuiltinResult;
+}
 
 impl Stack {
   pub fn new() -> Self {
@@ -61,18 +65,18 @@ impl<B> Interpreter<B> {
   }
 }
 
-impl Interpreter<fn(&str, &str, &mut Stack) -> BuiltinResult> {
+impl Interpreter<DefaultBuiltins> {
   pub fn new(package: Package) -> Self {
     Interpreter {
       package,
-      builtins: builtin_builtins,
+      builtins: DefaultBuiltins,
     }
   }
 }
 
 impl<B> Interpreter<B>
 where
-  B: for<'r, 's> FnMut(&'r str, &'r str, &'s mut Stack) -> BuiltinResult,
+  B: Builtins,
 {
   pub fn call_main(&mut self) -> Result<Rc<SLVal>, String> {
     if let Some((module, function)) = self.package.main {
@@ -118,7 +122,7 @@ fn eval_code<B>(
   builtins: &mut B,
 ) -> Result<Rc<SLVal>, String>
 where
-  B: for<'r, 's> FnMut(&'r str, &'r str, &'s mut Stack) -> BuiltinResult,
+  B: Builtins,
 {
   let mut stack: Stack = Stack::new();
   for inst in &code.instructions {
@@ -178,7 +182,7 @@ fn partial_apply(stack: &mut Stack, num_args: u16) -> Result<(), String> {
 
 fn call_dynamic<B>(package: &Package, stack: &mut Stack, builtins: &mut B) -> Result<(), String>
 where
-  B: for<'r, 's> FnMut(&'r str, &'r str, &'s mut Stack) -> BuiltinResult,
+  B: Builtins,
 {
   //! Call the function that's on the top of stack.
   let callable = stack.pop()?;
@@ -219,7 +223,7 @@ fn call_fixed<B>(
   builtins: &mut B,
 ) -> Result<(), String>
 where
-  B: for<'r, 's> FnMut(&'r str, &'r str, &'s mut Stack) -> BuiltinResult,
+  B: Builtins,
 {
   let (module_name, functions) = package
     .get_module(mod_index)
@@ -234,7 +238,8 @@ where
       stack.push(eval_code(package, func, locals, builtins)?);
     }
     Callable::Builtin => {
-      (builtins)(module_name, func_name, stack)
+      builtins
+        .call(module_name, func_name, stack)
         .ok_or_else(|| format!("No function named {}", func_name))??;
     }
   }
@@ -258,6 +263,7 @@ fn place_locals(
 #[cfg(test)]
 mod test {
   use super::*;
+  use crate::builtins::DefaultBuiltins;
   use crate::compiler::{self, *};
 
   fn eval_main(source: &str) -> Rc<SLVal> {
@@ -278,23 +284,26 @@ mod test {
       instructions: vec![Instruction::LoadLocal(0), Instruction::Return],
     };
     let locals = vec![Rc::new(SLVal::Int(42))];
-    let result = eval_code(&empty_mod, &code, locals, &mut builtin_builtins).unwrap();
+    let result = eval_code(&empty_mod, &code, locals, &mut DefaultBuiltins).unwrap();
     assert_eq!(result, Rc::new(SLVal::Int(42)));
   }
 
   #[test]
   fn extending_builtins() {
-    fn mybuiltins(mod_name: &str, name: &str, stack: &mut Stack) -> BuiltinResult {
-      match (mod_name, name) {
-        ("main", "add2") => {
-          if let Ok(SLVal::Int(n)) = stack.pop().map(|x| (&*x).clone()) {
-            stack.push(Rc::new(SLVal::Int(n + 2)));
-            Some(Ok(()))
-          } else {
-            Some(Err("nope".to_string()))
+    struct MyBuiltins;
+    impl Builtins for MyBuiltins {
+      fn call(&mut self, mod_name: &str, name: &str, stack: &mut Stack) -> BuiltinResult {
+        match (mod_name, name) {
+          ("main", "add2") => {
+            if let Ok(SLVal::Int(n)) = stack.pop().map(|x| (&*x).clone()) {
+              stack.push(Rc::new(SLVal::Int(n + 2)));
+              Some(Ok(()))
+            } else {
+              Some(Err("nope".to_string()))
+            }
           }
+          _ => None,
         }
-        _ => None,
       }
     }
 
@@ -305,7 +314,7 @@ mod test {
     .to_string();
     let package = compile_executable_from_source(&source, ("main", "main")).unwrap();
 
-    let mut interpreter = Interpreter::with_builtins(package, mybuiltins);
+    let mut interpreter = Interpreter::with_builtins(package, MyBuiltins);
     assert_eq!(interpreter.call_main().unwrap(), Rc::new(SLVal::Int(5)));
   }
 
