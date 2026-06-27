@@ -5,7 +5,7 @@ use crate::interpreter::{Builtins, BuiltinResult, SLVal, Stack};
 pub struct DefaultBuiltins;
 
 impl Builtins for DefaultBuiltins {
-  fn call(&mut self, mod_name: &str, name: &str, stack: &mut Stack) -> BuiltinResult {
+  fn call(&self, mod_name: &str, name: &str, stack: &mut Stack) -> BuiltinResult {
     // This must be kept up-to-date with std.sl
     match (mod_name, name) {
       ("std", "+") => Some(builtin_add(stack)),

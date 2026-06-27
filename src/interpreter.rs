@@ -29,7 +29,7 @@ pub struct Partial {
 pub type BuiltinResult = Option<Result<(), String>>;
 
 pub trait Builtins {
-  fn call(&mut self, mod_name: &str, func_name: &str, stack: &mut Stack) -> BuiltinResult;
+  fn call(&self, mod_name: &str, func_name: &str, stack: &mut Stack) -> BuiltinResult;
 }
 
 impl Stack {
@@ -85,12 +85,8 @@ where
         .get_function(module, function)
         .ok_or_else(|| format!("Couldn't find module {} function {}", module, function))?;
       if let Callable::Function(function) = callable {
-        eval_code(
-          &self.package,
-          function,
-          alloc_locals(function),
-          &mut self.builtins,
-        )
+        let mut exec = Execution::new(&self.package, &self.builtins);
+        exec.eval_code(function, alloc_locals(function))
       } else {
         Err(format!(
           "{}.{} is a builtin. We can only call regular functions.",
@@ -104,160 +100,166 @@ where
 
   pub fn call_slval(&mut self, slval: Rc<SLVal>) -> Result<Rc<SLVal>, String> {
     //! Call a FunctionRef or a Partial in an SLVal, returning the result.
-    let mut stack: Stack = Default::default();
-    stack.push(slval);
-    call_dynamic(&self.package, &mut stack, &mut self.builtins)?;
-    stack.pop()
+    let mut exec = Execution::new(&self.package, &self.builtins);
+    exec.stack.push(slval);
+    exec.call_dynamic()?;
+    exec.stack.pop()
+  }
+}
+
+pub struct Execution<'p, 'b, B: Builtins + ?Sized> {
+  pub package: &'p Package,
+  pub builtins: &'b B,
+  pub stack: Stack,
+}
+
+impl<'p, 'b, B: Builtins + ?Sized> Execution<'p, 'b, B> {
+  pub fn new(package: &'p Package, builtins: &'b B) -> Self {
+    Execution {
+      package,
+      builtins,
+      stack: Stack::new(),
+    }
+  }
+}
+
+impl<'p, 'b, B> Execution<'p, 'b, B>
+where
+  B: Builtins + ?Sized,
+{
+  pub fn eval_code(
+    &mut self,
+    code: &Function,
+    mut locals: Vec<Rc<SLVal>>,
+  ) -> Result<Rc<SLVal>, String> {
+    for inst in &code.instructions {
+      match inst {
+        Instruction::PushInt(i) => self.stack.push(Rc::new(SLVal::Int(*i))),
+        Instruction::PushFloat(f) => self.stack.push(Rc::new(SLVal::Float(*f))),
+        Instruction::PushString(s) => self.stack.push(Rc::new(SLVal::String(s.clone()))),
+        Instruction::Pop => {
+          self.stack.pop()?;
+        }
+        Instruction::Return => return self.stack.pop(),
+        Instruction::SetLocal(i) => locals[usize::from(*i)] = self.stack.pop()?,
+        Instruction::LoadLocal(i) => self.stack.push(locals[usize::from(*i)].clone()),
+        Instruction::Call((mod_index, func_index)) => self.call_fixed(*mod_index, *func_index)?,
+        Instruction::CallDynamic => self.call_dynamic()?,
+        Instruction::MakeFunctionRef((mod_index, func_index)) => self
+          .stack
+          .push(Rc::new(SLVal::FunctionRef(*mod_index, *func_index))),
+        Instruction::MakeCell => {
+          let val = self.stack.pop()?;
+          self.stack.push(Rc::new(SLVal::Cell(val)));
+        }
+        Instruction::DerefCell => {
+          let val = self.stack.pop()?;
+          match &*val {
+            SLVal::Cell(r) => self.stack.push(r.clone()),
+            other => return Err(format!("Not a cell: {:?}", other)),
+          }
+        }
+        Instruction::PartialApply(num_args) => {
+          self.partial_apply(*num_args)?;
+        }
+      }
+    }
+    Ok(Rc::new(SLVal::Void))
+  }
+
+  pub fn partial_apply(&mut self, num_args: u16) -> Result<(), String> {
+    let func = self.stack.pop()?;
+    let mut args = vec![];
+    for _ in 0..num_args {
+      args.push(self.stack.pop()?)
+    }
+    args.reverse();
+    let closure = match &*func {
+      SLVal::FunctionRef(mod_index, func_index) => Ok(Rc::new(SLVal::Partial(Partial {
+        function: (*mod_index, *func_index),
+        args,
+      }))),
+      _ => Err("make_closure needs a function at TOS".to_string()),
+    }?;
+    self.stack.push(closure);
+    Ok(())
+  }
+
+  pub fn call_dynamic(&mut self) -> Result<(), String> {
+    //! Call the function that's on the top of stack.
+    let callable = self.stack.pop()?;
+    match &*callable {
+      SLVal::FunctionRef(mod_index, func_index) => self.call_fixed(*mod_index, *func_index),
+      SLVal::Partial(Partial {
+        function: (mod_index, func_index),
+        args,
+      }) => {
+        let args_len = args.len();
+        let (_, functions) = self
+          .package
+          .get_module(*mod_index)
+          .ok_or_else(|| format!("Module not found: {}", mod_index))?;
+        let (_, callable) = functions
+          .get(*func_index as usize)
+          .ok_or_else(|| format!("Function not found: {}/{}", mod_index, func_index))?;
+        match callable {
+          Callable::Function(func) => {
+            let mut locals = args.clone();
+            locals.extend(alloc_locals(func));
+            self.place_locals(&mut locals, args_len, func)?;
+            let result = self.eval_code(func, locals)?;
+            self.stack.push(result);
+            Ok(())
+          }
+          Callable::Builtin => Err("Can't invoke a builtin as a closure".to_string()),
+        }
+      }
+      x => Err(format!("Can't call a non-callable! {:?}", x)),
+    }
+  }
+
+  pub fn call_fixed(&mut self, mod_index: u32, func_index: u32) -> Result<(), String> {
+    let (module_name, functions) = self
+      .package
+      .get_module(mod_index)
+      .ok_or_else(|| format!("Module not found: {}", mod_index))?;
+    let (func_name, callable) = functions
+      .get(func_index as usize)
+      .ok_or_else(|| format!("Function not found: {}/{}", mod_index, func_index))?;
+    match callable {
+      Callable::Function(func) => {
+        let mut locals = alloc_locals(func);
+        self.place_locals(&mut locals, 0, func)?;
+        let result = self.eval_code(func, locals)?;
+        self.stack.push(result);
+      }
+      Callable::Builtin => {
+        self
+          .builtins
+          .call(module_name, func_name, &mut self.stack)
+          .ok_or_else(|| format!("No function named {}", func_name))??;
+      }
+    }
+    Ok(())
+  }
+
+  pub fn place_locals(
+    &mut self,
+    locals: &mut [Rc<SLVal>],
+    start: usize,
+    func: &Function,
+  ) -> Result<(), String> {
+    // The parameters are "in order" on the stack, so popping will give them to us
+    // in reverse order.
+    for param_idx in (start..usize::from(func.num_params)).rev() {
+      locals[param_idx] = self.stack.pop()?;
+    }
+    Ok(())
   }
 }
 
 fn alloc_locals(code: &Function) -> Vec<Rc<SLVal>> {
   vec![Rc::new(SLVal::Void); usize::from(code.num_locals)]
-}
-
-fn eval_code<B>(
-  package: &Package,
-  code: &Function,
-  mut locals: Vec<Rc<SLVal>>,
-  builtins: &mut B,
-) -> Result<Rc<SLVal>, String>
-where
-  B: Builtins,
-{
-  let mut stack: Stack = Stack::new();
-  for inst in &code.instructions {
-    match inst {
-      Instruction::PushInt(i) => stack.push(Rc::new(SLVal::Int(*i))),
-      Instruction::PushFloat(f) => stack.push(Rc::new(SLVal::Float(*f))),
-      Instruction::PushString(s) => stack.push(Rc::new(SLVal::String(s.clone()))),
-      Instruction::Pop => {
-        stack.pop()?;
-      }
-      Instruction::Return => return stack.pop(),
-      Instruction::SetLocal(i) => locals[usize::from(*i)] = stack.pop()?,
-      Instruction::LoadLocal(i) => stack.push(locals[usize::from(*i)].clone()),
-      Instruction::Call((mod_index, func_index)) => {
-        call_fixed(package, &mut stack, *mod_index, *func_index, builtins)?
-      }
-      Instruction::CallDynamic => call_dynamic(package, &mut stack, builtins)?,
-      Instruction::MakeFunctionRef((mod_index, func_index)) => {
-        stack.push(Rc::new(SLVal::FunctionRef(*mod_index, *func_index)))
-      }
-      Instruction::MakeCell => {
-        let val = stack.pop()?;
-        stack.push(Rc::new(SLVal::Cell(val)));
-      }
-      Instruction::DerefCell => {
-        let val = stack.pop()?;
-        match &*val {
-          SLVal::Cell(r) => stack.push(r.clone()),
-          other => return Err(format!("Not a cell: {:?}", other)),
-        }
-      }
-      Instruction::PartialApply(num_args) => {
-        partial_apply(&mut stack, *num_args)?;
-      }
-    }
-  }
-  Ok(Rc::new(SLVal::Void))
-}
-
-fn partial_apply(stack: &mut Stack, num_args: u16) -> Result<(), String> {
-  let func = stack.pop()?;
-  let mut args = vec![];
-  for _ in 0..num_args {
-    args.push(stack.pop()?)
-  }
-  args.reverse();
-  let closure = match &*func {
-    SLVal::FunctionRef(mod_index, func_index) => Ok(Rc::new(SLVal::Partial(Partial {
-      function: (*mod_index, *func_index),
-      args,
-    }))),
-    _ => Err("make_closure needs a function at TOS".to_string()),
-  }?;
-  stack.push(closure);
-  Ok(())
-}
-
-fn call_dynamic<B>(package: &Package, stack: &mut Stack, builtins: &mut B) -> Result<(), String>
-where
-  B: Builtins,
-{
-  //! Call the function that's on the top of stack.
-  let callable = stack.pop()?;
-  match &*callable {
-    SLVal::FunctionRef(mod_index, func_index) => {
-      call_fixed(package, stack, *mod_index, *func_index, builtins)
-    }
-    SLVal::Partial(Partial {
-      function: (mod_index, func_index),
-      args,
-    }) => {
-      let (_, functions) = package
-        .get_module(*mod_index)
-        .ok_or_else(|| format!("Module not found: {}", mod_index))?;
-      let (_, callable) = functions
-        .get(*func_index as usize)
-        .ok_or_else(|| format!("Function not found: {}/{}", mod_index, func_index))?;
-      match callable {
-        Callable::Function(func) => {
-          let mut locals = args.clone();
-          locals.extend(alloc_locals(func));
-          place_locals(stack, &mut locals, args.len(), func)?;
-          stack.push(eval_code(package, func, locals, builtins)?);
-          Ok(())
-        }
-        Callable::Builtin => Err("Can't invoke a builtin as a closure".to_string()),
-      }
-    }
-    x => Err(format!("Can't call a non-callable! {:?}", x)),
-  }
-}
-
-fn call_fixed<B>(
-  package: &Package,
-  stack: &mut Stack,
-  mod_index: u32,
-  func_index: u32,
-  builtins: &mut B,
-) -> Result<(), String>
-where
-  B: Builtins,
-{
-  let (module_name, functions) = package
-    .get_module(mod_index)
-    .ok_or_else(|| format!("Module not found: {}", mod_index))?;
-  let (func_name, callable) = functions
-    .get(func_index as usize)
-    .ok_or_else(|| format!("Function not found: {}/{}", mod_index, func_index))?;
-  match callable {
-    Callable::Function(func) => {
-      let mut locals = alloc_locals(func);
-      place_locals(stack, &mut locals, 0, func)?;
-      stack.push(eval_code(package, func, locals, builtins)?);
-    }
-    Callable::Builtin => {
-      builtins
-        .call(module_name, func_name, stack)
-        .ok_or_else(|| format!("No function named {}", func_name))??;
-    }
-  }
-  Ok(())
-}
-
-fn place_locals(
-  stack: &mut Stack,
-  locals: &mut [Rc<SLVal>],
-  start: usize,
-  func: &Function,
-) -> Result<(), String> {
-  // The parameters are "in order" on the stack, so popping will give them to us
-  // in reverse order.
-  for param_idx in (start..usize::from(func.num_params)).rev() {
-    locals[param_idx] = stack.pop()?;
-  }
-  Ok(())
 }
 
 #[cfg(test)]
@@ -284,7 +286,8 @@ mod test {
       instructions: vec![Instruction::LoadLocal(0), Instruction::Return],
     };
     let locals = vec![Rc::new(SLVal::Int(42))];
-    let result = eval_code(&empty_mod, &code, locals, &mut DefaultBuiltins).unwrap();
+    let mut exec = Execution::new(&empty_mod, &DefaultBuiltins);
+    let result = exec.eval_code(&code, locals).unwrap();
     assert_eq!(result, Rc::new(SLVal::Int(42)));
   }
 
@@ -292,7 +295,7 @@ mod test {
   fn extending_builtins() {
     struct MyBuiltins;
     impl Builtins for MyBuiltins {
-      fn call(&mut self, mod_name: &str, name: &str, stack: &mut Stack) -> BuiltinResult {
+      fn call(&self, mod_name: &str, name: &str, stack: &mut Stack) -> BuiltinResult {
         match (mod_name, name) {
           ("main", "add2") => {
             if let Ok(SLVal::Int(n)) = stack.pop().map(|x| (&*x).clone()) {
