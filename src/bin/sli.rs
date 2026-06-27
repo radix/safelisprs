@@ -10,13 +10,19 @@ use anyhow::{anyhow, Result};
 use clap::Parser;
 
 use safelisp::compiler::Package;
-use safelisp::interpreter::Interpreter;
+use safelisp::interpreter::{Interpreter, Status};
 
 #[derive(Parser)]
 #[clap(author, version, about, long_about = None)]
 struct Args {
   #[clap(long, default_value = "bincode", help = "either yaml or bincode")]
   format: String,
+
+  #[clap(
+    long,
+    help = "maximum number of bytecodes to execute (default: unlimited)"
+  )]
+  instruction_limit: Option<u64>,
 
   #[clap(help = "A .slc file to interpret")]
   input_file: String,
@@ -46,8 +52,26 @@ fn main() -> Result<()> {
     format => Err(anyhow!("invalid format: {:?}", format)),
   }?;
 
-  let mut interpreter = Interpreter::new(package);
-  let result = interpreter.call_main().expect("Error calling main");
-  println!("Result: {:?}", result);
+  let interpreter = Interpreter::new(package);
+  let mut exec = interpreter.call_main().expect("Error setting up main");
+  match args.instruction_limit {
+    None => {
+      let result = exec.run_until_done().map_err(|e| anyhow!("{}", e))?;
+      println!("Result: {:?}", result);
+    }
+    Some(limit) => {
+      let status = exec.run(limit).map_err(|e| anyhow!("{}", e))?;
+      match status {
+        Status::Done(v) => println!("Result: {:?}", v),
+        Status::Paused => {
+          eprintln!(
+            "instruction limit exceeded: {} instructions executed (limit {})",
+            exec.executed, limit
+          );
+          std::process::exit(1);
+        }
+      }
+    }
+  }
   Ok(())
 }

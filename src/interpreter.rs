@@ -77,18 +77,19 @@ impl Interpreter<DefaultBuiltins> {
 
 impl<B> Interpreter<B>
 where
-  B: Builtins,
+  B: Builtins + Clone,
 {
-  pub fn call_main(&mut self) -> Result<Rc<SLVal>, String> {
+  /// Set up an `Execution` ready to run `main`.
+  pub fn call_main(&self) -> Result<Execution<'_, B>, String> {
     if let Some((module, function)) = self.package.main {
       let callable = self
         .package
         .get_function(module, function)
         .ok_or_else(|| format!("Couldn't find module {} function {}", module, function))?;
       if let Callable::Function(function) = callable {
-        let mut exec = Execution::new(&self.package, &self.builtins);
+        let mut exec = Execution::new(&self.package, self.builtins.clone());
         exec.enter_function(function, vec![])?;
-        exec.run_until_done()
+        Ok(exec)
       } else {
         Err(format!(
           "{}.{} is a builtin. We can only call regular functions.",
@@ -100,13 +101,24 @@ where
     }
   }
 
-  pub fn call_slval(&mut self, slval: Rc<SLVal>) -> Result<Rc<SLVal>, String> {
-    //! Call a FunctionRef or a Partial in an SLVal, returning the result.
-    let mut exec = Execution::new(&self.package, &self.builtins);
+  /// Set up an `Execution` ready to call `slval`.
+  pub fn call_slval(&self, slval: Rc<SLVal>) -> Result<Execution<'_, B>, String> {
+    let mut exec = Execution::new(&self.package, self.builtins.clone());
     exec.stack.push(slval);
     exec.call_dynamic()?;
-    exec.run_until_done()
+    Ok(exec)
   }
+}
+
+#[derive(Debug, PartialEq)]
+pub enum Status {
+  /// Execution paused after exhausting the budget for this `run` call.
+  /// The execution can be resumed by calling `run` again. All state
+  /// (frames, stack, IP, counter) is preserved.
+  Paused,
+  /// Execution completed: the frame stack is empty and the final result
+  /// is carried here. The `Execution` should not be resumed after this.
+  Done(Rc<SLVal>),
 }
 
 struct Frame<'p> {
@@ -115,31 +127,55 @@ struct Frame<'p> {
   ip: usize,
 }
 
-pub struct Execution<'p, 'b, B: Builtins + ?Sized> {
+pub struct Execution<'p, B: Builtins> {
   pub package: &'p Package,
-  pub builtins: &'b B,
+  pub builtins: B,
   pub stack: Stack,
   frames: Vec<Frame<'p>>,
+  pub executed: u64,
 }
 
-impl<'p, 'b, B: Builtins + ?Sized> Execution<'p, 'b, B> {
-  pub fn new(package: &'p Package, builtins: &'b B) -> Self {
+impl<'p, B: Builtins> Execution<'p, B> {
+  pub fn new(package: &'p Package, builtins: B) -> Self {
     Execution {
       package,
       builtins,
       stack: Stack::new(),
       frames: vec![],
+      executed: 0,
     }
+  }
+
+  /// Returns true if the frame stack is empty (execution is complete).
+  pub fn is_done(&self) -> bool {
+    self.frames.is_empty()
   }
 }
 
-impl<'p, 'b, B> Execution<'p, 'b, B>
+impl<'p, B> Execution<'p, B>
 where
-  B: Builtins + ?Sized,
+  B: Builtins,
 {
-  /// Run until the program completes. Returns the final SLVal.
+  /// Run up to `n` bytecodes. Returns `Paused` if the budget exhausted before
+  /// completion, or `Done(v)` if the program completed. Errors propagate via
+  /// `Err`. The cumulative count of executed bytecodes is available on
+  /// `Execution::executed` after the call returns.
+  pub fn run(&mut self, n: u64) -> Result<Status, String> {
+    let start = self.executed;
+    while !self.is_done() && self.executed - start < n {
+      self.step()?;
+    }
+    if self.is_done() {
+      Ok(Status::Done(self.stack.pop()?))
+    } else {
+      Ok(Status::Paused)
+    }
+  }
+
+  /// Convenience: run to completion with no instruction limit. Returns the
+  /// final value, or errors on a runtime error.
   pub fn run_until_done(&mut self) -> Result<Rc<SLVal>, String> {
-    while !self.frames.is_empty() {
+    while !self.is_done() {
       self.step()?;
     }
     self.stack.pop()
@@ -147,6 +183,7 @@ where
 
   /// Execute one bytecode instruction from the current top frame.
   pub fn step(&mut self) -> Result<(), String> {
+    self.executed = self.executed.saturating_add(1);
     let inst = {
       let frame = self
         .frames
@@ -344,8 +381,9 @@ mod test {
 
   fn eval_main(source: &str) -> Rc<SLVal> {
     let pkg = compile_executable_from_source(&source.to_string(), ("main", "main")).unwrap();
-    let mut interp = Interpreter::new(pkg);
-    interp.call_main().unwrap()
+    let interp = Interpreter::new(pkg);
+    let mut exec = interp.call_main().unwrap();
+    exec.run_until_done().unwrap()
   }
 
   /// Test for a simple "identity" function that returns its argument
@@ -376,12 +414,14 @@ mod test {
       )],
       main: Some((0, 1)),
     };
-    let mut interp = Interpreter::new(pkg);
-    assert_eq!(interp.call_main().unwrap(), Rc::new(SLVal::Int(42)));
+    let interp = Interpreter::new(pkg);
+    let mut exec = interp.call_main().unwrap();
+    assert_eq!(exec.run_until_done().unwrap(), Rc::new(SLVal::Int(42)));
   }
 
   #[test]
   fn extending_builtins() {
+    #[derive(Clone)]
     struct MyBuiltins;
     impl Builtins for MyBuiltins {
       fn call(&self, mod_name: &str, name: &str, stack: &mut Stack) -> BuiltinResult {
@@ -406,8 +446,9 @@ mod test {
     .to_string();
     let package = compile_executable_from_source(&source, ("main", "main")).unwrap();
 
-    let mut interpreter = Interpreter::with_builtins(package, MyBuiltins);
-    assert_eq!(interpreter.call_main().unwrap(), Rc::new(SLVal::Int(5)));
+    let interpreter = Interpreter::with_builtins(package, MyBuiltins);
+    let mut exec = interpreter.call_main().unwrap();
+    assert_eq!(exec.run_until_done().unwrap(), Rc::new(SLVal::Int(5)));
   }
 
   #[test]
@@ -445,10 +486,12 @@ mod test {
       main: Some((0, 1)),
     };
 
-    let mut interp = Interpreter::new(pkg);
-    let result = interp.call_main().unwrap();
-    let result = interp.call_slval(result).unwrap();
-    assert_eq!(result, Rc::new(SLVal::Int(42)));
+    let interp = Interpreter::new(pkg);
+    let mut exec = interp.call_main().unwrap();
+    let result = exec.run_until_done().unwrap();
+    let mut exec2 = interp.call_slval(result).unwrap();
+    let result2 = exec2.run_until_done().unwrap();
+    assert_eq!(result2, Rc::new(SLVal::Int(42)));
   }
 
   #[test]
@@ -463,8 +506,9 @@ mod test {
     "
     .to_string();
     let pkg = compile_executable_from_source(&source, ("main", "main")).unwrap();
-    let mut interp = Interpreter::new(pkg);
-    assert_eq!(interp.call_main().unwrap(), Rc::new(SLVal::Int(1)));
+    let interp = Interpreter::new(pkg);
+    let mut exec = interp.call_main().unwrap();
+    assert_eq!(exec.run_until_done().unwrap(), Rc::new(SLVal::Int(1)));
   }
 
   #[test]
@@ -587,7 +631,7 @@ mod test {
       num_params: 0,
       instructions: vec![Instruction::PushInt(7), Instruction::Return],
     };
-    let mut exec = Execution::new(&pkg, &DefaultBuiltins);
+    let mut exec = Execution::new(&pkg, DefaultBuiltins);
     exec.enter_function(&code, vec![]).unwrap();
     // After pushing the initial frame, there's one frame at ip 0.
     assert_eq!(exec.frames.len(), 1);
@@ -611,7 +655,7 @@ mod test {
       num_params: 0,
       instructions: vec![Instruction::PushInt(99), Instruction::Return],
     };
-    let mut exec = Execution::new(&pkg, &DefaultBuiltins);
+    let mut exec = Execution::new(&pkg, DefaultBuiltins);
     exec.enter_function(&code, vec![]).unwrap();
     let result = exec.run_until_done().unwrap();
     assert_eq!(result, Rc::new(SLVal::Int(99)));
@@ -627,7 +671,7 @@ mod test {
       num_params: 0,
       instructions: vec![Instruction::PushInt(1)],
     };
-    let mut exec = Execution::new(&pkg, &DefaultBuiltins);
+    let mut exec = Execution::new(&pkg, DefaultBuiltins);
     exec.enter_function(&code, vec![]).unwrap();
     exec.step().unwrap(); // PushInt
     let err = exec.step().unwrap_err();
@@ -637,7 +681,7 @@ mod test {
   #[test]
   fn step_with_no_frames_errors() {
     let pkg = Package::default();
-    let mut exec = Execution::new(&pkg, &DefaultBuiltins);
+    let mut exec = Execution::new(&pkg, DefaultBuiltins);
     let err = exec.step().unwrap_err();
     assert!(err.contains("no frames"), "unexpected error: {}", err);
   }
@@ -645,7 +689,7 @@ mod test {
   #[test]
   fn call_dynamic_on_non_callable_errors() {
     let pkg = Package::default();
-    let mut exec = Execution::new(&pkg, &DefaultBuiltins);
+    let mut exec = Execution::new(&pkg, DefaultBuiltins);
     exec.stack.push(Rc::new(SLVal::Int(3)));
     let err = exec.call_dynamic().unwrap_err();
     assert!(err.contains("non-callable"), "unexpected error: {}", err);
@@ -659,7 +703,7 @@ mod test {
       num_params: 0,
       instructions: vec![Instruction::PushInt(1), Instruction::DerefCell],
     };
-    let mut exec = Execution::new(&pkg, &DefaultBuiltins);
+    let mut exec = Execution::new(&pkg, DefaultBuiltins);
     exec.enter_function(&code, vec![]).unwrap();
     exec.step().unwrap(); // PushInt
     let err = exec.step().unwrap_err(); // DerefCell
@@ -674,7 +718,7 @@ mod test {
       num_params: 0,
       instructions: vec![Instruction::Call((0, 0))],
     };
-    let mut exec = Execution::new(&pkg, &DefaultBuiltins);
+    let mut exec = Execution::new(&pkg, DefaultBuiltins);
     exec.enter_function(&code, vec![]).unwrap();
     let err = exec.step().unwrap_err();
     assert!(
@@ -714,8 +758,9 @@ mod test {
       )],
       main: Some((0, 1)),
     };
-    let mut interp = Interpreter::new(pkg);
-    assert_eq!(interp.call_main().unwrap(), Rc::new(SLVal::Int(42)));
+    let interp = Interpreter::new(pkg);
+    let mut exec = interp.call_main().unwrap();
+    assert_eq!(exec.run_until_done().unwrap(), Rc::new(SLVal::Int(42)));
   }
 
   #[test]
@@ -752,7 +797,7 @@ mod test {
     let (mod_idx, fn_idx) = pkg.main.unwrap();
     let function = pkg.get_function(mod_idx, fn_idx).unwrap();
     if let Callable::Function(function) = function {
-      let mut exec = Execution::new(&pkg, &DefaultBuiltins);
+      let mut exec = Execution::new(&pkg, DefaultBuiltins);
       exec.enter_function(function, vec![]).unwrap();
       let result = exec.run_until_done().unwrap();
       assert_eq!(result, Rc::new(SLVal::Int(2)));
@@ -818,8 +863,112 @@ mod test {
   fn if_rejects_non_bool_condition() {
     let source = "(fn main () (if 1 42 0))";
     let pkg = compile_executable_from_source(&source.to_string(), ("main", "main")).unwrap();
-    let mut interp = Interpreter::new(pkg);
-    let err = interp.call_main().unwrap_err();
+    let interp = Interpreter::new(pkg);
+    let mut exec = interp.call_main().unwrap();
+    let err = exec.run_until_done().unwrap_err();
     assert_eq!(err, "`if` condition must be a bool, got Int(1)");
+  }
+
+  #[test]
+  fn run_completes_in_one_call() {
+    let source = "(fn main () 5)";
+    let pkg = compile_executable_from_source(&source.to_string(), ("main", "main")).unwrap();
+    let interp = Interpreter::new(pkg);
+    let mut exec = interp.call_main().unwrap();
+    let status = exec.run(1_000).unwrap();
+    assert_eq!(status, Status::Done(Rc::new(SLVal::Int(5))));
+  }
+
+  #[test]
+  fn run_pauses_and_resumes() {
+    let source = "
+      (fn main ()
+        (let a 1) (let b 2) (let c 3) (let d 4) 5)";
+    let pkg = compile_executable_from_source(&source.to_string(), ("main", "main")).unwrap();
+    let interp = Interpreter::new(pkg);
+    let mut exec = interp.call_main().unwrap();
+    let status = exec.run(3).unwrap();
+    assert_eq!(status, Status::Paused);
+    assert_eq!(exec.executed, 3);
+    assert!(!exec.is_done());
+    let status = exec.run(1_000).unwrap();
+    assert_eq!(status, Status::Done(Rc::new(SLVal::Int(5))));
+  }
+
+  #[test]
+  fn run_hits_limit_exactly() {
+    // (std.+ 1 2) is 4 bytecodes: PushInt(1), PushInt(2), Call(std.+), Return.
+    let source = "(use \"src/std\") (fn main () (std.+ 1 2))";
+    let pkg = compile_executable_from_source(&source.to_string(), ("main", "main")).unwrap();
+    let interp = Interpreter::new(pkg);
+    let mut exec = interp.call_main().unwrap();
+    let status = exec.run(4).unwrap();
+    assert_eq!(status, Status::Done(Rc::new(SLVal::Int(3))));
+    assert_eq!(exec.executed, 4);
+  }
+
+  #[test]
+  fn run_limited_mid_program_pauses() {
+    let source = "(use \"src/std\") (fn main () (std.+ 1 2))";
+    let pkg = compile_executable_from_source(&source.to_string(), ("main", "main")).unwrap();
+    let interp = Interpreter::new(pkg);
+    let mut exec = interp.call_main().unwrap();
+    let status = exec.run(2).unwrap();
+    assert_eq!(status, Status::Paused);
+    let status = exec.run(1_000).unwrap();
+    assert_eq!(status, Status::Done(Rc::new(SLVal::Int(3))));
+    assert_eq!(exec.executed, 4);
+  }
+
+  #[test]
+  fn infinite_recursion_is_bounded_by_run_budget() {
+    let source = "(fn loop (n) (loop n)) (fn main () (loop 1))";
+    let pkg = compile_executable_from_source(&source.to_string(), ("main", "main")).unwrap();
+    let interp = Interpreter::new(pkg);
+    let mut exec = interp.call_main().unwrap();
+    let status = exec.run(10_000).unwrap();
+    assert_eq!(status, Status::Paused);
+    assert!(!exec.is_done());
+  }
+
+  #[test]
+  fn executed_count_is_cumulative() {
+    let source = "(fn main () (let a 1) (let b 2) (let c 3) 4)";
+    let pkg = compile_executable_from_source(&source.to_string(), ("main", "main")).unwrap();
+    let interp = Interpreter::new(pkg);
+    let mut exec = interp.call_main().unwrap();
+    exec.run(2).unwrap();
+    assert_eq!(exec.executed, 2);
+    exec.run(2).unwrap();
+    assert_eq!(exec.executed, 4);
+    let s3 = exec.run(1_000).unwrap();
+    assert!(matches!(s3, Status::Done(_)));
+    assert_eq!(exec.executed, 14);
+  }
+
+  #[test]
+  fn two_executions_run_in_parallel() {
+    // Two `Execution`s from one `Interpreter` should be independent: stepping
+    // one does not affect the other's stack, frames, or counter. We interleave
+    // `run` calls (cooperative scheduling) and confirm each produces its own
+    // result. Each `main` returns its distinct constant so we can tell them
+    // apart.
+    let source = "(fn main () (let a 1) (let b 2) 3)";
+    let pkg = compile_executable_from_source(&source.to_string(), ("main", "main")).unwrap();
+    let interp = Interpreter::new(pkg);
+    let mut exec_a = interp.call_main().unwrap();
+    let mut exec_b = interp.call_main().unwrap();
+
+    // Run a couple of bytecodes on each, alternating, before either is done.
+    assert_eq!(exec_a.run(1).unwrap(), Status::Paused);
+    assert_eq!(exec_b.run(1).unwrap(), Status::Paused);
+    assert_eq!(exec_a.executed, 1);
+    assert_eq!(exec_b.executed, 1);
+
+    // Run both to completion in the same interleaved fashion.
+    assert_eq!(exec_a.run(1_000).unwrap(), Status::Done(Rc::new(SLVal::Int(3))));
+    assert_eq!(exec_b.run(1_000).unwrap(), Status::Done(Rc::new(SLVal::Int(3))));
+    assert!(exec_a.is_done());
+    assert!(exec_b.is_done());
   }
 }
