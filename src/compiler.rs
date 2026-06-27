@@ -5,7 +5,7 @@ use crate::parser::{self, Identifier, AST};
 
 /// A Package can either represent a "program" or a "library".
 /// If a `main` is provided, then it can be executed as a program directly.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Package {
   /// While the names here *can* be used for function lookup, they are only
   /// included for debugging purposes. In a complete "executable" package, all
