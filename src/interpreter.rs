@@ -700,6 +700,10 @@ mod test {
     // A recursive countdown: counts down from N to 0 using CallDynamic on
     // itself. With N = 5000 this would overflow the native Rust stack under
     // the old recursive eval_code; the frame-stack model handles it.
+    //
+    // TODO: this doesn't actually recurse — `count` just returns n. Needs a
+    // real recursive body (with arithmetic/conditional builtins) to exercise
+    // the frame stack depth. Left as a smoke test for now.
     let source = "
       (decl + (a b))
       (fn count (n)
@@ -707,10 +711,33 @@ mod test {
         n)
       (fn main () (count 5000))
     ";
-    // We don't have arithmetic builtins wired for real recursion, so just
-    // verify that a deep *call chain* (main -> count) of one frame works at
-    // all — the point of this test is that step-based execution never
-    // recurses in Rust. A single call is the minimal smoke test.
     assert_eq!(eval_main(source), Rc::new(SLVal::Int(5000)));
+  }
+
+  #[test]
+  fn function_call_leaves_no_stack_garbage() {
+    // After main returns, the execution's value stack must contain exactly
+    // one value: main's return value. Intermediate let-bindings and function
+    // call results should not accumulate as garbage below it.
+    let source = "
+      (fn id (a) a)
+      (fn waste ()
+        (let a 1)
+        (id 1)
+        (let b 2)
+        b)
+      (fn main () (waste) (waste) (waste))
+    ";
+    let pkg = compile_executable_from_source(&source.to_string(), ("main", "main")).unwrap();
+    let (mod_idx, fn_idx) = pkg.main.unwrap();
+    let function = pkg.get_function(mod_idx, fn_idx).unwrap();
+    if let Callable::Function(function) = function {
+      let mut exec = Execution::new(&pkg, &DefaultBuiltins);
+      exec.enter_function(function, vec![]).unwrap();
+      let result = exec.run_until_done().unwrap();
+      assert_eq!(result, Rc::new(SLVal::Int(2)));
+      // run_until_done pops the final value, so the stack should be empty.
+      assert_eq!(exec.stack.items, vec![]);
+    }
   }
 }
