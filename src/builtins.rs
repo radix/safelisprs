@@ -2,6 +2,7 @@ use std::rc::Rc;
 
 use crate::interpreter::{Builtins, BuiltinResult, SLVal, Stack};
 
+#[derive(Clone)]
 pub struct DefaultBuiltins;
 
 impl Builtins for DefaultBuiltins {
