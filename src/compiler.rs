@@ -61,6 +61,8 @@ pub enum Instruction<CallType> {
   MakeCell,
   /// Extract the underlying SLVal from the Cell that's on TOS.
   DerefCell,
+  /// Set the contents of a Cell.
+  SetCell,
   /// Push a reference to a function
   MakeFunctionRef(CallType),
   /// Partially apply some arguments to a function.
@@ -219,6 +221,7 @@ fn link_instruction(
     Instruction::Return => Instruction::Return,
     Instruction::MakeCell => Instruction::MakeCell,
     Instruction::DerefCell => Instruction::DerefCell,
+    Instruction::SetCell => Instruction::SetCell,
     Instruction::PartialApply(size) => Instruction::PartialApply(size),
     Instruction::Jump(target) => Instruction::Jump(target),
     Instruction::JumpIfFalse(target) => Instruction::JumpIfFalse(target),
@@ -334,6 +337,13 @@ fn compile_expr(
     AST::DerefCell(expr) => {
       instructions.extend(compile_expr(module_name, expr, locals)?);
       instructions.push(Instruction::DerefCell);
+    }
+    AST::SetCell(target, value) => {
+      // Evaluate the value, then the target (which must resolve to a Cell).
+      // Stack order at SetCell time: [value, cell] (cell on TOS).
+      instructions.extend(compile_expr(module_name, value, locals)?);
+      instructions.extend(compile_expr(module_name, target, locals)?);
+      instructions.push(Instruction::SetCell);
     }
     AST::FunctionRef(mname, fname) => {
       instructions.push(Instruction::MakeFunctionRef((

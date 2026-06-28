@@ -538,6 +538,20 @@ impl<'gc> ExecRoot<'gc> {
           other => return Err(format!("Not a cell: {:?}", other)),
         }
       }
+      Instruction::SetCell => {
+        // Pop the Cell (TOS) and the new value (below it), write the value
+        // into the Cell, and push the value back as the result of `set!`.
+        let cell_gc = self.pop()?;
+        let new_val = self.pop()?;
+        match &*cell_gc {
+          SLVal::Cell(cell_ref) => {
+            // Mutate the Cell's contents in a GC-safe way.
+            *Gc::write(mc, *cell_ref).unlock().borrow_mut() = (*new_val).clone();
+          }
+          other => return Err(format!("Not a cell: {:?}", other)),
+        }
+        self.stack.push(new_val);
+      }
       Instruction::PartialApply(num_args) => {
         self.partial_apply(mc, num_args)?;
       }
@@ -1519,5 +1533,104 @@ mod test {
 
     // And the value must still be readable after collection.
     assert!(matches!(exec.peek_value().unwrap(), SLValue::Cell(_)));
+  }
+
+  #[test]
+  fn set_cell_mutates_captured_variable() {
+    // The classic counter: `counter` returns an `inc` closure that mutates
+    // and returns a captured `count` variable. Each call to `inc` should
+    // increment the shared counter, proving that `set!` writes through the
+    // Cell that the closure and its parent share.
+    let source = "
+      (use \"src/std\")
+      (fn counter ()
+        (let count 0)
+        (fn inc ()
+          (set! count (std.+ 1 count))
+          count)
+        inc)
+      (fn main ()
+        (let c (counter))
+        (c)
+        (c)
+        (c))
+    ";
+    assert_eq!(eval_main(source), SLValue::Int(3));
+  }
+
+  #[test]
+  fn set_cell_returns_new_value() {
+    // `set!` should evaluate to the new value, not the old one. We use a
+    // closure to get a Cell (captured variables are wrapped in Cells by the
+    // closure transform).
+    let source = "
+      (use \"src/std\")
+      (fn make ()
+        (let x 1)
+        (fn inc ()
+          (set! x (std.+ x 10))))
+      (fn main () ((make)))
+    ";
+    assert_eq!(eval_main(source), SLValue::Int(11));
+  }
+
+  #[test]
+  fn set_cell_on_non_cell_errors() {
+    // `set!` on a local that isn't a Cell (not captured by any closure, so
+    // the closure transform doesn't wrap it in a Cell) should error at runtime.
+    let source = "
+      (fn main ()
+        (let x 1)
+        (set! x 2))
+    ";
+    let pkg = compile_executable_from_source(&source.to_string(), ("main", "main")).unwrap();
+    let interp = Interpreter::new(pkg);
+    let mut exec = interp.call_main().unwrap();
+    let err = exec.run_until_done().unwrap_err();
+    assert!(err.contains("Not a cell"), "unexpected error: {}", err);
+  }
+
+  #[test]
+  fn cycle_is_collected() {
+    // Build a cycle using only source-level constructs: a closure that
+    // captures a variable, then `set!` that variable to the closure itself.
+    // After the closure transform, `c` is a Cell holding the Partial, and the
+    // Partial holds the Cell → Cell↔Partial cycle. Once the result is
+    // discarded, the cycle is unreachable and must be collected. This is the
+    // key advantage of gc-arena over `Rc` (which would leak cycles).
+    //
+    // (fn make-cycle ()
+    //   (let c 0)          ; c becomes a Cell (captured by self)
+    //   (fn self () c)     ; self captures c's Cell
+    //   (set! c self)      ; write self into c's Cell → cycle
+    //   self)              ; return the cyclic closure
+    // (fn main () (make-cycle) 99)  ; discard the cycle, return 99
+    let source = "
+      (use \"src/std\")
+      (fn make-cycle ()
+        (let c 0)
+        (fn self () c)
+        (set! c self)
+        self)
+      (fn main () (make-cycle) 99)
+    ";
+    let pkg = compile_executable_from_source(&source.to_string(), ("main", "main")).unwrap();
+    let interp = Interpreter::new(pkg);
+    let mut exec = interp.call_main().unwrap();
+
+    // Run to completion: main calls make-cycle (which builds the cycle and
+    // returns it on the stack), then main discards it by returning 99.
+    let result = exec.run_until_done().unwrap();
+    assert_eq!(result, SLValue::Int(99));
+
+    // At this point the stack is empty (run_until_done popped 99), so the
+    // cycle is unreachable. Forcing a full collection must reclaim it.
+    exec.collect_all();
+    let after = exec.gc_count();
+    assert_eq!(
+      after, 0,
+      "expected 0 live Gc allocations after collecting the cycle, got {}",
+      after,
+    );
   }
 }
