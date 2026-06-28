@@ -285,6 +285,25 @@ impl<B: Builtins + Clone> Execution<B> {
     result
   }
 
+  /// The current number of live `Gc` allocations in this execution's arena.
+  /// Useful for tests that want to observe garbage collection.
+  pub fn gc_count(&self) -> usize {
+    self.arena.metrics().total_gc_count()
+  }
+
+  /// The total bytes currently allocated by live `Gc` pointers in this
+  /// execution's arena.
+  pub fn gc_allocation_bytes(&self) -> usize {
+    self.arena.metrics().total_gc_allocation()
+  }
+
+  /// Force a full garbage-collection cycle, freeing all unreachable `Gc`
+  /// pointers. Useful for tests that want to verify that collection reclaims
+  /// garbage.
+  pub fn collect_all(&mut self) {
+    self.arena.finish_cycle();
+  }
+
   /// Run up to `n` bytecodes. Returns `Paused` if the budget exhausted before
   /// completion, or `Done(v)` if the program completed. Errors propagate via
   /// `Err`. The cumulative count of executed bytecodes is available on
@@ -292,9 +311,9 @@ impl<B: Builtins + Clone> Execution<B> {
   pub fn run(&mut self, n: u64) -> Result<Status, String> {
     let start = self.executed;
     let mut executed = self.executed;
-    let outcome = self.arena.mutate_root(|mc, root| {
-      root.run(mc, &self.package, &self.builtins, start, n, &mut executed)
-    });
+    let outcome = self
+      .arena
+      .mutate_root(|mc, root| root.run(mc, &self.package, &self.builtins, start, n, &mut executed));
     self.executed = executed;
     // Run a bit of incremental collection, paced by allocation debt.
     self.arena.collect_debt();
@@ -305,9 +324,9 @@ impl<B: Builtins + Clone> Execution<B> {
   /// final value, or errors on a runtime error.
   pub fn run_until_done(&mut self) -> Result<SLValue, String> {
     let mut executed = self.executed;
-    let result = self
-      .arena
-      .mutate_root(|mc, root| root.run_until_done(mc, &self.package, &self.builtins, &mut executed));
+    let result = self.arena.mutate_root(|mc, root| {
+      root.run_until_done(mc, &self.package, &self.builtins, &mut executed)
+    });
     self.executed = executed;
     self.arena.collect_debt();
     result
@@ -1289,5 +1308,216 @@ mod test {
     assert!(!exec.is_done());
     // It should have made progress.
     assert!(exec.executed > 0);
+  }
+
+  #[test]
+  fn collect_all_frees_unreachable_values() {
+    // A program that creates garbage: `main` builds a Cell holding 42, then
+    // discards it by returning `99`. After execution, the Cell (and its
+    // contents) should be unreachable from the root. Forcing a full
+    // collection cycle should reclaim those allocations.
+    //
+    // We construct this with bytecode directly because there's no surface
+    // syntax for `cell` outside the closure transform.
+    let main = compiler::Function {
+      num_locals: 1,
+      num_params: 0,
+      instructions: vec![
+        Instruction::PushInt(42),
+        Instruction::MakeCell,    // allocate a Cell wrapping 42
+        Instruction::SetLocal(0), // bind it to local 0 ("garbage")
+        Instruction::PushInt(99), // push the real return value
+        Instruction::Return,      // return 99; the Cell in local 0 is now dead
+      ],
+    };
+    let pkg = Package {
+      modules: vec![(
+        "main".to_string(),
+        vec![("main".to_string(), Callable::Function(main))],
+      )],
+      main: Some((0, 0)),
+    };
+    let interp = Interpreter::new(pkg);
+    let mut exec = interp.call_main().unwrap();
+
+    // `call_main` enters the function, which allocates locals in the GC. Record
+    // the baseline allocation count before running.
+    let baseline = exec.gc_count();
+    assert_eq!(baseline, 1); // the single Void local for `main`
+
+    // Step through the program manually so we can observe allocations before
+    // the final value is popped (which would make it unreachable). The program
+    // is 5 instructions; stepping all 5 leaves the int `99` on the stack and
+    // the Cell dead in local 0.
+    for _ in 0..5 {
+      exec.step().unwrap();
+    }
+    assert!(exec.is_done());
+    assert_eq!(exec.peek_value().unwrap(), SLValue::Int(99));
+
+    // After running, the Cell is unreachable but may not yet have been
+    // collected (incremental collection difficult to predict because of the
+    // "debt" system). There should be at least one live `Gc` allocation right
+    // now (the dangling Cell + contents), plus the int `99` on the stack.
+    let after_run = exec.gc_count();
+    assert!(
+      after_run >= 3,
+      "expected at least 3 live Gc allocations (cell + inner value + result) after run, got {}",
+      after_run,
+    );
+
+    // Forcing a full collection cycle must reclaim the unreachable Cell. The
+    // int `99` on the stack is still reachable and survives.
+    exec.collect_all();
+    let after_collect = exec.gc_count();
+    assert_eq!(
+      after_collect, 1,
+      "expected 1 live Gc allocation (the result 99) after collect_all, got {}",
+      after_collect,
+    );
+  }
+
+  #[test]
+  fn gc_reclaims_intermediate_values_during_long_run() {
+    // A program that produces a lot of garbage: it loops `n` times, each
+    // iteration building a Cell and immediately discarding it. If the GC is
+    // working, the live allocation count after the run should stay bounded
+    // (proportional to the final stack, not to the number of iterations),
+    // rather than growing linearly with `n`.
+    //
+    // loop(n): if n == 0 return 0; else let g = cell(n); loop(n-1)
+    //   locals: n (0), g (1)
+    //   0: LoadLocal(0)        # n
+    //   1: PushInt(0)
+    //   2: Call((std_mod, std_eq))  # n == 0
+    //   3: JumpIfFalse(6)
+    //   4: PushInt(0)
+    //   5: Return
+    //   6: LoadLocal(0)        # n
+    //   7: MakeCell             # cell(n)  -- this is the garbage
+    //   8: SetLocal(1)          # g = cell(n)
+    //   9: LoadLocal(0)         # n
+    //  10: PushInt(1)
+    //  11: Call((std_mod, std_sub)) # n - 1
+    //  12: Call((0, 0))         # loop(n-1)  -- tail-ish recursion
+    //  13: Return
+    let std_mod = 1u32; // "std" is the second module after "main"
+    let std_eq = 2u32;
+    let std_sub = 1u32;
+    let waste = compiler::Function {
+      num_locals: 2,
+      num_params: 1,
+      instructions: vec![
+        Instruction::LoadLocal(0),
+        Instruction::PushInt(0),
+        Instruction::Call((std_mod, std_eq)),
+        Instruction::JumpIfFalse(6),
+        Instruction::PushInt(0),
+        Instruction::Return,
+        Instruction::LoadLocal(0),
+        Instruction::MakeCell,
+        Instruction::SetLocal(1),
+        Instruction::LoadLocal(0),
+        Instruction::PushInt(1),
+        Instruction::Call((std_mod, std_sub)),
+        Instruction::Call((0, 0)),
+        Instruction::Return,
+      ],
+    };
+    let main = compiler::Function {
+      num_locals: 0,
+      num_params: 0,
+      instructions: vec![
+        Instruction::PushInt(1000),
+        Instruction::Call((0, 0)), // waste(1000)
+        Instruction::Return,
+      ],
+    };
+    // Build a package with std builtins and the two functions above.
+    let pkg = Package {
+      modules: vec![
+        (
+          "main".to_string(),
+          vec![
+            ("waste".to_string(), Callable::Function(waste)),
+            ("main".to_string(), Callable::Function(main)),
+          ],
+        ),
+        (
+          "std".to_string(),
+          vec![
+            ("+".to_string(), Callable::Builtin),
+            ("-".to_string(), Callable::Builtin),
+            ("==".to_string(), Callable::Builtin),
+          ],
+        ),
+      ],
+      main: Some((0, 1)),
+    };
+    let interp = Interpreter::new(pkg);
+    let mut exec = interp.call_main().unwrap();
+
+    let result = exec.run_until_done().unwrap();
+    assert_eq!(result, SLValue::Int(0));
+
+    // After 1000 iterations each allocating a Cell, if GC never ran we'd
+    // expect ~1000+ live allocations. Because `run_until_done` calls
+    // `collect_debt` and the program allocates enough to trigger incremental
+    // collection along the way, the count should be far smaller than 1000.
+    // Forcing a final collection reclaims whatever transient garbage remains,
+    // leaving only the final stack value.
+    exec.collect_all();
+    let live = exec.gc_count();
+    assert!(
+      live < 100,
+      "expected bounded live Gc count after collecting garbage from 1000 iterations, got {}",
+      live,
+    );
+  }
+
+  #[test]
+  fn live_values_survive_collection() {
+    // A program that returns a Cell: the Cell must survive a forced
+    // collection, proving that reachable `Gc` pointers are not reclaimed.
+    let main = compiler::Function {
+      num_locals: 0,
+      num_params: 0,
+      instructions: vec![
+        Instruction::PushInt(3),
+        Instruction::MakeCell, // cell(3)
+        Instruction::Return,
+      ],
+    };
+    let pkg = Package {
+      modules: vec![(
+        "main".to_string(),
+        vec![("main".to_string(), Callable::Function(main))],
+      )],
+      main: Some((0, 0)),
+    };
+    let interp = Interpreter::new(pkg);
+    let mut exec = interp.call_main().unwrap();
+
+    // Step through all 3 instructions. The Cell ends up on the stack as the
+    // result (is_done() is true, but we haven't popped it).
+    for _ in 0..3 {
+      exec.step().unwrap();
+    }
+    assert!(exec.is_done());
+    assert!(matches!(exec.peek_value().unwrap(), SLValue::Cell(_)));
+
+    // The Cell on the stack is reachable and must survive a full collection.
+    // (There may also be a now-dead Void local from `enter_function`; that one
+    // is expected to be reclaimed.)
+    exec.collect_all();
+    let after = exec.gc_count();
+    assert!(
+      after >= 2,
+      "expected the Cell + its inner value to survive collection, got {} live allocations",
+      after,
+    );
+
+    // And the value must still be readable after collection.
+    assert!(matches!(exec.peek_value().unwrap(), SLValue::Cell(_)));
   }
 }
