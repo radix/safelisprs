@@ -242,11 +242,6 @@ pub enum Status {
 /// `Arena` holds the value stack and call frames branded with an invariant
 /// `'gc` lifetime; values that must cross the arena boundary (such as the
 /// result of `run`) are deep-copied to the arena-agnostic `SLValue`.
-///
-/// `Execution` is a thin shell owning the `Arena`/`Package`/`builtins`; the
-/// interpreter logic (`step`, `pop`, `push`, `partial_apply`, `call_fixed`,
-/// `call_dynamic`, `enter_function`) lives as methods on the in-arena
-/// `ExecRoot`, which is only reachable inside `arena.mutate_root` callbacks.
 pub struct Execution<B> {
   arena: Arena<Rootable![ExecRoot<'_>]>,
   package: Package,
@@ -296,28 +291,9 @@ impl<B: Builtins + Clone> Execution<B> {
   /// `Execution::executed` after the call returns.
   pub fn run(&mut self, n: u64) -> Result<Status, String> {
     let start = self.executed;
-    let package = &self.package;
-    let builtins = &self.builtins;
     let mut executed = self.executed;
-    let mut outcome: Result<Status, String> = Ok(Status::Paused);
-    self.arena.mutate_root(|mc, root| {
-      while !root.is_done() && executed - start < n {
-        match root.step(mc, package, builtins, &mut executed) {
-          Ok(()) => {}
-          Err(e) => {
-            outcome = Err(e);
-            return;
-          }
-        }
-      }
-      if root.is_done() {
-        match root.pop() {
-          Ok(top) => outcome = Ok(Status::Done(top.to_value())),
-          Err(e) => outcome = Err(e),
-        }
-      } else {
-        outcome = Ok(Status::Paused);
-      }
+    let outcome = self.arena.mutate_root(|mc, root| {
+      root.run(mc, &self.package, &self.builtins, start, n, &mut executed)
     });
     self.executed = executed;
     // Run a bit of incremental collection, paced by allocation debt.
@@ -328,25 +304,10 @@ impl<B: Builtins + Clone> Execution<B> {
   /// Convenience: run to completion with no instruction limit. Returns the
   /// final value, or errors on a runtime error.
   pub fn run_until_done(&mut self) -> Result<SLValue, String> {
-    let package = &self.package;
-    let builtins = &self.builtins;
     let mut executed = self.executed;
-    let mut result: Result<SLValue, String> = Ok(SLValue::Void);
-    self.arena.mutate_root(|mc, root| {
-      while !root.is_done() {
-        match root.step(mc, package, builtins, &mut executed) {
-          Ok(()) => {}
-          Err(e) => {
-            result = Err(e);
-            return;
-          }
-        }
-      }
-      match root.pop() {
-        Ok(top) => result = Ok(top.to_value()),
-        Err(e) => result = Err(e),
-      }
-    });
+    let result = self
+      .arena
+      .mutate_root(|mc, root| root.run_until_done(mc, &self.package, &self.builtins, &mut executed));
     self.executed = executed;
     self.arena.collect_debt();
     result
@@ -359,28 +320,9 @@ impl<B: Builtins + Clone> Execution<B> {
   /// `Execution::executed` after the call returns.
   pub fn run_for_duration(&mut self, duration: Duration) -> Result<Status, String> {
     let deadline = Instant::now() + duration;
-    let package = &self.package;
-    let builtins = &self.builtins;
     let mut executed = self.executed;
-    let mut outcome: Result<Status, String> = Ok(Status::Paused);
-    self.arena.mutate_root(|mc, root| {
-      while !root.is_done() && Instant::now() < deadline {
-        match root.step(mc, package, builtins, &mut executed) {
-          Ok(()) => {}
-          Err(e) => {
-            outcome = Err(e);
-            return;
-          }
-        }
-      }
-      if root.is_done() {
-        match root.pop() {
-          Ok(top) => outcome = Ok(Status::Done(top.to_value())),
-          Err(e) => outcome = Err(e),
-        }
-      } else {
-        outcome = Ok(Status::Paused);
-      }
+    let outcome = self.arena.mutate_root(|mc, root| {
+      root.run_for_duration(mc, &self.package, &self.builtins, deadline, &mut executed)
     });
     self.executed = executed;
     self.arena.collect_debt();
@@ -389,13 +331,10 @@ impl<B: Builtins + Clone> Execution<B> {
 
   /// Execute one bytecode instruction from the current top frame.
   pub fn step(&mut self) -> Result<(), String> {
-    let package = &self.package;
-    let builtins = &self.builtins;
     let mut executed = self.executed;
-    let mut result = Ok(());
-    self.arena.mutate_root(|mc, root| {
-      result = root.step(mc, package, builtins, &mut executed);
-    });
+    let result = self
+      .arena
+      .mutate_root(|mc, root| root.step(mc, &self.package, &self.builtins, &mut executed));
     self.executed = executed;
     self.arena.collect_debt();
     result
@@ -409,11 +348,10 @@ impl<B: Builtins + Clone> Execution<B> {
     function: Function,
     pre_bound: Vec<SLValue>,
   ) -> Result<(), String> {
-    let mut result = Ok(());
-    self.arena.mutate_root(|mc, root| {
+    let result = self.arena.mutate_root(|mc, root| {
       let pre_bound_gc: Vec<Gc<'_, SLVal<'_>>> =
         pre_bound.iter().map(|v| SLVal::from_value(mc, v)).collect();
-      result = root.enter_function(mc, function.clone(), pre_bound_gc);
+      root.enter_function(mc, function.clone(), pre_bound_gc)
     });
     result
   }
@@ -423,11 +361,10 @@ impl<B: Builtins + Clone> Execution<B> {
   fn push_and_call_dynamic(&mut self, value: SLValue) -> Result<(), String> {
     let package = self.package.clone();
     let builtins = self.builtins.clone();
-    let mut result = Ok(());
-    self.arena.mutate_root(|mc, root| {
+    let result = self.arena.mutate_root(|mc, root| {
       let gc = SLVal::from_value(mc, &value);
       root.stack.push(gc);
-      result = root.call_dynamic(mc, &package, &builtins);
+      root.call_dynamic(mc, &package, &builtins)
     });
     result
   }
@@ -445,6 +382,67 @@ impl<'gc> ExecRoot<'gc> {
       .stack
       .pop()
       .ok_or_else(|| "POP on an empty stack".to_string())
+  }
+
+  /// Run up to `n` bytecodes starting from `start` executed count. Returns
+  /// `Paused` if the budget exhausted before completion, or `Done(v)` if the
+  /// program completed. Errors propagate via `Err`.
+  fn run(
+    &mut self,
+    mc: &'gc Mutation<'gc>,
+    package: &Package,
+    builtins: &impl Builtins,
+    start: u64,
+    n: u64,
+    executed: &mut u64,
+  ) -> Result<Status, String> {
+    while !self.is_done() && *executed - start < n {
+      self.step(mc, package, builtins, executed)?;
+    }
+    if self.is_done() {
+      let top = self.pop()?;
+      Ok(Status::Done(top.to_value()))
+    } else {
+      Ok(Status::Paused)
+    }
+  }
+
+  /// Run to completion with no instruction limit. Returns the final value, or
+  /// errors on a runtime error.
+  fn run_until_done(
+    &mut self,
+    mc: &'gc Mutation<'gc>,
+    package: &Package,
+    builtins: &impl Builtins,
+    executed: &mut u64,
+  ) -> Result<SLValue, String> {
+    while !self.is_done() {
+      self.step(mc, package, builtins, executed)?;
+    }
+    let top = self.pop()?;
+    Ok(top.to_value())
+  }
+
+  /// Run until `deadline` is reached or execution completes. Returns `Paused`
+  /// if the deadline expired before completion, or `Done(v)` if the program
+  /// completed. Errors propagate via `Err`.
+  fn run_for_duration(
+    &mut self,
+    mc: &'gc Mutation<'gc>,
+    package: &Package,
+    builtins: &impl Builtins,
+    deadline: Instant,
+    executed: &mut u64,
+  ) -> Result<Status, String> {
+    while !self.is_done() && Instant::now() < deadline {
+      self.step(mc, package, builtins, executed)?;
+    }
+    if self.is_done() {
+      let top = self.pop()?;
+      Ok(Status::Done(top.to_value()))
+    } else {
+      Ok(Status::Paused)
+    }
   }
 
   /// Execute one bytecode instruction from the current top frame.
@@ -1286,9 +1284,7 @@ mod test {
     let pkg = compile_executable_from_source(&source.to_string(), ("main", "main")).unwrap();
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
-    let status = exec
-      .run_for_duration(Duration::from_millis(50))
-      .unwrap();
+    let status = exec.run_for_duration(Duration::from_millis(50)).unwrap();
     assert_eq!(status, Status::Paused);
     assert!(!exec.is_done());
     // It should have made progress.
