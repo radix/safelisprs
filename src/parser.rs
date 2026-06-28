@@ -23,6 +23,10 @@ pub enum AST {
   Cell(Box<AST>),
   /// And we can deref these cells to get their inner value.
   DerefCell(Box<AST>),
+  /// Set the contents of a Cell. The first expression must evaluate to a
+  /// Cell; the second is the new value to store in it. Evaluates to the new
+  /// value.
+  SetCell(Box<AST>, Box<AST>),
   /// Bind up some arguments with a callable. (this is used for passing cells to closures!)
   PartialApply(Box<AST>, Vec<AST>),
   /// Get a reference to a function.
@@ -89,6 +93,7 @@ impl AST {
             "decl" => return parse_decl(right),
             "use" => return parse_import(right),
             "if" => return parse_if(right),
+            "set!" => return parse_set(right),
             _ => {}
           }
         }
@@ -123,6 +128,16 @@ fn parse_if(right: &Expr) -> Result<AST, String> {
     Box::new(AST::from_atoms(&forms[1])?),
     Box::new(AST::from_atoms(&forms[2])?),
   ))
+}
+
+fn parse_set(right: &Expr) -> Result<AST, String> {
+  let forms = flatten_list(right)?;
+  if forms.len() != 2 {
+    return Err("`set!` must have exactly two arguments: a variable and a value".to_string());
+  }
+  let target = AST::from_atoms(&forms[0])?;
+  let value = AST::from_atoms(&forms[1])?;
+  Ok(AST::SetCell(Box::new(target), Box::new(value)))
 }
 
 fn parse_call(form: &Expr) -> Result<AST, String> {

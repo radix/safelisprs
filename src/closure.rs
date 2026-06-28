@@ -233,6 +233,25 @@ fn transform_ast(
       cell_vars,
       lifted,
     )?))),
+    AST::SetCell(target, value) => {
+      // If the target is a bare variable from the outer environment, it must
+      // be captured (as a cell). If it's a local, it must become a cell_var.
+      if let AST::Variable(name) = target.as_ref() {
+        if !locals.contains(name) && environment.contains(name) {
+          push_unique(captures, name.clone());
+        }
+      }
+      let value = transform_ast(
+        module_name,
+        value,
+        environment,
+        locals,
+        captures,
+        cell_vars,
+        lifted,
+      )?;
+      Ok(AST::SetCell(target.clone(), Box::new(value)))
+    }
     AST::PartialApply(callable, args) => {
       let callable = transform_ast(
         module_name,
@@ -333,6 +352,12 @@ fn patch_cell_access(
     AST::DerefCell(expr) => Ok(AST::DerefCell(Box::new(patch_cell_access(
       expr, captures, cell_vars, locals,
     )?))),
+    AST::SetCell(target, value) => {
+      // The target must NOT be deref'd — we need the Cell itself to write
+      // into it. Only the value expression gets normal cell-patching.
+      let value = patch_cell_access(value, captures, cell_vars, locals)?;
+      Ok(AST::SetCell(target.clone(), Box::new(value)))
+    }
     AST::PartialApply(callable, args) => {
       let callable = patch_cell_access(callable, captures, cell_vars, locals)?;
       Ok(AST::PartialApply(Box::new(callable), args.clone()))
