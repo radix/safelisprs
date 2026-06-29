@@ -14,6 +14,8 @@ serde_yaml = "0.8"
 bincode = "1.0"
 anyhow = "1.0.56"
 gc-arena = "0.6"
+wasm-encoder = "0.252.0"
 
 [dev-dependencies]
 pretty_assertions = "1.2.1"
+wasmtime = {version = "46.0.1", default-features = false, features = ["cranelift", "runtime", "wat"]}
