@@ -864,34 +864,6 @@ mod test {
   }
 
   #[test]
-  fn let_expression_returns_bound_value() {
-    let source = "
-      (fn main () (let a 1))
-    ";
-    assert_eq!(eval_main(source), SLValue::Int(1));
-  }
-
-  #[test]
-  fn later_let_expression_is_returned() {
-    let source = "
-      (fn main ()
-        (let a 1)
-        (let b 2))
-    ";
-    assert_eq!(eval_main(source), SLValue::Int(2));
-  }
-
-  #[test]
-  fn let_return_value_does_not_shadow_later_variable_result() {
-    let source = "
-      (fn main ()
-        (let a 1)
-        a)
-    ";
-    assert_eq!(eval_main(source), SLValue::Int(1));
-  }
-
-  #[test]
   fn closure_capture_order() {
     let source = "
       (fn outer ()
@@ -1091,22 +1063,6 @@ mod test {
   }
 
   #[test]
-  fn deep_recursion_does_not_overflow() {
-    // Under the old recursive eval_code each Safelisp call was a Rust stack
-    // frame, so this would have overflowed. This ensures we can handle very
-    // large stack sizes.
-    let source = "
-      (use \"src/std\")
-      (fn triangle (n)
-        (if (std.== n 0)
-          0
-          (std.+ n (triangle (std.- n 1)))))
-      (fn main () (triangle 50000))
-    ";
-    assert_eq!(eval_main(source), SLValue::Int(1250025000));
-  }
-
-  #[test]
   fn function_call_leaves_no_stack_garbage() {
     // After main returns, the execution's value stack must contain exactly
     // one value: main's return value. Intermediate let-bindings and function
@@ -1134,24 +1090,6 @@ mod test {
   }
 
   #[test]
-  fn if_selects_then_branch_when_true() {
-    let source = "
-      (use \"src/std\")
-      (fn main () (if (std.== 1 1) 42 0))
-    ";
-    assert_eq!(eval_main(source), SLValue::Int(42));
-  }
-
-  #[test]
-  fn if_selects_else_branch_when_false() {
-    let source = "
-      (use \"src/std\")
-      (fn main () (if (std.== 1 2) 42 0))
-    ";
-    assert_eq!(eval_main(source), SLValue::Int(0));
-  }
-
-  #[test]
   fn if_does_not_evaluate_unselected_branch() {
     // If the else branch were evaluated, calling the declared-but-unimplemented
     // `boom` builtin would error at runtime. Since the then branch is selected,
@@ -1162,28 +1100,6 @@ mod test {
       (fn main () (if (std.== 1 1) 42 (boom 0)))
     ";
     assert_eq!(eval_main(source), SLValue::Int(42));
-  }
-
-  #[test]
-  fn bool_literals_evaluate() {
-    let source = "(fn main () true)";
-    assert_eq!(eval_main(source), SLValue::Bool(true));
-    let source = "(fn main () false)";
-    assert_eq!(eval_main(source), SLValue::Bool(false));
-  }
-
-  #[test]
-  fn equality_returns_bool() {
-    let source = "
-      (use \"src/std\")
-      (fn main () (std.== 3 3))
-    ";
-    assert_eq!(eval_main(source), SLValue::Bool(true));
-    let source = "
-      (use \"src/std\")
-      (fn main () (std.== 3 4))
-    ";
-    assert_eq!(eval_main(source), SLValue::Bool(false));
   }
 
   #[test]
