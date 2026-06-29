@@ -14,7 +14,7 @@
 use rstest::rstest;
 use safelisp::compiler::compile_executable_from_source;
 use safelisp::interpreter::{Interpreter, SLValue};
-use safelisp::wasm::{self, STD_IMPORT_MODULE};
+use safelisp::wasm::{self};
 use wasmtime::{Engine, Linker, Module, Store};
 
 /// Run `source` through the SLC compiler + interpreter and return the result
@@ -38,28 +38,21 @@ fn eval_interpreter(source: &str) -> i64 {
 }
 
 /// Run `source` through the WASM backend + wasmtime and return the result as
-/// an `i64`. The three `std.*` builtins are supplied as host imports. Panics
+/// an `i64`. Builtins are auto-registered from [`wasm::std_builtins`]. Panics
 /// on compile or runtime errors.
 fn eval_wasm(source: &str) -> i64 {
-  let wasm = wasm::compile(source).unwrap_or_else(|e| panic!("wasm compile failed: {e}"));
+  let builtins = wasm::std_builtins();
+  let wasm =
+    wasm::compile(source, &builtins).unwrap_or_else(|e| panic!("wasm compile failed: {e}"));
   let engine = Engine::default();
   let module = Module::from_binary(&engine, &wasm).unwrap_or_else(|e| panic!("wasm validate: {e}"));
   let mut linker: Linker<()> = Linker::new(&engine);
-  linker
-    .func_wrap(STD_IMPORT_MODULE, "add", |a: i64, b: i64| a.wrapping_add(b))
-    .unwrap();
-  linker
-    .func_wrap(STD_IMPORT_MODULE, "sub", |a: i64, b: i64| a - b)
-    .unwrap();
-  linker
-    .func_wrap(STD_IMPORT_MODULE, "eq", |a: i64, b: i64| -> i64 {
-      if a == b {
-        1
-      } else {
-        0
-      }
-    })
-    .unwrap();
+  for b in builtins.iter() {
+    let f = b.func.clone();
+    linker
+      .func_wrap(&b.module, &b.name, move |a: i64, b: i64| f(&[a, b]))
+      .unwrap();
+  }
   let mut store: Store<()> = Store::new(&engine, ());
   let instance = linker
     .instantiate(&mut store, &module)
@@ -83,51 +76,27 @@ fn eval_wasm(source: &str) -> i64 {
 #[case::bool_true("(fn main () true)", 1)]
 #[case::bool_false("(fn main () false)", 0)]
 #[case::let_returns_bound_value("(fn main () (let a 1))", 1)]
-#[case::later_let_is_returned(
-  "(fn main () (let a 1) (let b 2))",
-  2,
-)]
-#[case::let_does_not_shadow_later_result(
-  "(fn main () (let a 1) a)",
-  1,
-)]
-#[case::let_then_use_variable(
-  "(use \"src/std\") (fn main () (let a 1) (let b 2) (std.+ a b))",
-  3,
-)]
-#[case::let_shadows_earlier_binding(
-  "(fn main () (let a 1) (let a 2) a)",
-  2,
-)]
+#[case::later_let_is_returned("(fn main () (let a 1) (let b 2))", 2)]
+#[case::let_does_not_shadow_later_result("(fn main () (let a 1) a)", 1)]
+#[case::let_then_use_variable("(use \"src/std\") (fn main () (let a 1) (let b 2) (std.+ a b))", 3)]
+#[case::let_shadows_earlier_binding("(fn main () (let a 1) (let a 2) a)", 2)]
 #[case::if_selects_then_branch("(fn main () (if true 42 0))", 42)]
 #[case::if_selects_else_branch("(fn main () (if false 42 0))", 0)]
-#[case::if_with_condition_from_call(
-  "(use \"src/std\") (fn main () (if (std.== 1 1) 7 8))",
-  7,
-)]
-#[case::calls_same_module_function(
-  "(fn id (a) a) (fn main () (id 99))",
-  99,
-)]
-#[case::calls_function_with_multiple_args(
-  "(fn first (a b) a) (fn main () (first 5 6))",
-  5,
-)]
-#[case::calls_function_defined_later(
-  "(fn main () (later 7)) (fn later (x) x)",
-  7,
-)]
+#[case::if_with_condition_from_call("(use \"src/std\") (fn main () (if (std.== 1 1) 7 8))", 7)]
+#[case::calls_same_module_function("(fn id (a) a) (fn main () (id 99))", 99)]
+#[case::calls_function_with_multiple_args("(fn first (a b) a) (fn main () (first 5 6))", 5)]
+#[case::calls_function_defined_later("(fn main () (later 7)) (fn later (x) x)", 7)]
 #[case::std_add("(use \"src/std\") (fn main () (std.+ 1 2))", 3)]
 #[case::std_sub("(use \"src/std\") (fn main () (std.- 1 2))", -1)]
 #[case::std_eq_true("(use \"src/std\") (fn main () (std.== 3 3))", 1)]
 #[case::std_eq_false("(use \"src/std\") (fn main () (std.== 3 4))", 0)]
 #[case::arithmetic_in_if(
   "(use \"src/std\") (fn main () (if (std.== (std.+ 1 1) 2) 100 200))",
-  100,
+  100
 )]
 #[case::multiple_lets_and_calls(
   "(use \"src/std\") (fn main () (let a 1) (let b 2) (let c 3) (std.+ a (std.+ b c)))",
-  6,
+  6
 )]
 #[case::calls_function_that_calls_another(
   "(use \"src/std\") (fn inc (n) (std.+ n 1)) (fn twice (n) (std.+ (inc n) (inc n))) (fn main () (twice 10))",
