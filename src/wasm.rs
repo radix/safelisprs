@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use wasm_encoder::{
   BlockType, CodeSection, EntityType, ExportKind, ExportSection, Function, FunctionSection,
@@ -7,14 +8,133 @@ use wasm_encoder::{
 
 use crate::parser::{self, Identifier, AST};
 
-/// The name of the WASM import module exposing `std.+`, `std.-`, `std.==` to
-/// compiled modules.
-pub const STD_IMPORT_MODULE: &str = "std";
+/// The implementation of a host function: takes a slice of i64 arguments
+/// (one per parameter) and returns a single i64 result.
+pub type HostFn = Arc<dyn Fn(&[i64]) -> i64 + Send + Sync>;
+
+/// A description of one host function that the compiled WASM module can
+/// import and call. The caller assembles a [`Builtins`] registry of these
+/// and passes it to [`compile`].
+///
+/// Each `Builtin` carries both the signature (used by the compiler to emit the
+/// right import/type) and the implementation (used by the embedder to register
+/// the host function with the wasmtime `Linker`). This is a bit conflated
+/// between compilation and runtime but if you want to compile without knowledge
+/// of the implementations, just provide no-op functions.
+#[derive(Clone)]
+pub struct Builtin {
+  /// The WASM import module name. In SafeLisp source this is the part before
+  /// the `.` in a qualified call like `(std.+ 1 2)`.
+  pub module: String,
+  /// The WASM import function name. In SafeLisp source this is the part after
+  /// the `.` (or the whole bare name, if the caller registers it that way).
+  pub name: String,
+  /// The parameter types, in order. All SafeLisp values are currently `i64`,
+  /// so this is typically a vec of `ValType::I64`.
+  pub params: Vec<ValType>,
+  /// The result types. SafeLisp functions currently return a single `i64`.
+  pub results: Vec<ValType>,
+  /// The host implementation, stored as a type-erased closure over `&[i64]`.
+  /// Used by test harnesses and embedders to register the function with a
+  /// wasmtime `Linker` without re-stating the signature.
+  pub func: HostFn,
+}
+
+impl Builtin {
+  /// Build a `Builtin` from an explicit `&[i64] -> i64` closure.
+  pub fn new(
+    module: &str,
+    name: &str,
+    num_params: usize,
+    func: impl Fn(&[i64]) -> i64 + Send + Sync + 'static,
+  ) -> Self {
+    Builtin {
+      module: module.to_string(),
+      name: name.to_string(),
+      params: (0..num_params).map(|_| ValType::I64).collect(),
+      results: vec![ValType::I64],
+      func: Arc::new(func),
+    }
+  }
+
+  /// A nullary (zero-arg) host function.
+  pub fn nullary(module: &str, name: &str, func: impl Fn() -> i64 + Send + Sync + 'static) -> Self {
+    Builtin::new(module, name, 0, move |_| func())
+  }
+
+  /// A unary (one-arg) host function.
+  pub fn unary(
+    module: &str,
+    name: &str,
+    func: impl Fn(i64) -> i64 + Send + Sync + 'static,
+  ) -> Self {
+    Builtin::new(module, name, 1, move |args| func(args[0]))
+  }
+
+  /// A binary (two-arg) host function.
+  pub fn binary(
+    module: &str,
+    name: &str,
+    func: impl Fn(i64, i64) -> i64 + Send + Sync + 'static,
+  ) -> Self {
+    Builtin::new(module, name, 2, move |args| func(args[0], args[1]))
+  }
+}
+
+/// A registry of host functions available to the compiled module. The
+/// compiler emits a WASM import for each entry that is actually referenced
+/// in the source; unused entries are ignored.
+#[derive(Clone, Default)]
+pub struct Builtins {
+  entries: Vec<Builtin>,
+}
+
+impl Builtins {
+  pub fn new() -> Self {
+    Builtins::default()
+  }
+
+  pub fn with_builtin(mut self, builtin: Builtin) -> Self {
+    self.entries.push(builtin);
+    self
+  }
+
+  pub fn add(&mut self, builtin: Builtin) {
+    self.entries.push(builtin);
+  }
+
+  /// Iterate over all registered builtins. Used by embedders to register
+  /// every host function with a wasmtime `Linker`.
+  pub fn iter(&self) -> impl Iterator<Item = &Builtin> {
+    self.entries.iter()
+  }
+
+  /// Look up a builtin by `(module, name)`. Returns the matching entry.
+  fn lookup(&self, module: &str, name: &str) -> Option<&Builtin> {
+    self
+      .entries
+      .iter()
+      .find(|b| b.module == module && b.name == name)
+  }
+
+  /// Look up a builtin by bare name (no module qualifier). This is used when
+  /// a `CallFixed` uses an unqualified name that doesn't resolve to a
+  /// same-module user function.
+  fn lookup_bare(&self, name: &str) -> Option<&Builtin> {
+    self.entries.iter().find(|b| b.name == name)
+  }
+}
+
+/// A function signature, used as a key for type-index deduplication.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct Signature {
+  params: Vec<ValType>,
+  results: Vec<ValType>,
+}
 
 /// Compile a SafeLisp source string to a WebAssembly binary module. The
-/// module exports one function per top-level `(fn …)` definition; builtins
-/// (`std.+`, `std.-`, `std.==`) are imported from a host module named `std`
-/// and must be supplied by the embedder (see tests for the wasmtime wiring).
+/// `builtins` registry describes the host functions the source may call; the
+/// compiler emits a WASM import for each one that is actually referenced.
 ///
 /// All SafeLisp values are represented as `i64` in the generated WASM: `Int`
 /// is an `i64`, and `Bool` is `0` or `1` as an `i64`. This avoids any need for
@@ -25,34 +145,20 @@ pub const STD_IMPORT_MODULE: &str = "std";
 /// - `Int`, `Bool`
 /// - `Variable`, `Let`
 /// - `If`
-/// - `CallFixed` to a same-module function or a `std.+`/`std.-`/`std.==`
-///   builtin
+/// - `CallFixed` to a same-module function or a registered builtin
 ///
 /// Not supported (returns an error): `Float`, `String`, `Call` (dynamic
 /// calls), `Cell`/`DerefCell`/`SetCell`, `PartialApply`, `FunctionRef`, nested
 /// `DefineFn`, `Import`, `DeclareFn` (declarations are ignored rather than
 /// erroring, since they're just signatures).
-pub fn compile(source: &str) -> Result<Vec<u8>, String> {
+pub fn compile(source: &str, builtins: &Builtins) -> Result<Vec<u8>, String> {
   let asts = parser::read_multiple(source)?;
-  compile_asts(&asts)
+  compile_asts(&asts, builtins)
 }
 
 /// Compile a slice of already-parsed top-level AST into a WASM binary.
-pub fn compile_asts(asts: &[AST]) -> Result<Vec<u8>, String> {
-  ModuleCompiler::new().compile(asts)
-}
-
-/// The set of `std.*` builtins this backend knows how to import. Each maps a
-/// SafeLisp builtin name to the name used in the WASM import; the host must
-/// supply a matching `(func (param i64 i64) (result i64))` under the `std`
-/// module.
-fn std_builtin_import_name(name: &str) -> Option<&'static str> {
-  match name {
-    "+" => Some("add"),
-    "-" => Some("sub"),
-    "==" => Some("eq"),
-    _ => None,
-  }
+pub fn compile_asts(asts: &[AST], builtins: &Builtins) -> Result<Vec<u8>, String> {
+  ModuleCompiler::new(builtins).compile(asts)
 }
 
 /// A top-level function definition, collected during the first pass.
@@ -65,35 +171,41 @@ struct FuncDef {
   def_index: u32,
 }
 
-struct ModuleCompiler {
+/// One entry in the set of imports actually used by the compiled module,
+/// resolved during the discovery pass and assigned a function index.
+struct UsedImport {
+  /// The builtin descriptor from the registry.
+  builtin: Builtin,
+  /// The function index in the module's function index space (imports come
+  /// first).
+  func_index: u32,
+  /// The type index for this builtin's signature.
+  type_index: u32,
+}
+
+struct ModuleCompiler<'b> {
+  builtins: &'b Builtins,
   /// All top-level function definitions, in source order.
   functions: Vec<FuncDef>,
   /// Map from function name to its position in `functions` (and thus its
   /// `def_index`), for resolving `CallFixed` to same-module functions.
   function_names: HashMap<String, u32>,
-  /// Type indices for `(func (param i64 * N) (result i64))` keyed by param
-  /// count. The 2-param entry is shared with the builtin signature. Filled
-  /// by `assign_type_indices` before the emit pass.
-  func_type_indices: HashMap<u32, u32>,
-  /// Map from builtin import name ("add"/"sub"/"eq") to its function index
-  /// in the module's function index space (imports come first). Filled by
-  /// `assign_import_indices` before the emit pass, in a deterministic order
-  /// derived from `discovery`.
-  builtin_import_indices: HashMap<&'static str, u32>,
-  /// The total number of imported functions. Imports occupy the leading
-  /// slots of the function index space; defined functions follow. Set by
-  /// `assign_import_indices`.
-  num_imports: u32,
+  /// Type-index allocator: maps each distinct signature to a type index,
+  /// assigned in first-seen order. Shared by both imports and user functions.
+  type_indices: HashMap<Signature, u32>,
+  /// The imports actually referenced by the source, keyed by
+  /// `(module, name)`. Assigned during the discovery pass.
+  used_imports: HashMap<(String, String), UsedImport>,
 }
 
-impl ModuleCompiler {
-  fn new() -> Self {
+impl<'b> ModuleCompiler<'b> {
+  fn new(builtins: &'b Builtins) -> Self {
     ModuleCompiler {
+      builtins,
       functions: vec![],
       function_names: HashMap::new(),
-      func_type_indices: HashMap::new(),
-      builtin_import_indices: HashMap::new(),
-      num_imports: 0,
+      type_indices: HashMap::new(),
+      used_imports: HashMap::new(),
     }
   }
 
@@ -115,167 +227,142 @@ impl ModuleCompiler {
       }
     }
 
-    // Pass 1 (discovery): walk every function body to find which `std.*`
-    // builtins are called and which param counts are used by user functions.
-    // This doesn't emit any code; it just collects the sets we need to size
-    // the type and import sections before the emit pass.
-    let mut used_builtins: Vec<&'static str> = Vec::new();
-    let mut used_param_counts: Vec<u32> = Vec::new();
+    // Pass 1 (discovery): walk every function body to find which builtins
+    // are called. This doesn't emit any code; it just collects the set of
+    // imports we'll need and assigns them function indices and type indices.
     for ast in asts {
       if let AST::DefineFn(f) = ast {
-        self.discover(f, &mut used_builtins, &mut used_param_counts)?;
+        self.discover(f)?;
       }
     }
 
-    // Assign type indices deterministically. The builtin 2-arg signature
-    // `(param i64 i64) (result i64)`, if used, is always type 0 (so the
-    // import section can reference it). User-function types follow in
-    // ascending param-count order; the 2-param case reuses the builtin type.
-    let mut next_type = 0u32;
-    let builtin_used = used_builtins
-      .iter()
-      .any(|n| *n == "add" || *n == "sub" || *n == "eq");
-    if builtin_used {
-      self.func_type_indices.insert(2, 0);
-      next_type = 1;
-    }
-    used_param_counts.sort_unstable();
-    used_param_counts.dedup();
-    for n in &used_param_counts {
-      if self.func_type_indices.contains_key(n) {
-        continue;
-      }
-      self.func_type_indices.insert(*n, next_type);
-      next_type += 1;
-    }
-
-    // Assign import function indices. Imports occupy the leading slots of
-    // the function index space. We emit them in a fixed, sorted order so
-    // the import section and the call targets agree.
-    used_builtins.sort_unstable();
-    used_builtins.dedup();
-    for (i, name) in used_builtins.iter().enumerate() {
-      self.builtin_import_indices.insert(name, i as u32);
-    }
-    self.num_imports = used_builtins.len() as u32;
+    let num_imports = self.used_imports.len() as u32;
 
     // Pass 2 (emit): build the module sections in binary order: type,
     // import, function, export, code.
     let mut module = Module::new();
+    self.emit_type_section(&mut module);
+    self.emit_import_section(&mut module);
+    self.emit_function_section(&mut module, num_imports);
+    self.emit_export_section(&mut module, num_imports);
+    self.emit_code_section(&mut module, asts, num_imports)?;
+    Ok(module.finish())
+  }
 
-    // Type section. Emit in index order: the builtin 2-arg type first (if
-    // used), then one type per distinct param count in ascending order.
+  /// Allocate (or reuse) a type index for the given signature. The first time
+  /// a signature is seen, it gets the next available index; subsequent lookups
+  /// return the same index.
+  fn type_index(&mut self, sig: Signature) -> u32 {
+    let next = self.type_indices.len() as u32;
+    *self.type_indices.entry(sig).or_insert(next)
+  }
+
+  /// Emit the type section, one entry per distinct signature in first-seen
+  /// order (matching the indices assigned by `type_index`).
+  fn emit_type_section(&self, module: &mut Module) {
     let mut types = TypeSection::new();
-    if builtin_used {
-      types
-        .ty()
-        .function(vec![ValType::I64, ValType::I64], vec![ValType::I64]);
-    }
-    for n in used_param_counts {
-      if n == 2 && builtin_used {
-        continue;
-      }
-      let params: Vec<ValType> = (0..n).map(|_| ValType::I64).collect();
-      types.ty().function(params, vec![ValType::I64]);
+    // Collect and sort by index so the section is emitted in index order.
+    let mut entries: Vec<(&Signature, u32)> =
+      self.type_indices.iter().map(|(s, i)| (s, *i)).collect();
+    entries.sort_by_key(|(_, i)| *i);
+    for (sig, _) in entries {
+      types.ty().function(sig.params.clone(), sig.results.clone());
     }
     module.section(&types);
+  }
 
-    // Import section: one entry per used builtin, in the sorted order we
-    // assigned indices above. All builtins share the 2-arg i64 type. When no
-    // builtins are used, we emit an empty (but valid) import section.
+  /// Emit the import section, one entry per used builtin, in function-index
+  /// order.
+  fn emit_import_section(&self, module: &mut Module) {
     let mut imports = ImportSection::new();
-    if builtin_used {
-      let builtin_type = self.func_type_indices[&2];
-      for name in &used_builtins {
-        imports.import(STD_IMPORT_MODULE, name, EntityType::Function(builtin_type));
-      }
+    let mut used: Vec<&UsedImport> = self.used_imports.values().collect();
+    used.sort_by_key(|u| u.func_index);
+    for u in used {
+      imports.import(
+        &u.builtin.module,
+        &u.builtin.name,
+        EntityType::Function(u.type_index),
+      );
     }
     module.section(&imports);
+  }
 
-    // Function section: one entry per defined function, giving its type
-    // index. Defined functions follow imports in the function index space.
+  /// Emit the function section: one entry per defined function, giving its
+  /// type index. Defined functions follow imports in the function index
+  /// space.
+  fn emit_function_section(&self, module: &mut Module, _num_imports: u32) {
     let mut funcs = FunctionSection::new();
     for def in &self.functions {
-      let ty = self.func_type_indices[&def.num_params];
+      let sig = Signature {
+        params: (0..def.num_params).map(|_| ValType::I64).collect(),
+        results: vec![ValType::I64],
+      };
+      let ty = self.type_indices[&sig];
       funcs.function(ty);
     }
     module.section(&funcs);
+  }
 
-    // Export section: export each defined function by its source name.
+  /// Emit the export section: export each defined function by its source name.
+  fn emit_export_section(&self, module: &mut Module, num_imports: u32) {
     let mut exports = ExportSection::new();
     for def in &self.functions {
-      let func_index = self.num_imports + def.def_index;
+      let func_index = num_imports + def.def_index;
       exports.export(&def.name, ExportKind::Func, func_index);
     }
     module.section(&exports);
+  }
 
-    // Code section: the bodies, in the same order as the function section.
+  /// Emit the code section: the bodies, in the same order as the function
+  /// section.
+  fn emit_code_section(
+    &mut self,
+    module: &mut Module,
+    asts: &[AST],
+    num_imports: u32,
+  ) -> Result<(), String> {
     let mut codes = CodeSection::new();
     for ast in asts {
       if let AST::DefineFn(f) = ast {
         let def_index = self.function_names[&f.name];
-        let body = self.compile_function(f, def_index)?;
+        let body = self.compile_function(f, def_index, num_imports)?;
         codes.function(&body);
       }
     }
     module.section(&codes);
-
-    Ok(module.finish())
+    Ok(())
   }
 
-  /// Discovery walk over a function body: record every `std.*` builtin that's
-  /// called and every param count used by called user functions. Doesn't
-  /// emit code or error on unknown names (those are caught in the emit pass).
-  fn discover(
-    &self,
-    f: &parser::Function,
-    used_builtins: &mut Vec<&'static str>,
-    used_param_counts: &mut Vec<u32>,
-  ) -> Result<(), String> {
-    used_param_counts.push(f.params.len() as u32);
+  /// Discovery walk over a function body: record every builtin that's called
+  /// by assigning it an import function index and a type index (if not
+  /// already assigned). Doesn't emit code or error on unknown names (those
+  /// are caught in the emit pass).
+  fn discover(&mut self, f: &parser::Function) -> Result<(), String> {
+    // Ensure the function's own signature has a type index.
+    let sig = Signature {
+      params: (0..f.params.len() as u32).map(|_| ValType::I64).collect(),
+      results: vec![ValType::I64],
+    };
+    self.type_index(sig);
     for expr in &f.code {
-      self.discover_expr(expr, used_builtins, used_param_counts)?;
+      self.discover_expr(expr)?;
     }
     Ok(())
   }
 
-  #[allow(clippy::only_used_in_recursion)]
-  fn discover_expr(
-    &self,
-    ast: &AST,
-    used_builtins: &mut Vec<&'static str>,
-    used_param_counts: &mut Vec<u32>,
-  ) -> Result<(), String> {
+  fn discover_expr(&mut self, ast: &AST) -> Result<(), String> {
     match ast {
       AST::Int(_) | AST::Bool(_) | AST::Variable(_) => {}
-      AST::Let(_, expr) => self.discover_expr(expr, used_builtins, used_param_counts)?,
+      AST::Let(_, expr) => self.discover_expr(expr)?,
       AST::If(cond, then, els) => {
-        self.discover_expr(cond, used_builtins, used_param_counts)?;
-        self.discover_expr(then, used_builtins, used_param_counts)?;
-        self.discover_expr(els, used_builtins, used_param_counts)?;
+        self.discover_expr(cond)?;
+        self.discover_expr(then)?;
+        self.discover_expr(els)?;
       }
       AST::CallFixed(ident, args) => {
-        // Record the callee if it's a builtin or a same-module function.
-        let (module_name, func_name) = match ident {
-          Identifier::Bare(n) => (None, n.clone()),
-          Identifier::Qualified(m, n) => (Some(m.clone()), n.clone()),
-        };
-        match (module_name.as_deref(), func_name.as_str()) {
-          (None, name) if self.function_names.contains_key(name) => {
-            // User function call: we don't know the target's param count
-            // without resolving it, but all user functions are in
-            // `self.functions`, which we already recorded above. No-op.
-            let _ = name;
-          }
-          (None, name) | (Some(STD_IMPORT_MODULE), name)
-            if std_builtin_import_name(name).is_some() =>
-          {
-            used_builtins.push(std_builtin_import_name(name).unwrap());
-          }
-          _ => {}
-        }
+        self.resolve_builtin_for_discovery(ident)?;
         for arg in args {
-          self.discover_expr(arg, used_builtins, used_param_counts)?;
+          self.discover_expr(arg)?;
         }
       }
       x => {
@@ -288,8 +375,49 @@ impl ModuleCompiler {
     Ok(())
   }
 
+  /// During discovery, if a `CallFixed` target resolves to a registered
+  /// builtin (not a same-module function), record the import. This assigns
+  /// the builtin a function index (if not already assigned) and a type index.
+  fn resolve_builtin_for_discovery(&mut self, ident: &Identifier) -> Result<(), String> {
+    let (module_name, func_name) = match ident {
+      Identifier::Bare(n) => (None, n.clone()),
+      Identifier::Qualified(m, n) => (Some(m.clone()), n.clone()),
+    };
+    // Only resolve builtins; same-module function calls don't need imports.
+    let builtin = match (module_name.as_deref(), func_name.as_str()) {
+      (None, name) if self.function_names.contains_key(name) => return Ok(()),
+      (None, name) => self.builtins.lookup_bare(name),
+      (Some(m), name) => self.builtins.lookup(m, name),
+    };
+    if let Some(b) = builtin {
+      let key = (b.module.clone(), b.name.clone());
+      if !self.used_imports.contains_key(&key) {
+        let sig = Signature {
+          params: b.params.clone(),
+          results: b.results.clone(),
+        };
+        let type_index = self.type_index(sig);
+        let func_index = self.used_imports.len() as u32;
+        self.used_imports.insert(
+          key,
+          UsedImport {
+            builtin: b.clone(),
+            func_index,
+            type_index,
+          },
+        );
+      }
+    }
+    Ok(())
+  }
+
   /// Compile one function to a `wasm_encoder::Function` (locals + body).
-  fn compile_function(&mut self, f: &parser::Function, def_index: u32) -> Result<Function, String> {
+  fn compile_function(
+    &mut self,
+    f: &parser::Function,
+    def_index: u32,
+    num_imports: u32,
+  ) -> Result<Function, String> {
     // Locals are tracked as a stack of (name, local-index). Parameters occupy
     // indices 0..num_params; each `let` allocates a fresh local index even if
     // it shadows an existing name, which avoids any need to rename or
@@ -328,7 +456,14 @@ impl ModuleCompiler {
 
     let last = f.code.len().saturating_sub(1);
     for (i, expr) in f.code.iter().enumerate() {
-      self.compile_expr(expr, &mut locals, &mut local_count, def_index, &mut func)?;
+      self.compile_expr(
+        expr,
+        &mut locals,
+        &mut local_count,
+        def_index,
+        num_imports,
+        &mut func,
+      )?;
       // Non-final body expressions are in statement position: their value is
       // discarded. The interpreter's compiler does the same with `Pop`.
       if i != last {
@@ -388,6 +523,7 @@ impl ModuleCompiler {
     locals: &mut Vec<(String, u32)>,
     local_count: &mut u32,
     def_index: u32,
+    num_imports: u32,
     func: &mut Function,
   ) -> Result<(), String> {
     match ast {
@@ -408,7 +544,7 @@ impl ModuleCompiler {
         // `let` evaluates to the bound value (matching interpreter semantics:
         // `(let a 1)` returns 1), so we leave the value on the stack via
         // `local.tee` (set-and-keep) instead of local.set + local.get.
-        self.compile_expr(expr, locals, local_count, def_index, func)?;
+        self.compile_expr(expr, locals, local_count, def_index, num_imports, func)?;
         let idx = *local_count;
         *local_count += 1;
         locals.push((name.clone(), idx));
@@ -416,18 +552,24 @@ impl ModuleCompiler {
       }
       AST::If(cond, then, els) => {
         // cond; i64.const 0; i64.ne; if (result i64) then else end
-        self.compile_expr(cond, locals, local_count, def_index, func)?;
+        self.compile_expr(cond, locals, local_count, def_index, num_imports, func)?;
         func.instructions().i64_const(0);
         func.instructions().i64_ne();
         func.instructions().if_(BlockType::Result(ValType::I64));
-        self.compile_expr(then, locals, local_count, def_index, func)?;
+        self.compile_expr(then, locals, local_count, def_index, num_imports, func)?;
         func.instructions().else_();
-        self.compile_expr(els, locals, local_count, def_index, func)?;
+        self.compile_expr(els, locals, local_count, def_index, num_imports, func)?;
         func.instructions().end();
       }
-      AST::CallFixed(ident, args) => {
-        self.compile_call_fixed(ident, args, locals, local_count, def_index, func)?
-      }
+      AST::CallFixed(ident, args) => self.compile_call_fixed(
+        ident,
+        args,
+        locals,
+        local_count,
+        def_index,
+        num_imports,
+        func,
+      )?,
       x => {
         return Err(format!(
           "WASM backend does not yet support this form: {:?}",
@@ -438,6 +580,7 @@ impl ModuleCompiler {
     Ok(())
   }
 
+  #[allow(clippy::too_many_arguments)]
   fn compile_call_fixed(
     &mut self,
     ident: &Identifier,
@@ -445,6 +588,7 @@ impl ModuleCompiler {
     locals: &mut Vec<(String, u32)>,
     local_count: &mut u32,
     def_index: u32,
+    num_imports: u32,
     func: &mut Function,
   ) -> Result<(), String> {
     let (module_name, func_name) = match ident {
@@ -453,35 +597,38 @@ impl ModuleCompiler {
     };
 
     // Resolve the callee to its function index in the module's function
-    // index space: imports come first, then defined functions. Both sets
-    // of indices were assigned before the emit pass in `compile`.
+    // index space: imports come first, then defined functions.
     let callee_index = match (module_name.as_deref(), func_name.as_str()) {
       (None, name) if self.function_names.contains_key(name) => {
         // Same-module call: num_imports + target's def_index.
         let _ = def_index;
         let target_def = self.function_names[name];
-        self.num_imports + target_def
+        num_imports + target_def
       }
-      (None, name) | (Some(STD_IMPORT_MODULE), name) if std_builtin_import_name(name).is_some() => {
-        // Builtin call: looked up in the pre-assigned import map.
-        let imp_name = std_builtin_import_name(name).unwrap();
-        *self
-          .builtin_import_indices
-          .get(imp_name)
-          .expect("discovery should have recorded this builtin")
+      _ => {
+        // Try to resolve as a builtin import.
+        let key = match &module_name {
+          Some(m) => (m.clone(), func_name.clone()),
+          None => {
+            // Bare name: look up the builtin to get its module.
+            let b = self
+              .builtins
+              .lookup_bare(&func_name)
+              .ok_or_else(|| format!("call to unknown function: {}", func_name))?;
+            (b.module.clone(), b.name.clone())
+          }
+        };
+        let imp = self
+          .used_imports
+          .get(&key)
+          .ok_or_else(|| format!("call to unknown function: {}.{}", key.0, key.1))?;
+        imp.func_index
       }
-      (Some(m), name) => {
-        return Err(format!(
-          "WASM backend can only call same-module functions or std builtins, got {}.{}",
-          m, name
-        ))
-      }
-      (None, name) => return Err(format!("call to unknown function: {}", name)),
     };
 
     // Evaluate args left-to-right onto the stack, then call.
     for arg in args {
-      self.compile_expr(arg, locals, local_count, def_index, func)?;
+      self.compile_expr(arg, locals, local_count, def_index, num_imports, func)?;
     }
     func.instructions().call(callee_index);
     Ok(())
@@ -497,34 +644,67 @@ impl ModuleCompiler {
   }
 }
 
+/// A convenience function returning the standard set of SafeLisp builtins
+/// (`std.+`, `std.-`, `std.==`), all with signature `(i64, i64) -> i64` and
+/// the obvious integer implementations. Callers who want a different set
+/// can build their own [`Builtins`].
+pub fn std_builtins() -> Builtins {
+  Builtins::new()
+    .with_builtin(Builtin::binary("std", "+", |a, b| a.wrapping_add(b)))
+    .with_builtin(Builtin::binary("std", "-", |a, b| a - b))
+    .with_builtin(Builtin::binary(
+      "std",
+      "==",
+      |a, b| if a == b { 1 } else { 0 },
+    ))
+}
+
 #[cfg(test)]
 mod test {
   use super::*;
   use wasmtime::{Engine, Linker, Module, Store};
 
-  /// Compile `source` to a WASM binary, instantiate it under a wasmtime
-  /// `Linker` that supplies the three std builtins, run `main`, and return
-  /// the i64 result.
+  /// Register every builtin in `builtins` with the given wasmtime `Linker`,
+  /// adapting the stored `&[i64] -> i64` implementation to the right typed
+  /// `func_wrap` arity.
+  fn register_all(linker: &mut Linker<()>, builtins: &Builtins) -> Result<(), String> {
+    for b in builtins.iter() {
+      let f = b.func.clone();
+      let result = match b.params.len() {
+        0 => linker.func_wrap(&b.module, &b.name, move || f(&[])),
+        1 => linker.func_wrap(&b.module, &b.name, move |a: i64| f(&[a])),
+        2 => linker.func_wrap(&b.module, &b.name, move |a: i64, b: i64| f(&[a, b])),
+        3 => linker.func_wrap(&b.module, &b.name, move |a: i64, b: i64, c: i64| {
+          f(&[a, b, c])
+        }),
+        n => {
+          return Err(format!(
+            "unsupported arity {} for builtin {}.{}",
+            n, b.module, b.name
+          ))
+        }
+      };
+      result.map_err(|e| format!("link {}.{}: {e}", b.module, b.name))?;
+    }
+    Ok(())
+  }
+
+  /// Compile `source` with [`std_builtins`], instantiate it under a wasmtime
+  /// `Linker` that auto-registers all builtins, run `main`, and return the
+  /// i64 result.
   fn run_main(source: &str) -> Result<i64, String> {
-    let wasm = compile(source)?;
+    run_main_with(source, &std_builtins())
+  }
+
+  /// Lower-level helper: compile `source` with the given `builtins` registry,
+  /// auto-register every builtin with the linker, then instantiate and run
+  /// `main`.
+  fn run_main_with(source: &str, builtins: &Builtins) -> Result<i64, String> {
+    let wasm = compile(source, builtins)?;
     let engine = Engine::default();
     let module = Module::from_binary(&engine, &wasm).map_err(|e| format!("wasm validate: {e}"))?;
     let mut linker: Linker<()> = Linker::new(&engine);
-    linker
-      .func_wrap(STD_IMPORT_MODULE, "add", |a: i64, b: i64| a.wrapping_add(b))
-      .map_err(|e| format!("link add: {e}"))?;
-    linker
-      .func_wrap(STD_IMPORT_MODULE, "sub", |a: i64, b: i64| a - b)
-      .map_err(|e| format!("link sub: {e}"))?;
-    linker
-      .func_wrap(STD_IMPORT_MODULE, "eq", |a: i64, b: i64| -> i64 {
-        if a == b {
-          1
-        } else {
-          0
-        }
-      })
-      .map_err(|e| format!("link eq: {e}"))?;
+    register_all(&mut linker, builtins)?;
     let mut store: Store<()> = Store::new(&engine, ());
     let instance = linker
       .instantiate(&mut store, &module)
@@ -564,19 +744,19 @@ mod test {
 
   #[test]
   fn unsupported_float_errors_clearly() {
-    let err = compile("(fn main () 1.5)").unwrap_err();
+    let err = run_main("(fn main () 1.5)").unwrap_err();
     assert!(err.contains("does not yet support"), "got: {err}");
   }
 
   #[test]
   fn unsupported_string_errors_clearly() {
-    let err = compile("(fn main () \"hi\")").unwrap_err();
+    let err = run_main("(fn main () \"hi\")").unwrap_err();
     assert!(err.contains("does not yet support"), "got: {err}");
   }
 
   #[test]
   fn unsupported_dynamic_call_errors_clearly() {
-    let err = compile("(fn main () (undefined 1))").unwrap_err();
+    let err = run_main("(fn main () (undefined 1))").unwrap_err();
     assert!(err.contains("unknown function"), "got: {err}");
   }
 
@@ -584,8 +764,41 @@ mod test {
   fn compiled_module_validates() {
     // A basic smoke test that the emitted bytes are valid WASM: wasmtime's
     // `Module::from_binary` validates before instantiation.
-    let wasm = compile("(fn id (a) a) (fn main () (id 7))").unwrap();
+    let wasm = compile("(fn id (a) a) (fn main () (id 7))", &std_builtins()).unwrap();
     let engine = Engine::default();
     Module::from_binary(&engine, &wasm).expect("emitted wasm should validate");
+  }
+
+  #[test]
+  fn custom_builtin_with_different_module_name() {
+    // A caller can register builtins under any module name, not just "std".
+    // The implementation is stored in the Builtin itself, so the test harness
+    // auto-registers it — no manual linker wiring needed.
+    let builtins = Builtins::new().with_builtin(Builtin::unary("math", "double", |n| n * 2));
+    let result = run_main_with("(fn main () (math.double 21))", &builtins).unwrap();
+    assert_eq!(result, 42);
+  }
+
+  #[test]
+  fn bare_builtin_name_resolves() {
+    // A builtin can be called with a bare name if it's the only one with
+    // that name in the registry. Here we register "double" under module
+    // "host"; in source, `(double 21)` resolves to it.
+    let builtins = Builtins::new().with_builtin(Builtin::unary("host", "double", |n| n * 2));
+    let result = run_main_with("(fn main () (double 21))", &builtins).unwrap();
+    assert_eq!(result, 42);
+  }
+
+  #[test]
+  fn unused_builtins_are_not_emitted() {
+    // Only the builtins actually referenced in the source should appear as
+    // imports. We check by compiling with all three std builtins but only
+    // using one.
+    let wasm = compile("(fn main () (std.+ 1 2))", &std_builtins()).unwrap();
+    let engine = Engine::default();
+    let module = Module::from_binary(&engine, &wasm).unwrap();
+    // The module should have exactly one import (std.+), not three.
+    let num_imports = module.imports().filter(|i| i.module() == "std").count();
+    assert_eq!(num_imports, 1);
   }
 }
