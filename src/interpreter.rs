@@ -555,14 +555,16 @@ impl<'gc> ExecRoot<'gc> {
       Instruction::PartialApply(num_args) => {
         self.partial_apply(mc, num_args)?;
       }
-      Instruction::Jump(target) => {
+      Instruction::Jump(offset) => {
         let frame = self
           .frames
           .last_mut()
           .ok_or_else(|| "Jump with no frame".to_string())?;
-        frame.ip = target as usize;
+        // `offset` is relative to the instruction following the `Jump` (the IP
+        // has already been advanced past it), so `Jump(0)` is a no-op.
+        frame.ip = frame.ip.wrapping_add(offset as usize);
       }
-      Instruction::JumpIfFalse(target) => {
+      Instruction::JumpIfFalse(offset) => {
         let val = self.pop()?;
         match &*val {
           SLVal::Bool(false) => {
@@ -570,7 +572,7 @@ impl<'gc> ExecRoot<'gc> {
               .frames
               .last_mut()
               .ok_or_else(|| "JumpIfFalse with no frame".to_string())?;
-            frame.ip = target as usize;
+            frame.ip = frame.ip.wrapping_add(offset as usize);
           }
           SLVal::Bool(true) => {}
           other => return Err(format!("`if` condition must be a bool, got {:?}", other)),
@@ -1320,7 +1322,7 @@ mod test {
     //   0: LoadLocal(0)        # n
     //   1: PushInt(0)
     //   2: Call((std_mod, std_eq))  # n == 0
-    //   3: JumpIfFalse(6)
+    //   3: JumpIfFalse(+2)      # if n != 0, skip the then-branch (offset 2)
     //   4: PushInt(0)
     //   5: Return
     //   6: LoadLocal(0)        # n
@@ -1341,7 +1343,7 @@ mod test {
         Instruction::LoadLocal(0),
         Instruction::PushInt(0),
         Instruction::Call((std_mod, std_eq)),
-        Instruction::JumpIfFalse(6),
+        Instruction::JumpIfFalse(2),
         Instruction::PushInt(0),
         Instruction::Return,
         Instruction::LoadLocal(0),

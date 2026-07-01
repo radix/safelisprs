@@ -148,6 +148,10 @@ fn register_one(linker: &mut Linker<()>, b: &safelisp::wasm::Builtin) {
   "(use \"src/std\") (fn main () (if (std.== 1 1) 7 8))",
   Val::Int(7)
 )]
+#[case::if_branches_can_use_let_variables(
+  "(fn main () (let a 10) (if true a 0))",
+  Val::Int(10)
+)]
 #[case::calls_same_module_function("(fn id (a) a) (fn main () (id 99))", Val::Int(99))]
 #[case::calls_function_with_multiple_args(
   "(fn first (a b) a) (fn main () (first 5 6))",
