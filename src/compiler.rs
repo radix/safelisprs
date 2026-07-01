@@ -69,9 +69,14 @@ pub enum Instruction<CallType> {
   /// argument: how many arguments to pop from the stack and bind to the function.
   /// TOS: a function reference
   PartialApply(u16),
-  /// Unconditionally jump to the instruction at the given index.
+  /// Jump to a relative offset.
+  ///
+  /// The offset is relative to the instruction *following* this one (the IP
+  /// has already been advanced past the `Jump` when it executes), so `Jump(0)`
+  /// is a no-op.
   Jump(u32),
-  /// Pop the TOS; if it is falsy, jump to the given instruction index.
+  /// Pop the TOS; if it is false, add `offset` to the instruction pointer.
+  /// See [`Instruction::Jump`] for the relative-offset semantics.
   JumpIfFalse(u32),
 }
 
@@ -292,6 +297,7 @@ fn compile_function(module_name: &str, f: &parser::Function) -> Result<CompiledM
   )])
 }
 
+/// Compile `ast` into instructions.
 fn compile_expr(
   module_name: &str,
   ast: &AST,
@@ -368,14 +374,13 @@ fn compile_expr(
       instructions.push(Instruction::PartialApply(args.len() as u16));
     }
     AST::If(cond, then, els) => {
-      // <cond>; JumpIfFalse(L_else); <then>; Jump(L_end); L_else: <else>; L_end:
-
-      // Generating the jump targets is a bit weird, since we don't have any
-      // sort of abstraction for "labels" in this compiler (that would be handy!
-      // is there prior art for that?). First, we just generate the sequence of
-      // code but with Jumps pointing to 0. As we do that we remember the
-      // targets by fetching instructions.len(). Then we go back and replace the
-      // jumps to populate the real targets.
+      // <cond>; JumpIfFalse(+else); <then>; Jump(+end); <else>; L_end:
+      //
+      // We generate the code with placeholder jumps, remember their indices,
+      // then patch them with the real relative offsets. Because the offsets are
+      // relative to the instruction *following* each jump, they depend only on
+      // the lengths of the `then` and `else` sub-vectors, not on where this
+      // `if` sits in the enclosing function.
       instructions.extend(compile_expr(module_name, cond, locals)?);
       let jmp_else = instructions.len();
       instructions.push(Instruction::JumpIfFalse(0));
@@ -383,13 +388,21 @@ fn compile_expr(
       let jmp_end = instructions.len();
       instructions.push(Instruction::Jump(0));
       // L_else:
-      let else_target = instructions.len() as u32;
+      let else_start = instructions.len();
       instructions.extend(compile_expr(module_name, els, locals)?);
       // L_end:
-      let end_target = instructions.len() as u32;
-      // Patch the jumps to actually point at the right positions.
-      instructions[jmp_else] = Instruction::JumpIfFalse(else_target);
-      instructions[jmp_end] = Instruction::Jump(end_target);
+      let end_start = instructions.len();
+      // The JumpIfFalse at `jmp_else` must skip over the `then` branch and the
+      // trailing `Jump`. When it executes, IP has already been advanced past
+      // the JumpIfFalse itself (to jmp_else + 1), so the offset is
+      // (else_start - (jmp_else + 1)).
+      let else_offset = (else_start - jmp_else - 1) as u32;
+      // The Jump at `jmp_end` must skip over the `else` branch. When it
+      // executes, IP has already been advanced past the Jump itself
+      // (to jmp_end + 1), so the offset is (end_start - (jmp_end + 1)).
+      let end_offset = (end_start - jmp_end - 1) as u32;
+      instructions[jmp_else] = Instruction::JumpIfFalse(else_offset);
+      instructions[jmp_end] = Instruction::Jump(end_offset);
     }
     AST::Variable(name) => {
       if !locals.contains_key(name) {
