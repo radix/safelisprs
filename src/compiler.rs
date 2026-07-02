@@ -53,9 +53,15 @@ pub enum Instruction<CallType> {
   PushBool(bool),
   /// discards topmost stack item
   Pop,
-  Call(CallType),
-  /// Call a FunctionRef or a Closure at TOS.
-  CallDynamic,
+  /// Call the function at `(module, function)` in the function table.
+  /// The `u16` is the number of arguments pushed at the call site, used by the
+  /// interpreter to pop the right number of args (and to arity-check). This is
+  /// essential for variadic builtins, whose `BuiltinSpec::num_params` is
+  /// `None`.
+  Call(CallType, u16),
+  /// Call a FunctionRef or a Closure at TOS. The `u16` is the number of
+  /// arguments pushed at the call site (see [`Instruction::Call`]).
+  CallDynamic(u16),
   /// Exit the current function, returning the TOS to the caller
   Return,
   /// Wrap the TOS in a Cell, which is pushed.
@@ -204,10 +210,10 @@ fn link_instruction(
   instruction: CompiledInstruction,
 ) -> Result<LinkedInstruction, String> {
   Ok(match instruction {
-    Instruction::Call((mod_name, func_name)) => {
+    Instruction::Call((mod_name, func_name), arity) => {
       let (mod_idx, func_idx) = find_function(module_table, &mod_name, &func_name)
         .ok_or_else(|| format!("Call to undefined function {}.{}", mod_name, func_name))?;
-      Instruction::Call((mod_idx, func_idx))
+      Instruction::Call((mod_idx, func_idx), arity)
     }
     Instruction::MakeFunctionRef((mod_name, func_name)) => {
       let (mod_idx, func_idx) = find_function(module_table, &mod_name, &func_name)
@@ -219,7 +225,7 @@ fn link_instruction(
     // x => Ok(x),
     // but Rust isn't smart enough to allow me. So I have to list out every variant of Instruction
     // :(
-    Instruction::CallDynamic => Instruction::CallDynamic,
+    Instruction::CallDynamic(arity) => Instruction::CallDynamic(arity),
     Instruction::LoadLocal(num) => Instruction::LoadLocal(num),
     Instruction::SetLocal(num) => Instruction::SetLocal(num),
     Instruction::PushInt(num) => Instruction::PushInt(num),
@@ -306,7 +312,7 @@ fn compile_expr(
         instructions.extend(compile_expr(module_name, expr, locals)?);
       }
       instructions.extend(compile_expr(module_name, callable_expr, locals)?);
-      instructions.push(Instruction::CallDynamic)
+      instructions.push(Instruction::CallDynamic(arg_exprs.len() as u16))
     }
     AST::CallFixed(identifier, arg_exprs) => {
       for expr in arg_exprs {
@@ -315,7 +321,7 @@ fn compile_expr(
       if let Identifier::Bare(fname) = identifier {
         if let Some(local_index) = locals.get(fname) {
           instructions.push(Instruction::LoadLocal(*local_index));
-          instructions.push(Instruction::CallDynamic);
+          instructions.push(Instruction::CallDynamic(arg_exprs.len() as u16));
           return Ok(instructions);
         }
       }
@@ -323,7 +329,10 @@ fn compile_expr(
         Identifier::Bare(fname) => (module_name.to_string(), fname.to_string()),
         Identifier::Qualified(mname, fname) => (mname.to_string(), fname.to_string()),
       };
-      instructions.push(Instruction::Call((module_name, function_name)))
+      instructions.push(Instruction::Call(
+        (module_name, function_name),
+        arg_exprs.len() as u16,
+      ))
     }
     AST::Cell(expr) => {
       instructions.extend(compile_expr(module_name, expr, locals)?);
@@ -516,7 +525,7 @@ mod test {
             Instruction::LoadLocal(0),
             Instruction::Pop,
             Instruction::LoadLocal(0),
-            Instruction::CallDynamic,
+            Instruction::CallDynamic(0),
             Instruction::Return,
           ],
         }),

@@ -91,6 +91,25 @@ impl Builtin {
       func: Arc::new(move |args| func(args[0], args[1], args[2])),
     }
   }
+
+  /// A variadic builtin: it receives the whole argument slice and may be called
+  /// with any number of args (including zero). `num_params` is `None`, so the
+  /// interpreter uses the call-site arity (carried on `Instruction::Call` /
+  /// `Instruction::CallDynamic`) to know how many args to pop.
+  pub fn variadic(
+    module: &'static str,
+    name: &'static str,
+    func: impl for<'gc> Fn(&[Gc<'gc, SLVal<'gc>>]) -> Result<SLVal<'gc>, String> + 'static,
+  ) -> Self {
+    Builtin {
+      spec: BuiltinSpec {
+        module,
+        name,
+        num_params: None,
+      },
+      func: Arc::new(move |args| func(args)),
+    }
+  }
 }
 
 /// A registry of builtins available to a program. The compiler reads the

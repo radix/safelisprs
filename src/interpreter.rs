@@ -334,7 +334,7 @@ impl Execution {
     let result = self.arena.mutate_root(|mc, root| {
       let gc = SLVal::from_value(mc, &value);
       root.stack.push(gc);
-      root.call_dynamic(mc, &package, &builtins)
+      root.call_dynamic(mc, &package, &builtins, 0)
     });
     result
   }
@@ -464,11 +464,11 @@ impl<'gc> ExecRoot<'gc> {
           .ok_or_else(|| "LoadLocal with no frame".to_string())?;
         self.stack.push(frame.locals[usize::from(i)]);
       }
-      Instruction::Call((mod_index, func_index)) => {
-        self.call_fixed(mc, package, builtins, mod_index, func_index)?;
+      Instruction::Call((mod_index, func_index), arity) => {
+        self.call_fixed(mc, package, builtins, mod_index, func_index, arity)?;
       }
-      Instruction::CallDynamic => {
-        self.call_dynamic(mc, package, builtins)?;
+      Instruction::CallDynamic(arity) => {
+        self.call_dynamic(mc, package, builtins, arity)?;
       }
       Instruction::MakeFunctionRef((mod_index, func_index)) => {
         self
@@ -555,7 +555,11 @@ impl<'gc> ExecRoot<'gc> {
   }
 
   /// Either pushes a frame for the function if it's defined in SafeLisp, or
-  /// just call it immediately if it's a builtin.
+  /// just call it immediately if it's a builtin. `arity` is the number of args
+  /// pushed at the call site (carried on [`Instruction::Call`]); it is used to
+  /// pop the right number of args for the callee and to arity-check at the call
+  /// site. For variadic builtins (whose `BuiltinSpec::num_params` is `None`) the
+  /// arity is the only source of the arg count.
   fn call_fixed(
     &mut self,
     mc: &'gc Mutation<'gc>,
@@ -563,6 +567,7 @@ impl<'gc> ExecRoot<'gc> {
     builtins: &Builtins,
     mod_index: u32,
     func_index: u32,
+    arity: u16,
   ) -> Result<(), String> {
     let (module_name, functions) = package
       .get_module(mod_index)
@@ -572,20 +577,30 @@ impl<'gc> ExecRoot<'gc> {
       .ok_or_else(|| format!("Function not found: {}/{}", mod_index, func_index))?;
     match callable {
       Callable::Function(func) => {
+        if arity != func.num_params {
+          return Err(format!(
+            "{}.{} expects {} arg(s) but was called with {}",
+            module_name, func_name, func.num_params, arity
+          ));
+        }
         self.enter_function(mc, func.clone(), vec![])?;
       }
       Callable::Builtin => {
         let builtin = builtins
           .lookup(module_name, func_name)
           .ok_or_else(|| format!("No builtin {}.{}", module_name, func_name))?;
-        // Variadic builtins (num_params == None) aren't supported yet — they
-        // need arity on the `Call` instruction (the variadic-builtins TODO).
-        let n = builtin.spec().num_params.ok_or_else(|| {
-          format!(
-            "variadic builtin {}.{} can't be called yet",
-            module_name, func_name
-          )
-        })? as usize;
+        // For fixed-arity builtins, enforce the declared arity at the call site.
+        if let Some(expected) = builtin.spec().num_params {
+          if arity != expected {
+            return Err(format!(
+              "{}.{} expects {} arg(s) but was called with {}",
+              module_name, func_name, expected, arity
+            ));
+          }
+        }
+        // For variadic builtins (`num_params == None`) the call-site arity is
+        // the only source of the arg count.
+        let n = arity as usize;
         // Args were pushed left-to-right; popping gives reverse order.
         let mut args = Vec::with_capacity(n);
         for _ in 0..n {
@@ -602,17 +617,19 @@ impl<'gc> ExecRoot<'gc> {
   /// Prepare the callable that's on the top of stack to be called. This pushes
   /// a new frame for function callables. This is both the implementation of the
   /// `CallDynamic` instruction and the entry point used by
-  /// `Interpreter::call_slval`.
+  /// `Interpreter::call_slval`. `arity` is the number of args pushed at the
+  /// call site (carried on [`Instruction::CallDynamic`]); see [`Self::call_fixed`].
   fn call_dynamic(
     &mut self,
     mc: &'gc Mutation<'gc>,
     package: &Package,
     builtins: &Builtins,
+    arity: u16,
   ) -> Result<(), String> {
     let callable = self.pop()?;
     match &*callable {
       SLVal::FunctionRef(mod_index, func_index) => {
-        self.call_fixed(mc, package, builtins, *mod_index, *func_index)
+        self.call_fixed(mc, package, builtins, *mod_index, *func_index, arity)
       }
       SLVal::Partial(Partial {
         function: (mod_index, func_index),
@@ -621,11 +638,22 @@ impl<'gc> ExecRoot<'gc> {
         let (_, functions) = package
           .get_module(*mod_index)
           .ok_or_else(|| format!("Module not found: {}", mod_index))?;
-        let (_, callable) = functions
+        let (func_name, callable) = functions
           .get(*func_index as usize)
           .ok_or_else(|| format!("Function not found: {}/{}", mod_index, func_index))?;
         match callable {
-          Callable::Function(func) => self.enter_function(mc, func.clone(), args.clone()),
+          Callable::Function(func) => {
+            // The remaining params (after the pre-bound ones) must be supplied
+            // by the call site; arity-check that they line up.
+            let expected = func.num_params.saturating_sub(args.len() as u16);
+            if arity != expected {
+              return Err(format!(
+                "{}.{} expects {} more arg(s) but was called with {}",
+                mod_index, func_name, expected, arity
+              ));
+            }
+            self.enter_function(mc, func.clone(), args.clone())
+          }
           Callable::Builtin => Err("Can't invoke a builtin as a closure".to_string()),
         }
       }
@@ -671,13 +699,15 @@ mod test {
   use std::time::Duration;
 
   fn eval_main(source: &str) -> SLValue {
-    let pkg = compile_executable_from_source(
-      &source.to_string(),
-      ("main", "main"),
-      &default_builtins().specs(),
-    )
-    .unwrap();
-    let interp = Interpreter::new(pkg);
+    eval_main_with(source, default_builtins())
+  }
+
+  /// Like `eval_main`, but with a custom builtin registry.
+  fn eval_main_with(source: &str, builtins: Builtins) -> SLValue {
+    let pkg =
+      compile_executable_from_source(&source.to_string(), ("main", "main"), &builtins.specs())
+        .unwrap();
+    let interp = Interpreter::with_builtins(pkg, builtins);
     let mut exec = interp.call_main().unwrap();
     exec.run_until_done().unwrap()
   }
@@ -696,7 +726,7 @@ mod test {
       num_params: 0,
       instructions: vec![
         Instruction::PushInt(42),
-        Instruction::Call((0, 0)),
+        Instruction::Call((0, 0), 1),
         Instruction::Return,
       ],
     };
@@ -997,13 +1027,69 @@ mod test {
     let code = compiler::Function {
       num_locals: 0,
       num_params: 0,
-      instructions: vec![Instruction::Call((0, 0))],
+      instructions: vec![Instruction::Call((0, 0), 0)],
     };
     let mut exec = Execution::new(pkg, default_builtins());
     exec.enter_function(code, vec![]).unwrap();
     let err = exec.step().unwrap_err();
     assert!(
       err.contains("Module not found"),
+      "unexpected error: {}",
+      err
+    );
+  }
+
+  /// A dummy variadic builtin used to exercise the variadic-call mechanism:
+  /// it returns the number of arguments it received as an `Int`.
+  fn varargs_builtins() -> Builtins {
+    default_builtins().with_builtin(Builtin::variadic("std", "varargs", |args| {
+      Ok(SLVal::Int(args.len() as i64))
+    }))
+  }
+
+  #[test]
+  fn variadic_builtin_called_with_zero_args() {
+    let builtins = varargs_builtins();
+    assert_eq!(
+      eval_main_with("(fn main () (std.varargs))", builtins),
+      SLValue::Int(0)
+    );
+  }
+
+  #[test]
+  fn variadic_builtin_called_with_multiple_args() {
+    let builtins = varargs_builtins();
+    assert_eq!(
+      eval_main_with("(fn main () (std.varargs 1 2 3))", builtins),
+      SLValue::Int(3)
+    );
+  }
+
+  #[test]
+  fn variadic_builtin_called_with_one_arg() {
+    let builtins = varargs_builtins();
+    assert_eq!(
+      eval_main_with("(fn main () (std.varargs 7))", builtins),
+      SLValue::Int(1)
+    );
+  }
+
+  #[test]
+  fn fixed_arity_builtin_rejects_wrong_arg_count() {
+    // `+` is a fixed binary builtin; calling it with one arg should now be
+    // caught at the call site via the carried arity.
+    let src = "(fn main () (std.+ 1))";
+    let pkg = compile_executable_from_source(
+      &src.to_string(),
+      ("main", "main"),
+      &default_builtins().specs(),
+    )
+    .unwrap();
+    let interp = Interpreter::new(pkg);
+    let mut exec = interp.call_main().unwrap();
+    let err = exec.run_until_done().unwrap_err();
+    assert!(
+      err.contains("expects 2 arg(s) but was called with 1"),
       "unexpected error: {}",
       err
     );
@@ -1025,7 +1111,7 @@ mod test {
         Instruction::PushInt(42),
         Instruction::MakeFunctionRef((0, 0)),
         Instruction::PartialApply(1),
-        Instruction::CallDynamic,
+        Instruction::CallDynamic(0),
         Instruction::Return,
       ],
     };
@@ -1380,7 +1466,7 @@ mod test {
       instructions: vec![
         Instruction::LoadLocal(0),
         Instruction::PushInt(0),
-        Instruction::Call((std_mod, std_eq)),
+        Instruction::Call((std_mod, std_eq), 2),
         Instruction::JumpIfFalse(2),
         Instruction::PushInt(0),
         Instruction::Return,
@@ -1389,8 +1475,8 @@ mod test {
         Instruction::SetLocal(1),
         Instruction::LoadLocal(0),
         Instruction::PushInt(1),
-        Instruction::Call((std_mod, std_sub)),
-        Instruction::Call((0, 0)),
+        Instruction::Call((std_mod, std_sub), 2),
+        Instruction::Call((0, 0), 1),
         Instruction::Return,
       ],
     };
@@ -1399,7 +1485,7 @@ mod test {
       num_params: 0,
       instructions: vec![
         Instruction::PushInt(1000),
-        Instruction::Call((0, 0)), // waste(1000)
+        Instruction::Call((0, 0), 1), // waste(1000)
         Instruction::Return,
       ],
     };
