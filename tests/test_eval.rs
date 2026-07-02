@@ -7,7 +7,7 @@
 //! modules under `src/`.
 
 use rstest::rstest;
-use safelisp::builtins::DEFAULT_BUILTIN_SPECS;
+use safelisp::builtins::default_builtins;
 use safelisp::compiler::compile_executable_from_source;
 use safelisp::interpreter::{Interpreter, SLValue};
 use safelisp::wasm::{self, SLValue as WasmVal};
@@ -25,7 +25,7 @@ enum Val {
 /// Run `source` through the SLC compiler + interpreter and return the result
 /// as a `Val`. Panics on compile or runtime errors.
 fn eval_interpreter(source: &str) -> Val {
-  let pkg = compile_executable_from_source(source, ("main", "main"), DEFAULT_BUILTIN_SPECS)
+  let pkg = compile_executable_from_source(source, ("main", "main"), &default_builtins().specs())
     .unwrap_or_else(|e| panic!("interpreter compile failed: {e}"));
   let interp = Interpreter::new(pkg);
   let mut exec = interp

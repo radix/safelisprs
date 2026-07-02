@@ -2,7 +2,7 @@ use std::time::{Duration, Instant};
 
 use gc_arena::{collect::Collect, Arena, Gc, Mutation, RefLock, Rootable};
 
-use crate::builtins::DefaultBuiltins;
+use crate::builtins::{default_builtins, Builtins};
 use crate::compiler::{Callable, Instruction, LinkedFunction as Function, Package};
 
 /// Per-execution state held inside an `Execution`'s own arena. Each `Execution`
@@ -127,74 +127,25 @@ impl<'gc> SLVal<'gc> {
   }
 }
 
-/// A view of the value stack passed to builtins. It lives entirely inside a
-/// `mutate` callback, so it carries the branded `'gc` lifetime and provides
-/// access to the `Mutation` context for allocating new `Gc` values. The
-/// `'stack` lifetime is the borrow of the underlying value-stack `Vec` and
-/// may be shorter than `'gc`.
-pub struct Stack<'gc, 'stack> {
-  // This is actually kinda weird; it would probably make more sense for the
-  // Mutation to live on the Execution rather than Stack, but for now the only
-  // user is `push`, which is called by builtin functions, which are only passed
-  // the Stack and not the Execution.
-  mc: &'gc Mutation<'gc>,
-  items: &'stack mut Vec<Gc<'gc, SLVal<'gc>>>,
-}
-
-pub type BuiltinResult = Option<Result<(), String>>;
-
-pub trait Builtins {
-  fn call<'gc, 'stack>(
-    &self,
-    mod_name: &str,
-    func_name: &str,
-    stack: &mut Stack<'gc, 'stack>,
-  ) -> BuiltinResult;
-}
-
-impl<'gc, 'stack> Stack<'gc, 'stack> {
-  pub fn pop(&mut self) -> Result<Gc<'gc, SLVal<'gc>>, String> {
-    self
-      .items
-      .pop()
-      .ok_or_else(|| "POP on an empty stack".to_string())
-  }
-  /// Allocate a fresh `Gc` pointer for a SLVal and push it onto the stack.
-  pub fn push(&mut self, value: SLVal<'gc>) {
-    self.items.push(Gc::new(self.mc, value));
-  }
-  pub fn peek(&self) -> Result<Gc<'gc, SLVal<'gc>>, String> {
-    self
-      .items
-      .last()
-      .copied()
-      .ok_or_else(|| "PEEK on an empty stack".to_string())
-  }
-}
-
-pub struct Interpreter<B> {
+pub struct Interpreter {
   package: Package,
-  builtins: B,
+  builtins: Builtins,
 }
 
-impl<B> Interpreter<B> {
-  pub fn with_builtins(package: Package, builtins: B) -> Self {
+impl Interpreter {
+  pub fn with_builtins(package: Package, builtins: Builtins) -> Self {
     Interpreter { package, builtins }
   }
-}
 
-impl Interpreter<DefaultBuiltins> {
+  /// Construct an interpreter that will run with [`default_builtins`].
   pub fn new(package: Package) -> Self {
-    Interpreter::with_builtins(package, DefaultBuiltins)
+    Interpreter::with_builtins(package, default_builtins())
   }
 }
 
-impl<B> Interpreter<B>
-where
-  B: Builtins + Clone,
-{
+impl Interpreter {
   /// Set up an `Execution` ready to run `main`.
-  pub fn call_main(&self) -> Result<Execution<B>, String> {
+  pub fn call_main(&self) -> Result<Execution, String> {
     if let Some((module, function)) = self.package.main {
       let callable = self
         .package
@@ -218,7 +169,7 @@ where
   /// Set up an `Execution` ready to call `slval`. The `SLValue` is deep-copied
   /// into the new execution's arena, so a value produced by one execution can
   /// be fed into any other execution (or the same one).
-  pub fn call_slval(&self, slval: SLValue) -> Result<Execution<B>, String> {
+  pub fn call_slval(&self, slval: SLValue) -> Result<Execution, String> {
     let mut exec = Execution::new(self.package.clone(), self.builtins.clone());
     exec.push_and_call_dynamic(slval)?;
     Ok(exec)
@@ -242,15 +193,15 @@ pub enum Status {
 /// `Arena` holds the value stack and call frames branded with an invariant
 /// `'gc` lifetime; values that must cross the arena boundary (such as the
 /// result of `run`) are deep-copied to the arena-agnostic `SLValue`.
-pub struct Execution<B> {
+pub struct Execution {
   arena: Arena<Rootable![ExecRoot<'_>]>,
   package: Package,
-  builtins: B,
+  builtins: Builtins,
   pub executed: u64,
 }
 
-impl<B: Builtins + Clone> Execution<B> {
-  pub fn new(package: Package, builtins: B) -> Self {
+impl Execution {
+  pub fn new(package: Package, builtins: Builtins) -> Self {
     let arena = Arena::new(|_mc| ExecRoot {
       stack: Vec::new(),
       frames: Vec::new(),
@@ -410,7 +361,7 @@ impl<'gc> ExecRoot<'gc> {
     &mut self,
     mc: &'gc Mutation<'gc>,
     package: &Package,
-    builtins: &impl Builtins,
+    builtins: &Builtins,
     start: u64,
     n: u64,
     executed: &mut u64,
@@ -432,7 +383,7 @@ impl<'gc> ExecRoot<'gc> {
     &mut self,
     mc: &'gc Mutation<'gc>,
     package: &Package,
-    builtins: &impl Builtins,
+    builtins: &Builtins,
     executed: &mut u64,
   ) -> Result<SLValue, String> {
     while !self.is_done() {
@@ -449,7 +400,7 @@ impl<'gc> ExecRoot<'gc> {
     &mut self,
     mc: &'gc Mutation<'gc>,
     package: &Package,
-    builtins: &impl Builtins,
+    builtins: &Builtins,
     deadline: Instant,
     executed: &mut u64,
   ) -> Result<Status, String> {
@@ -469,7 +420,7 @@ impl<'gc> ExecRoot<'gc> {
     &mut self,
     mc: &'gc Mutation<'gc>,
     package: &Package,
-    builtins: &impl Builtins,
+    builtins: &Builtins,
     executed: &mut u64,
   ) -> Result<(), String> {
     *executed = executed.saturating_add(1);
@@ -609,7 +560,7 @@ impl<'gc> ExecRoot<'gc> {
     &mut self,
     mc: &'gc Mutation<'gc>,
     package: &Package,
-    builtins: &impl Builtins,
+    builtins: &Builtins,
     mod_index: u32,
     func_index: u32,
   ) -> Result<(), String> {
@@ -624,13 +575,25 @@ impl<'gc> ExecRoot<'gc> {
         self.enter_function(mc, func.clone(), vec![])?;
       }
       Callable::Builtin => {
-        let mut stack = Stack {
-          mc,
-          items: &mut self.stack,
-        };
-        builtins
-          .call(module_name, func_name, &mut stack)
-          .ok_or_else(|| format!("No function named {}", func_name))??;
+        let builtin = builtins
+          .lookup(module_name, func_name)
+          .ok_or_else(|| format!("No builtin {}.{}", module_name, func_name))?;
+        // Variadic builtins (num_params == None) aren't supported yet — they
+        // need arity on the `Call` instruction (the variadic-builtins TODO).
+        let n = builtin.spec().num_params.ok_or_else(|| {
+          format!(
+            "variadic builtin {}.{} can't be called yet",
+            module_name, func_name
+          )
+        })? as usize;
+        // Args were pushed left-to-right; popping gives reverse order.
+        let mut args = Vec::with_capacity(n);
+        for _ in 0..n {
+          args.push(self.pop()?);
+        }
+        args.reverse();
+        let result = builtin.call(&args)?;
+        self.stack.push(Gc::new(mc, result));
       }
     }
     Ok(())
@@ -644,7 +607,7 @@ impl<'gc> ExecRoot<'gc> {
     &mut self,
     mc: &'gc Mutation<'gc>,
     package: &Package,
-    builtins: &impl Builtins,
+    builtins: &Builtins,
   ) -> Result<(), String> {
     let callable = self.pop()?;
     match &*callable {
@@ -703,14 +666,17 @@ impl<'gc> ExecRoot<'gc> {
 #[cfg(test)]
 mod test {
   use super::*;
-  use crate::builtins::{BuiltinSpec, DefaultBuiltins, DEFAULT_BUILTIN_SPECS};
+  use crate::builtins::{default_builtins, Builtin, Builtins};
   use crate::compiler::{self, *};
   use std::time::Duration;
 
   fn eval_main(source: &str) -> SLValue {
-    let pkg =
-      compile_executable_from_source(&source.to_string(), ("main", "main"), DEFAULT_BUILTIN_SPECS)
-        .unwrap();
+    let pkg = compile_executable_from_source(
+      &source.to_string(),
+      ("main", "main"),
+      &default_builtins().specs(),
+    )
+    .unwrap();
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
     exec.run_until_done().unwrap()
@@ -779,34 +745,15 @@ mod test {
 
   #[test]
   fn extending_builtins() {
-    #[derive(Clone)]
-    struct MyBuiltins;
-    impl Builtins for MyBuiltins {
-      fn call<'gc, 'stack>(
-        &self,
-        _mod_name: &str,
-        _name: &str,
-        stack: &mut Stack<'gc, 'stack>,
-      ) -> BuiltinResult {
-        let top = stack.pop().ok()?;
-        if let SLVal::Int(n) = &*top {
-          stack.push(SLVal::Int(n + 2));
-          Some(Ok(()))
-        } else {
-          Some(Err("nope".to_string()))
-        }
-      }
-    }
-
+    let builtins = Builtins::new().with_builtin(Builtin::unary("main", "add2", |a| match &*a {
+      SLVal::Int(n) => Ok(SLVal::Int(n + 2)),
+      other => Err(format!("nope: {:?}", other)),
+    }));
     let source = "(fn main () (add2 3))".to_string();
-    let specs = [BuiltinSpec {
-      module: "main",
-      name: "add2",
-      num_params: Some(1),
-    }];
-    let package = compile_executable_from_source(&source, ("main", "main"), &specs).unwrap();
+    let package =
+      compile_executable_from_source(&source, ("main", "main"), &builtins.specs()).unwrap();
 
-    let interpreter = Interpreter::with_builtins(package, MyBuiltins);
+    let interpreter = Interpreter::with_builtins(package, builtins);
     let mut exec = interpreter.call_main().unwrap();
     assert_eq!(exec.run_until_done().unwrap(), SLValue::Int(5));
   }
@@ -866,7 +813,8 @@ mod test {
     "
     .to_string();
     let pkg =
-      compile_executable_from_source(&source, ("main", "main"), DEFAULT_BUILTIN_SPECS).unwrap();
+      compile_executable_from_source(&source, ("main", "main"), &default_builtins().specs())
+        .unwrap();
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
     assert_eq!(exec.run_until_done().unwrap(), SLValue::Int(1));
@@ -964,7 +912,7 @@ mod test {
       num_params: 0,
       instructions: vec![Instruction::PushInt(7), Instruction::Return],
     };
-    let mut exec = Execution::new(pkg, DefaultBuiltins);
+    let mut exec = Execution::new(pkg, default_builtins());
     exec.enter_function(code, vec![]).unwrap();
     // After pushing the initial frame, there's one frame at ip 0.
     assert_eq!(exec.stack_len(), 0);
@@ -987,7 +935,7 @@ mod test {
       num_params: 0,
       instructions: vec![Instruction::PushInt(99), Instruction::Return],
     };
-    let mut exec = Execution::new(pkg, DefaultBuiltins);
+    let mut exec = Execution::new(pkg, default_builtins());
     exec.enter_function(code, vec![]).unwrap();
     let result = exec.run_until_done().unwrap();
     assert_eq!(result, SLValue::Int(99));
@@ -1003,7 +951,7 @@ mod test {
       num_params: 0,
       instructions: vec![Instruction::PushInt(1)],
     };
-    let mut exec = Execution::new(pkg, DefaultBuiltins);
+    let mut exec = Execution::new(pkg, default_builtins());
     exec.enter_function(code, vec![]).unwrap();
     exec.step().unwrap(); // PushInt
     let err = exec.step().unwrap_err();
@@ -1013,7 +961,7 @@ mod test {
   #[test]
   fn step_with_no_frames_errors() {
     let pkg = Package::default();
-    let mut exec = Execution::new(pkg, DefaultBuiltins);
+    let mut exec = Execution::new(pkg, default_builtins());
     let err = exec.step().unwrap_err();
     assert!(err.contains("no frames"), "unexpected error: {}", err);
   }
@@ -1021,7 +969,7 @@ mod test {
   #[test]
   fn call_dynamic_on_non_callable_errors() {
     let pkg = Package::default();
-    let mut exec = Execution::new(pkg, DefaultBuiltins);
+    let mut exec = Execution::new(pkg, default_builtins());
     let err = exec
       .push_and_call_dynamic(SLValue::Int(3))
       .expect_err("expected an error calling a non-callable");
@@ -1036,7 +984,7 @@ mod test {
       num_params: 0,
       instructions: vec![Instruction::PushInt(1), Instruction::DerefCell],
     };
-    let mut exec = Execution::new(pkg, DefaultBuiltins);
+    let mut exec = Execution::new(pkg, default_builtins());
     exec.enter_function(code, vec![]).unwrap();
     exec.step().unwrap(); // PushInt
     let err = exec.step().unwrap_err(); // DerefCell
@@ -1051,7 +999,7 @@ mod test {
       num_params: 0,
       instructions: vec![Instruction::Call((0, 0))],
     };
-    let mut exec = Execution::new(pkg, DefaultBuiltins);
+    let mut exec = Execution::new(pkg, default_builtins());
     exec.enter_function(code, vec![]).unwrap();
     let err = exec.step().unwrap_err();
     assert!(
@@ -1110,13 +1058,16 @@ mod test {
         b)
       (fn main () (waste) (waste) (waste))
     ";
-    let pkg =
-      compile_executable_from_source(&source.to_string(), ("main", "main"), DEFAULT_BUILTIN_SPECS)
-        .unwrap();
+    let pkg = compile_executable_from_source(
+      &source.to_string(),
+      ("main", "main"),
+      &default_builtins().specs(),
+    )
+    .unwrap();
     let (mod_idx, fn_idx) = pkg.main.unwrap();
     let function = pkg.get_function(mod_idx, fn_idx).unwrap().clone();
     if let Callable::Function(function) = function {
-      let mut exec = Execution::new(pkg, DefaultBuiltins);
+      let mut exec = Execution::new(pkg, default_builtins());
       exec.enter_function(function, vec![]).unwrap();
       let result = exec.run_until_done().unwrap();
       assert_eq!(result, SLValue::Int(2));
@@ -1130,20 +1081,13 @@ mod test {
     // If the else branch were evaluated, calling the unimplemented
     // `boom` builtin would error at runtime. Since the then branch is selected,
     // `boom` is never called and the program returns 42 cleanly. `boom` is
-    // registered as a builtin spec so the call links, but its behavior is
-    // never invoked.
+    // registered as a builtin (with an erroring handler) so the call links,
+    // but its behavior is never invoked.
     let source = "(fn main () (if (std.== 1 1) 42 (boom 0)))";
-    let specs: Vec<BuiltinSpec> = DEFAULT_BUILTIN_SPECS
-      .iter()
-      .copied()
-      .chain([BuiltinSpec {
-        module: "main",
-        name: "boom",
-        num_params: Some(1),
-      }])
-      .collect();
-    let pkg = compile_executable_from_source(source, ("main", "main"), &specs).unwrap();
-    let interp = Interpreter::new(pkg);
+    let builtins =
+      default_builtins().with_builtin(Builtin::unary("main", "boom", |_| Err("boom".into())));
+    let pkg = compile_executable_from_source(source, ("main", "main"), &builtins.specs()).unwrap();
+    let interp = Interpreter::with_builtins(pkg, builtins);
     let mut exec = interp.call_main().unwrap();
     assert_eq!(exec.run_until_done().unwrap(), SLValue::Int(42));
   }
@@ -1151,9 +1095,12 @@ mod test {
   #[test]
   fn if_rejects_non_bool_condition() {
     let source = "(fn main () (if 1 42 0))";
-    let pkg =
-      compile_executable_from_source(&source.to_string(), ("main", "main"), DEFAULT_BUILTIN_SPECS)
-        .unwrap();
+    let pkg = compile_executable_from_source(
+      &source.to_string(),
+      ("main", "main"),
+      &default_builtins().specs(),
+    )
+    .unwrap();
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
     let err = exec.run_until_done().unwrap_err();
@@ -1163,9 +1110,12 @@ mod test {
   #[test]
   fn run_completes_in_one_call() {
     let source = "(fn main () 5)";
-    let pkg =
-      compile_executable_from_source(&source.to_string(), ("main", "main"), DEFAULT_BUILTIN_SPECS)
-        .unwrap();
+    let pkg = compile_executable_from_source(
+      &source.to_string(),
+      ("main", "main"),
+      &default_builtins().specs(),
+    )
+    .unwrap();
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
     let status = exec.run(1_000).unwrap();
@@ -1177,9 +1127,12 @@ mod test {
     let source = "
       (fn main ()
         (let a 1) (let b 2) (let c 3) (let d 4) 5)";
-    let pkg =
-      compile_executable_from_source(&source.to_string(), ("main", "main"), DEFAULT_BUILTIN_SPECS)
-        .unwrap();
+    let pkg = compile_executable_from_source(
+      &source.to_string(),
+      ("main", "main"),
+      &default_builtins().specs(),
+    )
+    .unwrap();
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
     let status = exec.run(3).unwrap();
@@ -1194,9 +1147,12 @@ mod test {
   fn run_hits_limit_exactly() {
     // (std.+ 1 2) is 4 bytecodes: PushInt(1), PushInt(2), Call(std.+), Return.
     let source = "(fn main () (std.+ 1 2))";
-    let pkg =
-      compile_executable_from_source(&source.to_string(), ("main", "main"), DEFAULT_BUILTIN_SPECS)
-        .unwrap();
+    let pkg = compile_executable_from_source(
+      &source.to_string(),
+      ("main", "main"),
+      &default_builtins().specs(),
+    )
+    .unwrap();
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
     let status = exec.run(4).unwrap();
@@ -1207,9 +1163,12 @@ mod test {
   #[test]
   fn run_limited_mid_program_pauses() {
     let source = "(fn main () (std.+ 1 2))";
-    let pkg =
-      compile_executable_from_source(&source.to_string(), ("main", "main"), DEFAULT_BUILTIN_SPECS)
-        .unwrap();
+    let pkg = compile_executable_from_source(
+      &source.to_string(),
+      ("main", "main"),
+      &default_builtins().specs(),
+    )
+    .unwrap();
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
     let status = exec.run(2).unwrap();
@@ -1222,9 +1181,12 @@ mod test {
   #[test]
   fn infinite_recursion_is_bounded_by_run_budget() {
     let source = "(fn loop (n) (loop n)) (fn main () (loop 1))";
-    let pkg =
-      compile_executable_from_source(&source.to_string(), ("main", "main"), DEFAULT_BUILTIN_SPECS)
-        .unwrap();
+    let pkg = compile_executable_from_source(
+      &source.to_string(),
+      ("main", "main"),
+      &default_builtins().specs(),
+    )
+    .unwrap();
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
     let status = exec.run(10_000).unwrap();
@@ -1235,9 +1197,12 @@ mod test {
   #[test]
   fn executed_count_is_cumulative() {
     let source = "(fn main () (let a 1) (let b 2) (let c 3) 4)";
-    let pkg =
-      compile_executable_from_source(&source.to_string(), ("main", "main"), DEFAULT_BUILTIN_SPECS)
-        .unwrap();
+    let pkg = compile_executable_from_source(
+      &source.to_string(),
+      ("main", "main"),
+      &default_builtins().specs(),
+    )
+    .unwrap();
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
     exec.run(2).unwrap();
@@ -1257,9 +1222,12 @@ mod test {
     // result. Each `main` returns its distinct constant so we can tell them
     // apart.
     let source = "(fn main () (let a 1) (let b 2) 3)";
-    let pkg =
-      compile_executable_from_source(&source.to_string(), ("main", "main"), DEFAULT_BUILTIN_SPECS)
-        .unwrap();
+    let pkg = compile_executable_from_source(
+      &source.to_string(),
+      ("main", "main"),
+      &default_builtins().specs(),
+    )
+    .unwrap();
     let interp = Interpreter::new(pkg);
     let mut exec_a = interp.call_main().unwrap();
     let mut exec_b = interp.call_main().unwrap();
@@ -1281,9 +1249,12 @@ mod test {
   fn run_for_duration_completes() {
     // A trivial program completes well within a generous duration.
     let source = "(fn main () 5)";
-    let pkg =
-      compile_executable_from_source(&source.to_string(), ("main", "main"), DEFAULT_BUILTIN_SPECS)
-        .unwrap();
+    let pkg = compile_executable_from_source(
+      &source.to_string(),
+      ("main", "main"),
+      &default_builtins().specs(),
+    )
+    .unwrap();
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
     let status = exec.run_for_duration(Duration::from_secs(1)).unwrap();
@@ -1294,9 +1265,12 @@ mod test {
   fn run_for_duration_pauses_on_infinite_recursion() {
     // A non-terminating program is bounded by the time budget and pauses.
     let source = "(fn loop (n) (loop n)) (fn main () (loop 1))";
-    let pkg =
-      compile_executable_from_source(&source.to_string(), ("main", "main"), DEFAULT_BUILTIN_SPECS)
-        .unwrap();
+    let pkg = compile_executable_from_source(
+      &source.to_string(),
+      ("main", "main"),
+      &default_builtins().specs(),
+    )
+    .unwrap();
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
     let status = exec.run_for_duration(Duration::from_millis(50)).unwrap();
@@ -1563,9 +1537,12 @@ mod test {
         (let x 1)
         (set! x 2))
     ";
-    let pkg =
-      compile_executable_from_source(&source.to_string(), ("main", "main"), DEFAULT_BUILTIN_SPECS)
-        .unwrap();
+    let pkg = compile_executable_from_source(
+      &source.to_string(),
+      ("main", "main"),
+      &default_builtins().specs(),
+    )
+    .unwrap();
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
     let err = exec.run_until_done().unwrap_err();
@@ -1595,9 +1572,12 @@ mod test {
         self)
       (fn main () (make-cycle) 99)
     ";
-    let pkg =
-      compile_executable_from_source(&source.to_string(), ("main", "main"), DEFAULT_BUILTIN_SPECS)
-        .unwrap();
+    let pkg = compile_executable_from_source(
+      &source.to_string(),
+      ("main", "main"),
+      &default_builtins().specs(),
+    )
+    .unwrap();
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
 

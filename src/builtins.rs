@@ -1,11 +1,11 @@
-use crate::interpreter::{BuiltinResult, Builtins, SLVal, Stack};
+use std::sync::Arc;
+
+use gc_arena::Gc;
+
+use crate::interpreter::SLVal;
 
 /// A compile-time description of a builtin: which module/name it lives in and
-/// how many arguments it takes. The compiler/linker uses this to register
-/// `Callable::Builtin` entries in the right module's function table so that
-/// `Call` instructions can resolve; the *behavior* is still supplied at
-/// runtime by the `Builtins` trait impl. `num_params` is `None` for variadic
-/// builtins (reserved for future use — see the variadic-builtins TODO item).
+/// how many arguments it takes. `num_params` is `None` for variadic builtins.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct BuiltinSpec {
   pub module: &'static str,
@@ -13,95 +13,142 @@ pub struct BuiltinSpec {
   pub num_params: Option<u16>,
 }
 
-/// The default builtin registry: the four `std` builtins implemented by
-/// `DefaultBuiltins`. This must be kept up-to-date with `DefaultBuiltins::call`.
-pub const DEFAULT_BUILTIN_SPECS: &[BuiltinSpec] = &[
-  BuiltinSpec {
-    module: "std",
-    name: "+",
-    num_params: Some(2),
-  },
-  BuiltinSpec {
-    module: "std",
-    name: "-",
-    num_params: Some(2),
-  },
-  BuiltinSpec {
-    module: "std",
-    name: "==",
-    num_params: Some(2),
-  },
-  BuiltinSpec {
-    module: "std",
-    name: "concat",
-    num_params: Some(2),
-  },
-];
+/// A builtin's runtime handler. Takes the evaluated arguments (as `Gc` pointers
+/// into the current execution's arena) and returns either a result value or a
+/// runtime error string.
+///
+/// The `for<'gc>` higher-ranked bound lets one `'static` handler serve any
+/// execution's arena.
+pub type HostFn = Arc<dyn for<'gc> Fn(&[Gc<'gc, SLVal<'gc>>]) -> Result<SLVal<'gc>, String>>;
 
+/// A builtin: metadata ([`BuiltinSpec`]) plus its handler ([`HostFn`]).
 #[derive(Clone)]
-pub struct DefaultBuiltins;
+pub struct Builtin {
+  spec: BuiltinSpec,
+  func: HostFn,
+}
 
-impl Builtins for DefaultBuiltins {
-  fn call<'gc, 'stack>(
-    &self,
-    mod_name: &str,
-    name: &str,
-    stack: &mut Stack<'gc, 'stack>,
-  ) -> BuiltinResult {
-    // This must be kept up-to-date with DEFAULT_BUILTIN_SPECS.
-    match (mod_name, name) {
-      ("std", "+") => Some(builtin_add(stack)),
-      ("std", "-") => Some(builtin_sub(stack)),
-      ("std", "==") => Some(builtin_eq(stack)),
-      ("std", "concat") => Some(builtin_concat(stack)),
-      _ => None,
+impl Builtin {
+  pub fn spec(&self) -> BuiltinSpec {
+    self.spec
+  }
+
+  /// Invoke this builtin's handler with the given arguments.
+  pub fn call<'gc>(&self, args: &[Gc<'gc, SLVal<'gc>>]) -> Result<SLVal<'gc>, String> {
+    (self.func)(args)
+  }
+
+  /// A unary (one-arg) builtin.
+  pub fn unary(
+    module: &'static str,
+    name: &'static str,
+    func: impl for<'gc> Fn(Gc<'gc, SLVal<'gc>>) -> Result<SLVal<'gc>, String> + 'static,
+  ) -> Self {
+    Builtin {
+      spec: BuiltinSpec {
+        module,
+        name,
+        num_params: Some(1),
+      },
+      func: Arc::new(move |args| func(args[0])),
+    }
+  }
+
+  /// A binary (two-arg) builtin. `func` receives `(left, right)`.
+  pub fn binary(
+    module: &'static str,
+    name: &'static str,
+    func: impl for<'gc> Fn(Gc<'gc, SLVal<'gc>>, Gc<'gc, SLVal<'gc>>) -> Result<SLVal<'gc>, String>
+      + 'static,
+  ) -> Self {
+    Builtin {
+      spec: BuiltinSpec {
+        module,
+        name,
+        num_params: Some(2),
+      },
+      func: Arc::new(move |args| func(args[0], args[1])),
+    }
+  }
+
+  /// A ternary (three-arg) builtin.
+  pub fn ternary(
+    module: &'static str,
+    name: &'static str,
+    func: impl for<'gc> Fn(
+        Gc<'gc, SLVal<'gc>>,
+        Gc<'gc, SLVal<'gc>>,
+        Gc<'gc, SLVal<'gc>>,
+      ) -> Result<SLVal<'gc>, String>
+      + 'static,
+  ) -> Self {
+    Builtin {
+      spec: BuiltinSpec {
+        module,
+        name,
+        num_params: Some(3),
+      },
+      func: Arc::new(move |args| func(args[0], args[1], args[2])),
     }
   }
 }
 
-fn builtin_add<'gc, 'stack>(stack: &mut Stack<'gc, 'stack>) -> Result<(), String> {
-  // Pop both operands before borrowing `mc` from `stack`, to avoid overlapping
-  // the immutable `mc` borrow with the mutable `pop`/`push` borrows.
-  let one = stack.pop()?;
-  let two = stack.pop()?;
-  let result = match (&*one, &*two) {
-    (SLVal::Int(one), SLVal::Int(two)) => SLVal::Int(one + two),
-    (SLVal::Float(one), SLVal::Float(two)) => SLVal::Float(one + two),
-    _ => return Err(format!("Couldn't add {:?} and {:?}", one, two)),
-  };
-  stack.push(result);
-  Ok(())
+/// A registry of builtins available to a program. The compiler reads the
+/// [`BuiltinSpec`]s (via [`Builtins::specs`]) to register `Callable::Builtin`
+/// slots; the interpreter looks up the handler (via [`Builtins::lookup`]) at
+/// runtime. Mirrors the WASM backend's `wasm::Builtins`.
+#[derive(Clone, Default)]
+pub struct Builtins {
+  entries: Vec<Builtin>,
 }
 
-fn builtin_sub<'gc, 'stack>(stack: &mut Stack<'gc, 'stack>) -> Result<(), String> {
-  let one = stack.pop()?;
-  let two = stack.pop()?;
-  let result = match (&*one, &*two) {
-    (SLVal::Int(one), SLVal::Int(two)) => SLVal::Int(two - one),
-    (SLVal::Float(one), SLVal::Float(two)) => SLVal::Float(two - one),
-    _ => return Err(format!("Couldn't sub {:?} and {:?}", one, two)),
-  };
-  stack.push(result);
-  Ok(())
+impl Builtins {
+  pub fn new() -> Self {
+    Self::default()
+  }
+
+  /// Register a builtin (builder style).
+  pub fn with_builtin(mut self, builtin: Builtin) -> Self {
+    self.entries.push(builtin);
+    self
+  }
+
+  pub fn iter(&self) -> impl Iterator<Item = &Builtin> {
+    self.entries.iter()
+  }
+
+  /// The specs of all registered builtins, for the compiler to inject as
+  /// `Callable::Builtin` slots.
+  pub fn specs(&self) -> Vec<BuiltinSpec> {
+    self.entries.iter().map(|b| b.spec).collect()
+  }
+
+  /// Look up a builtin by `(module, name)`.
+  pub fn lookup(&self, module: &str, name: &str) -> Option<&Builtin> {
+    self
+      .entries
+      .iter()
+      .find(|b| b.spec.module == module && b.spec.name == name)
+  }
 }
 
-fn builtin_eq<'gc, 'stack>(stack: &mut Stack<'gc, 'stack>) -> Result<(), String> {
-  let one = stack.pop()?;
-  let two = stack.pop()?;
-  let result = SLVal::Bool(one == two);
-  stack.push(result);
-  Ok(())
-}
-
-fn builtin_concat<'gc, 'stack>(stack: &mut Stack<'gc, 'stack>) -> Result<(), String> {
-  // Operands are popped in reverse order of how they were pushed, so `one`
-  // is the right-hand argument and `two` is the left-hand argument.
-  let one = stack.pop()?;
-  let two = stack.pop()?;
-  let result = match (&*one, &*two) {
-    (SLVal::String(one), SLVal::String(two)) => SLVal::String(format!("{two}{one}")),
-    _ => return Err(format!("Couldn't concat {:?} and {:?}", one, two)),
-  };
-  stack.push(result);
-  Ok(())
+/// The default builtin registry.
+pub fn default_builtins() -> Builtins {
+  Builtins::new()
+    .with_builtin(Builtin::binary("std", "+", |a, b| match (&*a, &*b) {
+      (SLVal::Int(x), SLVal::Int(y)) => Ok(SLVal::Int(x + y)),
+      (SLVal::Float(x), SLVal::Float(y)) => Ok(SLVal::Float(x + y)),
+      _ => Err(format!("Couldn't add {:?} and {:?}", a, b)),
+    }))
+    .with_builtin(Builtin::binary("std", "-", |a, b| match (&*a, &*b) {
+      // `a` is the left operand, `b` is the right operand: left - right.
+      (SLVal::Int(x), SLVal::Int(y)) => Ok(SLVal::Int(x - y)),
+      (SLVal::Float(x), SLVal::Float(y)) => Ok(SLVal::Float(x - y)),
+      _ => Err(format!("Couldn't sub {:?} and {:?}", a, b)),
+    }))
+    .with_builtin(Builtin::binary("std", "==", |a, b| Ok(SLVal::Bool(a == b))))
+    .with_builtin(Builtin::binary("std", "concat", |a, b| match (&*a, &*b) {
+      (SLVal::String(x), SLVal::String(y)) => Ok(SLVal::String(format!("{x}{y}"))),
+      _ => Err(format!("Couldn't concat {:?} and {:?}", a, b)),
+    }))
 }
