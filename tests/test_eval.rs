@@ -148,10 +148,7 @@ fn register_one(linker: &mut Linker<()>, b: &safelisp::wasm::Builtin) {
   "(use \"src/std\") (fn main () (if (std.== 1 1) 7 8))",
   Val::Int(7)
 )]
-#[case::if_branches_can_use_let_variables(
-  "(fn main () (let a 10) (if true a 0))",
-  Val::Int(10)
-)]
+#[case::if_branches_can_use_let_variables("(fn main () (let a 10) (if true a 0))", Val::Int(10))]
 #[case::calls_same_module_function("(fn id (a) a) (fn main () (id 99))", Val::Int(99))]
 #[case::calls_function_with_multiple_args(
   "(fn first (a b) a) (fn main () (first 5 6))",
@@ -161,8 +158,12 @@ fn register_one(linker: &mut Linker<()>, b: &safelisp::wasm::Builtin) {
 #[case::std_add("(use \"src/std\") (fn main () (std.+ 1 2))", Val::Int(3))]
 #[case::std_sub("(use \"src/std\") (fn main () (std.- 1 2))", Val::Int(-1))]
 #[case::std_add_floats("(use \"src/std\") (fn main () (std.+ 1.5 2.5))", Val::Float(4.0))]
-#[case::std_eq_true("(use \"src/std\") (fn main () (std.== 3 3))", Val::Bool(true))]
-#[case::std_eq_false("(use \"src/std\") (fn main () (std.== 3 4))", Val::Bool(false))]
+#[case::std_eq_int_true("(use \"src/std\") (fn main () (std.== 3 3))", Val::Bool(true))]
+#[case::std_eq_int_false("(use \"src/std\") (fn main () (std.== 3 4))", Val::Bool(false))]
+#[case::std_eq_float_true("(use \"src/std\") (fn main () (std.== 1.5 1.5))", Val::Bool(true))]
+#[case::std_eq_float_false("(use \"src/std\") (fn main () (std.== 1.5 2.5))", Val::Bool(false))]
+#[case::std_eq_bool_true("(use \"src/std\") (fn main () (std.== true true))", Val::Bool(true))]
+#[case::std_eq_bool_false("(use \"src/std\") (fn main () (std.== true false))", Val::Bool(false))]
 #[case::arithmetic_in_if(
   "(use \"src/std\") (fn main () (if (std.== (std.+ 1 1) 2) 100 200))",
   Val::Int(100)

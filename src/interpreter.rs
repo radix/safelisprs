@@ -748,6 +748,34 @@ mod test {
   }
 
   #[test]
+  fn std_eq_strings() {
+    assert_eq!(
+      eval_main("(use \"src/std\") (fn main () (std.== \"abc\" \"abc\"))"),
+      SLValue::Bool(true)
+    );
+    assert_eq!(
+      eval_main("(use \"src/std\") (fn main () (std.== \"abc\" \"abd\"))"),
+      SLValue::Bool(false)
+    );
+  }
+
+  #[test]
+  fn std_concat_strings() {
+    assert_eq!(
+      eval_main("(use \"src/std\") (fn main () (std.concat \"foo\" \"bar\"))"),
+      SLValue::String("foobar".to_string())
+    );
+    assert_eq!(
+      eval_main("(use \"src/std\") (fn main () (std.concat \"ab\" \"CDE\"))"),
+      SLValue::String("abCDE".to_string())
+    );
+    assert_eq!(
+      eval_main("(use \"src/std\") (fn main () (std.concat \"\" \"x\"))"),
+      SLValue::String("x".to_string())
+    );
+  }
+
+  #[test]
   fn extending_builtins() {
     #[derive(Clone)]
     struct MyBuiltins;
