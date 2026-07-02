@@ -14,7 +14,7 @@ use crate::compiler::{Callable, Instruction, LinkedFunction as Function, Package
 /// single `mutate_root` callback.
 #[derive(Collect, Default)]
 #[collect(no_drop)]
-struct ExecRoot<'gc> {
+pub(crate) struct ExecRoot<'gc> {
   stack: Vec<Gc<'gc, SLVal<'gc>>>,
   frames: Vec<Frame<'gc>>,
 }
@@ -352,6 +352,12 @@ impl<'gc> ExecRoot<'gc> {
     self.frames.is_empty()
   }
 
+  /// Push a `Gc<SLVal>` onto the execution's value stack. Used by
+  /// [`Builtin::call`] to push a builtin's result.
+  pub(crate) fn push_gc(&mut self, val: Gc<'gc, SLVal<'gc>>) {
+    self.stack.push(val);
+  }
+
   /// Pop a value off the execution's value stack.
   fn pop(&mut self) -> Result<Gc<'gc, SLVal<'gc>>, String> {
     self
@@ -613,8 +619,12 @@ impl<'gc> ExecRoot<'gc> {
           args.push(self.pop()?);
         }
         args.reverse();
-        let result = builtin.call(mc, &args)?;
-        self.stack.push(Gc::new(mc, result));
+        let mut ctx = HostCtx {
+          mc,
+          package,
+          builtins,
+        };
+        builtin.call(self, &mut ctx, &args)?;
       }
     }
     Ok(())
@@ -694,6 +704,71 @@ impl<'gc> ExecRoot<'gc> {
       ip: 0,
     });
     Ok(())
+  }
+}
+
+/// The runtime context passed to a builtin handler ([`crate::builtins::HostFn`]).
+/// It carries the GC `Mutation` context and the `Package` / `Builtins`
+/// registries — enough for a builtin to look up callables and allocate values.
+/// The mutable `ExecRoot` reference is passed separately to the handler so the
+/// borrow checker can track its lifetime independently of the `'gc` invariance
+/// (see [`HostCtx::call`]).
+///
+/// `package` and `builtins` get their own lifetime `'a` (independent of `'gc`)
+/// because they are borrows from the `Execution`, not from the arena.
+pub struct HostCtx<'gc, 'a> {
+  mc: &'gc Mutation<'gc>,
+  package: &'a Package,
+  builtins: &'a Builtins,
+}
+
+impl<'gc, 'a> HostCtx<'gc, 'a> {
+  pub fn mc(&self) -> &'gc Mutation<'gc> {
+    self.mc
+  }
+
+  /// Synchronously invoke a SafeLisp callable (`FunctionRef` or `Partial`)
+  /// with the given arguments, returning its result. This pushes a frame for
+  /// the callable, drives a sub-loop until that frame returns, and pops the
+  /// result off the stack — so the builtin gets the return value before
+  /// control returns to the caller's bytecode dispatch loop.
+  ///
+  /// `root` is passed explicitly (rather than stored in `HostCtx`) so the
+  /// borrow checker can track the `&mut ExecRoot<'gc>` lifetime independently
+  /// of `'gc`'s invariance.
+  ///
+  /// The `callable` must be a `FunctionRef` or `Partial` value; anything else
+  /// is a runtime error. The `args` are pushed left-to-right (so the first arg
+  /// is the callable's first parameter).
+  pub(crate) fn call(
+    &self,
+    root: &mut ExecRoot<'gc>,
+    callable: Gc<'gc, SLVal<'gc>>,
+    args: &[Gc<'gc, SLVal<'gc>>],
+  ) -> Result<Gc<'gc, SLVal<'gc>>, String> {
+    // Remember the current frame depth so we know when the sub-call has
+    // returned: we push a frame for the callable, run until the frame stack
+    // is back to the original depth, then the result is on top of the stack.
+    let depth_before = root.frames.len();
+
+    // Push args left-to-right (the interpreter pops in reverse for the callee).
+    for arg in args {
+      root.stack.push(*arg);
+    }
+    // Push the callable and invoke call_dynamic with the matching arity.
+    root.stack.push(callable);
+    root.call_dynamic(self.mc, self.package, self.builtins, args.len() as u16)?;
+
+    // Drive the sub-loop: step until the frame we just pushed has returned
+    // (i.e. the frame stack is back to `depth_before`). Each step may push
+    // further frames (nested calls), but the net effect is that when
+    // `frames.len() == depth_before`, the sub-call's result is on TOS.
+    while root.frames.len() > depth_before {
+      root.step(self.mc, self.package, self.builtins, &mut 0)?;
+    }
+
+    // The sub-call's return value is now on top of the stack.
+    root.pop()
   }
 }
 
