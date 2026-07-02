@@ -402,6 +402,17 @@ fn compile_expr(
       instructions[jmp_else] = Instruction::JumpIfFalse(else_offset);
       instructions[jmp_end] = Instruction::Jump(end_offset);
     }
+    AST::Block(body) => {
+      // Evaluate each sub-expression; discard all but the last by popping,
+      // and leave the last on the stack as the block's value.
+      let last_idx = body.len().saturating_sub(1);
+      for (i, expr) in body.iter().enumerate() {
+        instructions.extend(compile_expr(module_name, expr, locals)?);
+        if i != last_idx {
+          instructions.push(Instruction::Pop);
+        }
+      }
+    }
     AST::Variable(name) => {
       if !locals.contains_key(name) {
         return Err(format!("Function accesses unbound variable {}", name));

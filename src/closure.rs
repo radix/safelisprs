@@ -306,6 +306,21 @@ fn transform_ast(
       )?;
       Ok(AST::If(Box::new(cond), Box::new(then), Box::new(els)))
     }
+    AST::Block(body) => {
+      let mut new_body = vec![];
+      for expr in body {
+        new_body.push(transform_ast(
+          module_name,
+          expr,
+          environment,
+          locals,
+          captures,
+          cell_vars,
+          lifted,
+        )?);
+      }
+      Ok(AST::Block(new_body))
+    }
     AST::Int(_) | AST::Float(_) | AST::String(_) | AST::Bool(_) | AST::FunctionRef(_, _) => {
       Ok(ast.clone())
     }
@@ -387,6 +402,9 @@ fn patch_cell_access(
       Box::new(patch_cell_access(then, captures, cell_vars, locals)?),
       Box::new(patch_cell_access(els, captures, cell_vars, locals)?),
     )),
+    AST::Block(body) => Ok(AST::Block(patch_cell_accesses(
+      body, captures, cell_vars, locals,
+    )?)),
     AST::DefineFn(_)
     | AST::Int(_)
     | AST::Float(_)

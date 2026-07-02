@@ -31,6 +31,10 @@ pub enum AST {
   FunctionRef(String, String),
   /// Conditional: evaluate `cond`; if truthy, evaluate `then`, else evaluate `els`.
   If(Box<AST>, Box<AST>, Box<AST>),
+  /// A sequence: evaluate each sub-expression in order, discarding all but the
+  /// last, and return the last. Lets a single-expression position (e.g. an `if`
+  /// branch) evaluate multiple expressions for side effects.
+  Block(Vec<AST>),
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -78,6 +82,7 @@ impl AST {
             "fn" => return parse_fn(right),
             "if" => return parse_if(right),
             "set!" => return parse_set(right),
+            "block" => return parse_block(right),
             _ => {}
           }
         }
@@ -108,6 +113,15 @@ fn parse_set(right: &Expr) -> Result<AST, String> {
   let target = AST::from_atoms(&forms[0])?;
   let value = AST::from_atoms(&forms[1])?;
   Ok(AST::SetCell(Box::new(target), Box::new(value)))
+}
+
+fn parse_block(right: &Expr) -> Result<AST, String> {
+  let forms = flatten_list(right)?;
+  if forms.is_empty() {
+    return Err("`block` must have at least one expression".to_string());
+  }
+  let body: Result<Vec<AST>, _> = forms.iter().map(AST::from_atoms).collect();
+  Ok(AST::Block(body?))
 }
 
 fn parse_call(form: &Expr) -> Result<AST, String> {
