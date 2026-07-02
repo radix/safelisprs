@@ -1,5 +1,43 @@
 use crate::interpreter::{BuiltinResult, Builtins, SLVal, Stack};
 
+/// A compile-time description of a builtin: which module/name it lives in and
+/// how many arguments it takes. The compiler/linker uses this to register
+/// `Callable::Builtin` entries in the right module's function table so that
+/// `Call` instructions can resolve; the *behavior* is still supplied at
+/// runtime by the `Builtins` trait impl. `num_params` is `None` for variadic
+/// builtins (reserved for future use — see the variadic-builtins TODO item).
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct BuiltinSpec {
+  pub module: &'static str,
+  pub name: &'static str,
+  pub num_params: Option<u16>,
+}
+
+/// The default builtin registry: the four `std` builtins implemented by
+/// `DefaultBuiltins`. This must be kept up-to-date with `DefaultBuiltins::call`.
+pub const DEFAULT_BUILTIN_SPECS: &[BuiltinSpec] = &[
+  BuiltinSpec {
+    module: "std",
+    name: "+",
+    num_params: Some(2),
+  },
+  BuiltinSpec {
+    module: "std",
+    name: "-",
+    num_params: Some(2),
+  },
+  BuiltinSpec {
+    module: "std",
+    name: "==",
+    num_params: Some(2),
+  },
+  BuiltinSpec {
+    module: "std",
+    name: "concat",
+    num_params: Some(2),
+  },
+];
+
 #[derive(Clone)]
 pub struct DefaultBuiltins;
 
@@ -10,7 +48,7 @@ impl Builtins for DefaultBuiltins {
     name: &str,
     stack: &mut Stack<'gc, 'stack>,
   ) -> BuiltinResult {
-    // This must be kept up-to-date with std.sl
+    // This must be kept up-to-date with DEFAULT_BUILTIN_SPECS.
     match (mod_name, name) {
       ("std", "+") => Some(builtin_add(stack)),
       ("std", "-") => Some(builtin_sub(stack)),

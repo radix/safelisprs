@@ -907,7 +907,7 @@ mod test {
   #[test]
   fn let_then_use_variable() {
     assert_main_eq(
-      "(use \"src/std\") (fn main () (let a 1) (let b 2) (std.+ a b))",
+      "(fn main () (let a 1) (let b 2) (std.+ a b))",
       SLValue::Int(3),
     );
   }
@@ -929,10 +929,7 @@ mod test {
 
   #[test]
   fn if_with_condition_from_call() {
-    assert_main_eq(
-      "(use \"src/std\") (fn main () (if (std.== 1 1) 7 8))",
-      SLValue::Int(7),
-    );
+    assert_main_eq("(fn main () (if (std.== 1 1) 7 8))", SLValue::Int(7));
   }
 
   #[test]
@@ -960,48 +957,33 @@ mod test {
 
   #[test]
   fn std_add() {
-    assert_main_eq(
-      "(use \"src/std\") (fn main () (std.+ 1 2))",
-      SLValue::Int(3),
-    );
+    assert_main_eq("(fn main () (std.+ 1 2))", SLValue::Int(3));
   }
 
   #[test]
   fn std_sub() {
-    assert_main_eq(
-      "(use \"src/std\") (fn main () (std.- 1 2))",
-      SLValue::Int(-1),
-    );
+    assert_main_eq("(fn main () (std.- 1 2))", SLValue::Int(-1));
   }
 
   #[test]
   fn std_eq_true() {
-    assert_main_eq(
-      "(use \"src/std\") (fn main () (std.== 3 3))",
-      SLValue::Bool(true),
-    );
+    assert_main_eq("(fn main () (std.== 3 3))", SLValue::Bool(true));
   }
 
   #[test]
   fn std_eq_false() {
-    assert_main_eq(
-      "(use \"src/std\") (fn main () (std.== 3 4))",
-      SLValue::Bool(false),
-    );
+    assert_main_eq("(fn main () (std.== 3 4))", SLValue::Bool(false));
   }
 
   #[test]
   fn std_add_floats() {
-    assert_main_eq(
-      "(use \"src/std\") (fn main () (std.+ 1.5 2.5))",
-      SLValue::Float(4.0),
-    );
+    assert_main_eq("(fn main () (std.+ 1.5 2.5))", SLValue::Float(4.0));
   }
 
   #[test]
   fn arithmetic_in_if() {
     assert_main_eq(
-      "(use \"src/std\") (fn main () (if (std.== (std.+ 1 1) 2) 100 200))",
+      "(fn main () (if (std.== (std.+ 1 1) 2) 100 200))",
       SLValue::Int(100),
     );
   }
@@ -1009,7 +991,7 @@ mod test {
   #[test]
   fn multiple_lets_and_calls() {
     assert_main_eq(
-      "(use \"src/std\") (fn main () (let a 1) (let b 2) (let c 3) (std.+ a (std.+ b c)))",
+      "(fn main () (let a 1) (let b 2) (let c 3) (std.+ a (std.+ b c)))",
       SLValue::Int(6),
     );
   }
@@ -1017,7 +999,7 @@ mod test {
   #[test]
   fn calls_function_that_calls_another() {
     assert_main_eq(
-      "(use \"src/std\") (fn inc (n) (std.+ n 1)) (fn twice (n) (std.+ (inc n) (inc n))) (fn main () (twice 10))",
+      "(fn inc (n) (std.+ n 1)) (fn twice (n) (std.+ (inc n) (inc n))) (fn main () (twice 10))",
       SLValue::Int(22),
     );
   }
@@ -1025,7 +1007,7 @@ mod test {
   #[test]
   fn recursion_with_base_case() {
     assert_main_eq(
-      "(use \"src/std\") (fn triangle (n) (if (std.== n 0) 0 (std.+ n (triangle (std.- n 1))))) (fn main () (triangle 10))",
+      "(fn triangle (n) (if (std.== n 0) 0 (std.+ n (triangle (std.- n 1))))) (fn main () (triangle 10))",
       SLValue::Int(55),
     );
   }
@@ -1033,7 +1015,7 @@ mod test {
   #[test]
   fn deep_recursion() {
     assert_main_eq(
-      "(use \"src/std\") (fn triangle (n) (if (std.== n 0) 0 (std.+ n (triangle (std.- n 1))))) (fn main () (triangle 10000))",
+      "(fn triangle (n) (if (std.== n 0) 0 (std.+ n (triangle (std.- n 1))))) (fn main () (triangle 10000))",
       SLValue::Int(50_005_000),
     );
   }

@@ -4,9 +4,7 @@ type Expr = AValue<String>;
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum AST {
-  Import(String),
   Let(String, Box<AST>),
-  DeclareFn(FunctionDecl),
   DefineFn(Function),
   Call(Box<AST>, Vec<AST>),
   CallFixed(Identifier, Vec<AST>),
@@ -39,18 +37,6 @@ pub enum AST {
 pub enum Identifier {
   Bare(String),
   Qualified(String, String),
-}
-
-/// A FunctionDecl is a signature-only declaration of a function. A program that
-/// provides builtins for executing a SafeLisp program must provide function
-/// declarations to describe the signatures of those functions, which will be
-/// used during compilation.
-#[derive(Debug, PartialEq, Clone)]
-pub struct FunctionDecl {
-  pub name: String,
-  /// TODO: params should be Vec<Type>, not Vec<String>. We don't need parameter
-  /// names here.
-  pub params: Vec<String>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -90,8 +76,6 @@ impl AST {
           match s.as_ref() {
             "let" => return parse_let(right),
             "fn" => return parse_fn(right),
-            "decl" => return parse_decl(right),
-            "use" => return parse_import(right),
             "if" => return parse_if(right),
             "set!" => return parse_set(right),
             _ => {}
@@ -101,20 +85,6 @@ impl AST {
       }
       _ => Err(format!("Sorry, didn't implement {:?} yet", form)),
     }
-  }
-}
-
-fn parse_import(form: &Expr) -> Result<AST, String> {
-  match form {
-    AValue::Cons(module_name_box, nothing_else) => match (&**module_name_box, &**nothing_else) {
-      (AValue::Str(ref module_name), AValue::Nil) => Ok(AST::Import((*module_name).to_string())),
-      x => Err(format!(
-        "`import` must have a single string as its argument. Got: {x:?}"
-      )),
-    },
-    x => Err(format!(
-      "`import` must have a single string as its argument. Got: {x:?}"
-    )),
   }
 }
 
@@ -181,33 +151,6 @@ fn parse_let(right: &Expr) -> Result<AST, String> {
   }
 }
 
-fn parse_decl(right: &Expr) -> Result<AST, String> {
-  match right {
-    AValue::Cons(ref name, ref box_cons_params) => match **name {
-      AValue::Symbol(ref name) => match **box_cons_params {
-        AValue::Cons(ref params, ref _box_nil) => {
-          let flattened_params = flatten_list(params)?;
-          let mut params_vec = vec![];
-          for param_expr in flattened_params {
-            if let AValue::Symbol(p) = param_expr {
-              params_vec.push(p);
-            } else {
-              return Err("Parameters must be symbols".to_string());
-            }
-          }
-          Ok(AST::DeclareFn(FunctionDecl {
-            name: name.clone(),
-            params: params_vec,
-          }))
-        }
-        _ => Err("`fn` must take parameters after the name.".to_string()),
-      },
-      _ => Err("`fn` first argument must be a symbol.".to_string()),
-    },
-    _ => Err("`fn` must take parameters. And don't use a dot.".to_string()),
-  }
-}
-
 fn parse_fn(right: &Expr) -> Result<AST, String> {
   match *right {
     AValue::Cons(ref name, ref box_cons_params_and_body) => match **name {
@@ -260,11 +203,5 @@ mod test {
   fn test_read_multiple() {
     let result = read_multiple("5 3").unwrap();
     assert_eq!(result, vec![AST::Int(5), AST::Int(3)]);
-  }
-
-  #[test]
-  fn test_import() {
-    let result = read_multiple("(use \"std.sl\")").unwrap();
-    assert_eq!(result, vec![AST::Import("std.sl".to_string())]);
   }
 }

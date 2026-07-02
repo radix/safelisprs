@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use anyhow::{anyhow, Result};
 use clap::Parser;
 
+use safelisp::builtins::DEFAULT_BUILTIN_SPECS;
 use safelisp::compiler::{compile_executable_from_source, compile_from_source};
 
 #[derive(Parser)]
@@ -50,10 +51,10 @@ fn main() -> Result<()> {
   };
 
   let package = if args.no_main {
-    compile_from_source(&input_data)
+    compile_from_source(&input_data, DEFAULT_BUILTIN_SPECS)
   } else {
     let main_func = args.main_function;
-    compile_executable_from_source(&input_data, ("main", &main_func))
+    compile_executable_from_source(&input_data, ("main", &main_func), DEFAULT_BUILTIN_SPECS)
   }
   .map_err(|e| anyhow!("{}", e))?;
 

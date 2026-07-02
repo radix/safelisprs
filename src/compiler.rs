@@ -1,5 +1,6 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 
+use crate::builtins::BuiltinSpec;
 use crate::closure::transform_closures_in_module;
 use crate::parser::{self, Identifier, AST};
 
@@ -101,7 +102,8 @@ type ModuleIndex = HashMap<String, (u32, HashMap<String, u32>)>;
 // }
 
 impl Package {
-  pub fn from_modules(modules: CompiledModules) -> Result<Self, String> {
+  pub fn from_modules(modules: CompiledModules, specs: &[BuiltinSpec]) -> Result<Self, String> {
+    let modules = inject_builtin_specs(modules, specs)?;
     let index = index_modules(modules.iter());
     Ok(Package {
       modules: link(&index, modules)?,
@@ -112,7 +114,9 @@ impl Package {
   pub fn from_modules_with_main(
     compiled_modules: CompiledModules,
     main: (&str, &str),
+    specs: &[BuiltinSpec],
   ) -> Result<Self, String> {
+    let compiled_modules = inject_builtin_specs(compiled_modules, specs)?;
     let index = index_modules(compiled_modules.iter());
     let linked_modules = link(&index, compiled_modules)?;
     let main = find_function(&index, main.0, main.1);
@@ -245,24 +249,16 @@ pub fn find_function(
   })
 }
 
-pub fn compile_module(
-  module_name: &str,
-  asts: &[AST],
-) -> Result<(CompiledModule, Vec<String>), String> {
+pub fn compile_module(module_name: &str, asts: &[AST]) -> Result<CompiledModule, String> {
   let asts = transform_closures_in_module(module_name, asts)?;
   let mut functions = vec![];
-  let mut imports = vec![];
   for ast in &asts {
     match ast {
-      AST::Import(filename) => {
-        imports.push(filename.to_owned());
-      }
       AST::DefineFn(func) => functions.extend(compile_function(module_name, func)?),
-      AST::DeclareFn(decl) => functions.push((decl.name.clone(), Callable::Builtin)),
       x => return Err(format!("Unexpected form at top-level: {:?}", x)),
     };
   }
-  Ok((functions, imports))
+  Ok(functions)
 }
 
 /// Compile a function.
@@ -333,13 +329,6 @@ fn compile_expr(
       instructions.extend(compile_expr(module_name, expr, locals)?);
       instructions.push(Instruction::MakeCell);
     }
-    AST::DeclareFn(decl) => {
-      return Err(format!(
-        "[BUG] Cannot declare functions inside other forms: {}",
-        decl.name
-      ))
-    }
-    AST::DefineFn(func) => return Err(format!("[BUG] DefineFn in an expression: {}", func.name)),
     AST::DerefCell(expr) => {
       instructions.extend(compile_expr(module_name, expr, locals)?);
       instructions.push(Instruction::DerefCell);
@@ -423,12 +412,13 @@ fn compile_expr(
 pub fn compile_executable_from_source(
   module_source: &str,
   main: (&str, &str),
+  specs: &[BuiltinSpec],
 ) -> Result<Package, String> {
-  Package::from_modules_with_main(_compile_from_source(module_source)?, main)
+  Package::from_modules_with_main(_compile_from_source(module_source)?, main, specs)
 }
 
-pub fn compile_from_source(module_source: &str) -> Result<Package, String> {
-  Package::from_modules(_compile_from_source(module_source)?)
+pub fn compile_from_source(module_source: &str, specs: &[BuiltinSpec]) -> Result<Package, String> {
+  Package::from_modules(_compile_from_source(module_source)?, specs)
 }
 
 fn _compile_from_source(module_source: &str) -> Result<CompiledModules, String> {
@@ -438,41 +428,40 @@ fn _compile_from_source(module_source: &str) -> Result<CompiledModules, String> 
 }
 
 fn compile_modules(asts: &[AST]) -> Result<CompiledModules, String> {
-  // TODO: move file IO out of this function and into a trait implementation
-  use std::fs::File;
-  use std::io::prelude::*;
-  use std::path::PathBuf;
-
-  let mut compiled_modules = vec![];
-  let mut imports: VecDeque<String> = VecDeque::new();
   println!("Compiling main module");
-  let (compiled_module, initial_imports) = compile_module("main", asts)?;
-  imports.extend(initial_imports);
-  compiled_modules.push(("main".to_string(), compiled_module));
-  while !imports.is_empty() {
-    let import = imports.pop_front().unwrap();
-    let mut import_filepath = PathBuf::from(import);
-    import_filepath.set_extension("sl");
-    let module_name = import_filepath
-      .file_stem()
-      .ok_or_else(|| format!("Couldn't figure out module name for {import_filepath:?}"))?
-      .to_str()
-      .ok_or_else(|| format!("Not UTF-8: {import_filepath:?}"))?;
-    let source = {
-      let mut buffer = String::new();
-      let mut f = File::open(&import_filepath)
-        .map_err(|e| format!("Error opening {import_filepath:?}: {e:?}"))?;
-      f.read_to_string(&mut buffer).map_err(|e| e.to_string())?;
-      buffer
+  let compiled_module = compile_module("main", asts)?;
+  Ok(vec![("main".to_string(), compiled_module)])
+}
+
+/// Inject a `Callable::Builtin` entry for each `BuiltinSpec` into the named
+/// module's function table, creating the module if it doesn't already exist
+/// (e.g. the `std` module, which has no source file). Must run before
+/// [`index_modules`] so the slots are resolvable by `Call` instructions.
+fn inject_builtin_specs(
+  mut modules: CompiledModules,
+  specs: &[BuiltinSpec],
+) -> Result<CompiledModules, String> {
+  for spec in specs {
+    let module = modules
+      .iter_mut()
+      .find(|(name, _)| name == spec.module)
+      .map(|(_, funcs)| funcs);
+    let module = match module {
+      Some(funcs) => funcs,
+      None => {
+        modules.push((spec.module.to_string(), vec![]));
+        &mut modules.last_mut().unwrap().1
+      }
     };
-    let asts = parser::read_multiple(&source)?;
-    println!("Compiling additional file {import_filepath:?} as module {module_name:?}");
-    let (compiled_module, more_imports) = compile_module(module_name, &asts)?;
-    compiled_modules.push((module_name.to_owned(), compiled_module));
-    imports.extend(more_imports);
+    if module.iter().any(|(name, _)| name == spec.name) {
+      return Err(format!(
+        "Builtin {}.{} collides with an existing function",
+        spec.module, spec.name
+      ));
+    }
+    module.push((spec.name.to_string(), Callable::Builtin));
   }
-  println!("Done compiling.");
-  Ok(compiled_modules)
+  Ok(modules)
 }
 
 #[cfg(test)]

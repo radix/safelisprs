@@ -7,6 +7,7 @@
 //! modules under `src/`.
 
 use rstest::rstest;
+use safelisp::builtins::DEFAULT_BUILTIN_SPECS;
 use safelisp::compiler::compile_executable_from_source;
 use safelisp::interpreter::{Interpreter, SLValue};
 use safelisp::wasm::{self, SLValue as WasmVal};
@@ -24,7 +25,7 @@ enum Val {
 /// Run `source` through the SLC compiler + interpreter and return the result
 /// as a `Val`. Panics on compile or runtime errors.
 fn eval_interpreter(source: &str) -> Val {
-  let pkg = compile_executable_from_source(source, ("main", "main"))
+  let pkg = compile_executable_from_source(source, ("main", "main"), DEFAULT_BUILTIN_SPECS)
     .unwrap_or_else(|e| panic!("interpreter compile failed: {e}"));
   let interp = Interpreter::new(pkg);
   let mut exec = interp
@@ -137,17 +138,11 @@ fn register_one(linker: &mut Linker<()>, b: &safelisp::wasm::Builtin) {
 #[case::let_binds_float("(fn main () (let a 2.5))", Val::Float(2.5))]
 #[case::later_let_is_returned("(fn main () (let a 1) (let b 2))", Val::Int(2))]
 #[case::let_does_not_shadow_later_result("(fn main () (let a 1) a)", Val::Int(1))]
-#[case::let_then_use_variable(
-  "(use \"src/std\") (fn main () (let a 1) (let b 2) (std.+ a b))",
-  Val::Int(3)
-)]
+#[case::let_then_use_variable("(fn main () (let a 1) (let b 2) (std.+ a b))", Val::Int(3))]
 #[case::let_shadows_earlier_binding("(fn main () (let a 1) (let a 2) a)", Val::Int(2))]
 #[case::if_selects_then_branch("(fn main () (if true 42 0))", Val::Int(42))]
 #[case::if_selects_else_branch("(fn main () (if false 42 0))", Val::Int(0))]
-#[case::if_with_condition_from_call(
-  "(use \"src/std\") (fn main () (if (std.== 1 1) 7 8))",
-  Val::Int(7)
-)]
+#[case::if_with_condition_from_call("(fn main () (if (std.== 1 1) 7 8))", Val::Int(7))]
 #[case::if_branches_can_use_let_variables("(fn main () (let a 10) (if true a 0))", Val::Int(10))]
 #[case::calls_same_module_function("(fn id (a) a) (fn main () (id 99))", Val::Int(99))]
 #[case::calls_function_with_multiple_args(
@@ -155,33 +150,30 @@ fn register_one(linker: &mut Linker<()>, b: &safelisp::wasm::Builtin) {
   Val::Int(5)
 )]
 #[case::calls_function_defined_later("(fn main () (later 7)) (fn later (x) x)", Val::Int(7))]
-#[case::std_add("(use \"src/std\") (fn main () (std.+ 1 2))", Val::Int(3))]
-#[case::std_sub("(use \"src/std\") (fn main () (std.- 1 2))", Val::Int(-1))]
-#[case::std_add_floats("(use \"src/std\") (fn main () (std.+ 1.5 2.5))", Val::Float(4.0))]
-#[case::std_eq_int_true("(use \"src/std\") (fn main () (std.== 3 3))", Val::Bool(true))]
-#[case::std_eq_int_false("(use \"src/std\") (fn main () (std.== 3 4))", Val::Bool(false))]
-#[case::std_eq_float_true("(use \"src/std\") (fn main () (std.== 1.5 1.5))", Val::Bool(true))]
-#[case::std_eq_float_false("(use \"src/std\") (fn main () (std.== 1.5 2.5))", Val::Bool(false))]
-#[case::std_eq_bool_true("(use \"src/std\") (fn main () (std.== true true))", Val::Bool(true))]
-#[case::std_eq_bool_false("(use \"src/std\") (fn main () (std.== true false))", Val::Bool(false))]
-#[case::arithmetic_in_if(
-  "(use \"src/std\") (fn main () (if (std.== (std.+ 1 1) 2) 100 200))",
-  Val::Int(100)
-)]
+#[case::std_add("(fn main () (std.+ 1 2))", Val::Int(3))]
+#[case::std_sub("(fn main () (std.- 1 2))", Val::Int(-1))]
+#[case::std_add_floats("(fn main () (std.+ 1.5 2.5))", Val::Float(4.0))]
+#[case::std_eq_int_true("(fn main () (std.== 3 3))", Val::Bool(true))]
+#[case::std_eq_int_false("(fn main () (std.== 3 4))", Val::Bool(false))]
+#[case::std_eq_float_true("(fn main () (std.== 1.5 1.5))", Val::Bool(true))]
+#[case::std_eq_float_false("(fn main () (std.== 1.5 2.5))", Val::Bool(false))]
+#[case::std_eq_bool_true("(fn main () (std.== true true))", Val::Bool(true))]
+#[case::std_eq_bool_false("(fn main () (std.== true false))", Val::Bool(false))]
+#[case::arithmetic_in_if("(fn main () (if (std.== (std.+ 1 1) 2) 100 200))", Val::Int(100))]
 #[case::multiple_lets_and_calls(
-  "(use \"src/std\") (fn main () (let a 1) (let b 2) (let c 3) (std.+ a (std.+ b c)))",
+  "(fn main () (let a 1) (let b 2) (let c 3) (std.+ a (std.+ b c)))",
   Val::Int(6)
 )]
 #[case::calls_function_that_calls_another(
-  "(use \"src/std\") (fn inc (n) (std.+ n 1)) (fn twice (n) (std.+ (inc n) (inc n))) (fn main () (twice 10))",
-  Val::Int(22),
+  "(fn inc (n) (std.+ n 1)) (fn twice (n) (std.+ (inc n) (inc n))) (fn main () (twice 10))",
+  Val::Int(22)
 )]
 #[case::recursion_with_base_case(
-  "(use \"src/std\") (fn triangle (n) (if (std.== n 0) 0 (std.+ n (triangle (std.- n 1))))) (fn main () (triangle 10))",
+  "(fn triangle (n) (if (std.== n 0) 0 (std.+ n (triangle (std.- n 1))))) (fn main () (triangle 10))",
   Val::Int(55),
 )]
 #[case::deep_recursion(
-  "(use \"src/std\") (fn triangle (n) (if (std.== n 0) 0 (std.+ n (triangle (std.- n 1))))) (fn main () (triangle 10000))",
+  "(fn triangle (n) (if (std.== n 0) 0 (std.+ n (triangle (std.- n 1))))) (fn main () (triangle 10000))",
   Val::Int(50_005_000),
 )]
 fn both_backends_match_expected(#[case] source: &str, #[case] expected: Val) {

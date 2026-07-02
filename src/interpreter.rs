@@ -703,12 +703,14 @@ impl<'gc> ExecRoot<'gc> {
 #[cfg(test)]
 mod test {
   use super::*;
-  use crate::builtins::DefaultBuiltins;
+  use crate::builtins::{BuiltinSpec, DefaultBuiltins, DEFAULT_BUILTIN_SPECS};
   use crate::compiler::{self, *};
   use std::time::Duration;
 
   fn eval_main(source: &str) -> SLValue {
-    let pkg = compile_executable_from_source(&source.to_string(), ("main", "main")).unwrap();
+    let pkg =
+      compile_executable_from_source(&source.to_string(), ("main", "main"), DEFAULT_BUILTIN_SPECS)
+        .unwrap();
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
     exec.run_until_done().unwrap()
@@ -750,11 +752,11 @@ mod test {
   #[test]
   fn std_eq_strings() {
     assert_eq!(
-      eval_main("(use \"src/std\") (fn main () (std.== \"abc\" \"abc\"))"),
+      eval_main("(fn main () (std.== \"abc\" \"abc\"))"),
       SLValue::Bool(true)
     );
     assert_eq!(
-      eval_main("(use \"src/std\") (fn main () (std.== \"abc\" \"abd\"))"),
+      eval_main("(fn main () (std.== \"abc\" \"abd\"))"),
       SLValue::Bool(false)
     );
   }
@@ -762,15 +764,15 @@ mod test {
   #[test]
   fn std_concat_strings() {
     assert_eq!(
-      eval_main("(use \"src/std\") (fn main () (std.concat \"foo\" \"bar\"))"),
+      eval_main("(fn main () (std.concat \"foo\" \"bar\"))"),
       SLValue::String("foobar".to_string())
     );
     assert_eq!(
-      eval_main("(use \"src/std\") (fn main () (std.concat \"ab\" \"CDE\"))"),
+      eval_main("(fn main () (std.concat \"ab\" \"CDE\"))"),
       SLValue::String("abCDE".to_string())
     );
     assert_eq!(
-      eval_main("(use \"src/std\") (fn main () (std.concat \"\" \"x\"))"),
+      eval_main("(fn main () (std.concat \"\" \"x\"))"),
       SLValue::String("x".to_string())
     );
   }
@@ -796,12 +798,13 @@ mod test {
       }
     }
 
-    let source = "
-      (decl add2 (n))
-      (fn main () (add2 3))
-    "
-    .to_string();
-    let package = compile_executable_from_source(&source, ("main", "main")).unwrap();
+    let source = "(fn main () (add2 3))".to_string();
+    let specs = [BuiltinSpec {
+      module: "main",
+      name: "add2",
+      num_params: Some(1),
+    }];
+    let package = compile_executable_from_source(&source, ("main", "main"), &specs).unwrap();
 
     let interpreter = Interpreter::with_builtins(package, MyBuiltins);
     let mut exec = interpreter.call_main().unwrap();
@@ -862,7 +865,8 @@ mod test {
       (fn main () ((outer)))
     "
     .to_string();
-    let pkg = compile_executable_from_source(&source, ("main", "main")).unwrap();
+    let pkg =
+      compile_executable_from_source(&source, ("main", "main"), DEFAULT_BUILTIN_SPECS).unwrap();
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
     assert_eq!(exec.run_until_done().unwrap(), SLValue::Int(1));
@@ -1106,7 +1110,9 @@ mod test {
         b)
       (fn main () (waste) (waste) (waste))
     ";
-    let pkg = compile_executable_from_source(&source.to_string(), ("main", "main")).unwrap();
+    let pkg =
+      compile_executable_from_source(&source.to_string(), ("main", "main"), DEFAULT_BUILTIN_SPECS)
+        .unwrap();
     let (mod_idx, fn_idx) = pkg.main.unwrap();
     let function = pkg.get_function(mod_idx, fn_idx).unwrap().clone();
     if let Callable::Function(function) = function {
@@ -1121,21 +1127,33 @@ mod test {
 
   #[test]
   fn if_does_not_evaluate_unselected_branch() {
-    // If the else branch were evaluated, calling the declared-but-unimplemented
+    // If the else branch were evaluated, calling the unimplemented
     // `boom` builtin would error at runtime. Since the then branch is selected,
-    // `boom` is never called and the program returns 42 cleanly.
-    let source = "
-      (use \"src/std\")
-      (decl boom (n))
-      (fn main () (if (std.== 1 1) 42 (boom 0)))
-    ";
-    assert_eq!(eval_main(source), SLValue::Int(42));
+    // `boom` is never called and the program returns 42 cleanly. `boom` is
+    // registered as a builtin spec so the call links, but its behavior is
+    // never invoked.
+    let source = "(fn main () (if (std.== 1 1) 42 (boom 0)))";
+    let specs: Vec<BuiltinSpec> = DEFAULT_BUILTIN_SPECS
+      .iter()
+      .copied()
+      .chain([BuiltinSpec {
+        module: "main",
+        name: "boom",
+        num_params: Some(1),
+      }])
+      .collect();
+    let pkg = compile_executable_from_source(source, ("main", "main"), &specs).unwrap();
+    let interp = Interpreter::new(pkg);
+    let mut exec = interp.call_main().unwrap();
+    assert_eq!(exec.run_until_done().unwrap(), SLValue::Int(42));
   }
 
   #[test]
   fn if_rejects_non_bool_condition() {
     let source = "(fn main () (if 1 42 0))";
-    let pkg = compile_executable_from_source(&source.to_string(), ("main", "main")).unwrap();
+    let pkg =
+      compile_executable_from_source(&source.to_string(), ("main", "main"), DEFAULT_BUILTIN_SPECS)
+        .unwrap();
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
     let err = exec.run_until_done().unwrap_err();
@@ -1145,7 +1163,9 @@ mod test {
   #[test]
   fn run_completes_in_one_call() {
     let source = "(fn main () 5)";
-    let pkg = compile_executable_from_source(&source.to_string(), ("main", "main")).unwrap();
+    let pkg =
+      compile_executable_from_source(&source.to_string(), ("main", "main"), DEFAULT_BUILTIN_SPECS)
+        .unwrap();
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
     let status = exec.run(1_000).unwrap();
@@ -1157,7 +1177,9 @@ mod test {
     let source = "
       (fn main ()
         (let a 1) (let b 2) (let c 3) (let d 4) 5)";
-    let pkg = compile_executable_from_source(&source.to_string(), ("main", "main")).unwrap();
+    let pkg =
+      compile_executable_from_source(&source.to_string(), ("main", "main"), DEFAULT_BUILTIN_SPECS)
+        .unwrap();
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
     let status = exec.run(3).unwrap();
@@ -1171,8 +1193,10 @@ mod test {
   #[test]
   fn run_hits_limit_exactly() {
     // (std.+ 1 2) is 4 bytecodes: PushInt(1), PushInt(2), Call(std.+), Return.
-    let source = "(use \"src/std\") (fn main () (std.+ 1 2))";
-    let pkg = compile_executable_from_source(&source.to_string(), ("main", "main")).unwrap();
+    let source = "(fn main () (std.+ 1 2))";
+    let pkg =
+      compile_executable_from_source(&source.to_string(), ("main", "main"), DEFAULT_BUILTIN_SPECS)
+        .unwrap();
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
     let status = exec.run(4).unwrap();
@@ -1182,8 +1206,10 @@ mod test {
 
   #[test]
   fn run_limited_mid_program_pauses() {
-    let source = "(use \"src/std\") (fn main () (std.+ 1 2))";
-    let pkg = compile_executable_from_source(&source.to_string(), ("main", "main")).unwrap();
+    let source = "(fn main () (std.+ 1 2))";
+    let pkg =
+      compile_executable_from_source(&source.to_string(), ("main", "main"), DEFAULT_BUILTIN_SPECS)
+        .unwrap();
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
     let status = exec.run(2).unwrap();
@@ -1196,7 +1222,9 @@ mod test {
   #[test]
   fn infinite_recursion_is_bounded_by_run_budget() {
     let source = "(fn loop (n) (loop n)) (fn main () (loop 1))";
-    let pkg = compile_executable_from_source(&source.to_string(), ("main", "main")).unwrap();
+    let pkg =
+      compile_executable_from_source(&source.to_string(), ("main", "main"), DEFAULT_BUILTIN_SPECS)
+        .unwrap();
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
     let status = exec.run(10_000).unwrap();
@@ -1207,7 +1235,9 @@ mod test {
   #[test]
   fn executed_count_is_cumulative() {
     let source = "(fn main () (let a 1) (let b 2) (let c 3) 4)";
-    let pkg = compile_executable_from_source(&source.to_string(), ("main", "main")).unwrap();
+    let pkg =
+      compile_executable_from_source(&source.to_string(), ("main", "main"), DEFAULT_BUILTIN_SPECS)
+        .unwrap();
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
     exec.run(2).unwrap();
@@ -1227,7 +1257,9 @@ mod test {
     // result. Each `main` returns its distinct constant so we can tell them
     // apart.
     let source = "(fn main () (let a 1) (let b 2) 3)";
-    let pkg = compile_executable_from_source(&source.to_string(), ("main", "main")).unwrap();
+    let pkg =
+      compile_executable_from_source(&source.to_string(), ("main", "main"), DEFAULT_BUILTIN_SPECS)
+        .unwrap();
     let interp = Interpreter::new(pkg);
     let mut exec_a = interp.call_main().unwrap();
     let mut exec_b = interp.call_main().unwrap();
@@ -1249,7 +1281,9 @@ mod test {
   fn run_for_duration_completes() {
     // A trivial program completes well within a generous duration.
     let source = "(fn main () 5)";
-    let pkg = compile_executable_from_source(&source.to_string(), ("main", "main")).unwrap();
+    let pkg =
+      compile_executable_from_source(&source.to_string(), ("main", "main"), DEFAULT_BUILTIN_SPECS)
+        .unwrap();
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
     let status = exec.run_for_duration(Duration::from_secs(1)).unwrap();
@@ -1260,7 +1294,9 @@ mod test {
   fn run_for_duration_pauses_on_infinite_recursion() {
     // A non-terminating program is bounded by the time budget and pauses.
     let source = "(fn loop (n) (loop n)) (fn main () (loop 1))";
-    let pkg = compile_executable_from_source(&source.to_string(), ("main", "main")).unwrap();
+    let pkg =
+      compile_executable_from_source(&source.to_string(), ("main", "main"), DEFAULT_BUILTIN_SPECS)
+        .unwrap();
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
     let status = exec.run_for_duration(Duration::from_millis(50)).unwrap();
@@ -1488,7 +1524,6 @@ mod test {
     // increment the shared counter, proving that `set!` writes through the
     // Cell that the closure and its parent share.
     let source = "
-      (use \"src/std\")
       (fn counter ()
         (let count 0)
         (fn inc ()
@@ -1510,7 +1545,6 @@ mod test {
     // closure to get a Cell (captured variables are wrapped in Cells by the
     // closure transform).
     let source = "
-      (use \"src/std\")
       (fn make ()
         (let x 1)
         (fn inc ()
@@ -1529,7 +1563,9 @@ mod test {
         (let x 1)
         (set! x 2))
     ";
-    let pkg = compile_executable_from_source(&source.to_string(), ("main", "main")).unwrap();
+    let pkg =
+      compile_executable_from_source(&source.to_string(), ("main", "main"), DEFAULT_BUILTIN_SPECS)
+        .unwrap();
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
     let err = exec.run_until_done().unwrap_err();
@@ -1552,7 +1588,6 @@ mod test {
     //   self)              ; return the cyclic closure
     // (fn main () (make-cycle) 99)  ; discard the cycle, return 99
     let source = "
-      (use \"src/std\")
       (fn make-cycle ()
         (let c 0)
         (fn self () c)
@@ -1560,7 +1595,9 @@ mod test {
         self)
       (fn main () (make-cycle) 99)
     ";
-    let pkg = compile_executable_from_source(&source.to_string(), ("main", "main")).unwrap();
+    let pkg =
+      compile_executable_from_source(&source.to_string(), ("main", "main"), DEFAULT_BUILTIN_SPECS)
+        .unwrap();
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
 
