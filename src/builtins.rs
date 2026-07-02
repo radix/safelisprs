@@ -5,7 +5,7 @@ use gc_arena::{Gc, Mutation, RefLock};
 use rand_chacha::rand_core::{RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
-use crate::interpreter::SLVal;
+use crate::interpreter::{ExecRoot, HostCtx, SLVal};
 
 /// A compile-time description of a builtin: which module/name it lives in and
 /// how many arguments it takes. `num_params` is `None` for variadic builtins.
@@ -16,15 +16,24 @@ pub struct BuiltinSpec {
   pub num_params: Option<u16>,
 }
 
-/// A builtin's runtime handler. Takes the GC `Mutation` context (so builtins
-/// may allocate fresh `Gc` values) and the evaluated arguments (as `Gc`
-/// pointers into the current execution's arena), and returns either a result
-/// value or a runtime error string.
+/// A builtin's runtime handler. Takes a `&mut ExecRoot` (the execution's
+/// stack/frames), a [`HostCtx`] (GC context + registries, so the builtin can
+/// allocate and invoke callables), and the evaluated arguments.
+///
+/// The `&mut ExecRoot<'gc>` is passed *separately* from `HostCtx` (rather than
+/// stored inside it) so the borrow checker can track its lifetime without the
+/// `'gc` invariance issue that `Mutation<'gc>` would otherwise cause.
 ///
 /// The `for<'gc>` higher-ranked bound lets one `'static` handler serve any
-/// execution's arena.
-pub type HostFn =
-  Arc<dyn for<'gc> Fn(&Mutation<'gc>, &[Gc<'gc, SLVal<'gc>>]) -> Result<SLVal<'gc>, String>>;
+/// execution's arena. The `HostCtx`'s second lifetime (for `package`/`builtins`
+/// borrows) is left elided — it is independent of `'gc` and inferred per-call.
+pub(crate) type HostFn = Arc<
+  dyn for<'gc> Fn(
+    &mut ExecRoot<'gc>,
+    &mut HostCtx<'gc, '_>,
+    &[Gc<'gc, SLVal<'gc>>],
+  ) -> Result<SLVal<'gc>, String>,
+>;
 
 /// A builtin: metadata ([`BuiltinSpec`]) plus its handler ([`HostFn`]).
 #[derive(Clone)]
@@ -38,13 +47,17 @@ impl Builtin {
     self.spec
   }
 
-  /// Invoke this builtin's handler with the given arguments.
-  pub fn call<'gc>(
+  /// Invoke this builtin's handler with the given arguments. The handler's
+  /// return value is pushed onto the execution's value stack by this method.
+  pub(crate) fn call<'gc, 'a>(
     &self,
-    mc: &'gc Mutation<'gc>,
+    root: &mut ExecRoot<'gc>,
+    ctx: &mut HostCtx<'gc, 'a>,
     args: &[Gc<'gc, SLVal<'gc>>],
-  ) -> Result<SLVal<'gc>, String> {
-    (self.func)(mc, args)
+  ) -> Result<(), String> {
+    let result = (self.func)(root, ctx, args)?;
+    root.push_gc(Gc::new(ctx.mc(), result));
+    Ok(())
   }
 
   /// A unary (one-arg) builtin.
@@ -59,7 +72,7 @@ impl Builtin {
         name,
         num_params: Some(1),
       },
-      func: Arc::new(move |_mc, args| func(args[0])),
+      func: Arc::new(move |_root, _ctx, args| func(args[0])),
     }
   }
 
@@ -76,15 +89,12 @@ impl Builtin {
         name,
         num_params: Some(2),
       },
-      func: Arc::new(move |_mc, args| func(args[0], args[1])),
+      func: Arc::new(move |_root, _ctx, args| func(args[0], args[1])),
     }
   }
 
   /// A binary builtin that needs the GC `Mutation` context (e.g. to allocate a
-  /// fresh `List`). `func` receives `(mc, left, right)`. The `mc` reference's
-  /// lifetime is left elided (independent of `'gc`) so that the coercion into
-  /// `HostFn` — whose `&Mutation<'gc>` and `&[Gc<'gc, …>]` references also have
-  /// independent lifetimes — succeeds despite `SLVal<'gc>` being invariant.
+  /// fresh `List`). `func` receives `(mc, left, right)`.
   pub fn binary_alloc(
     module: &'static str,
     name: &'static str,
@@ -101,7 +111,31 @@ impl Builtin {
         name,
         num_params: Some(2),
       },
-      func: Arc::new(move |mc, args| func(mc, args[0], args[1])),
+      func: Arc::new(move |_root, ctx, args| func(ctx.mc(), args[0], args[1])),
+    }
+  }
+
+  /// A binary builtin that needs full access to the execution context (e.g.
+  /// to invoke SafeLisp callables via [`HostCtx::call`]). `func` receives
+  /// `(root, ctx, left, right)`.
+  pub(crate) fn binary_ctx(
+    module: &'static str,
+    name: &'static str,
+    func: impl for<'gc> Fn(
+        &mut ExecRoot<'gc>,
+        &mut HostCtx<'gc, '_>,
+        Gc<'gc, SLVal<'gc>>,
+        Gc<'gc, SLVal<'gc>>,
+      ) -> Result<SLVal<'gc>, String>
+      + 'static,
+  ) -> Self {
+    Builtin {
+      spec: BuiltinSpec {
+        module,
+        name,
+        num_params: Some(2),
+      },
+      func: Arc::new(move |root, ctx, args| func(root, ctx, args[0], args[1])),
     }
   }
 
@@ -122,7 +156,7 @@ impl Builtin {
         name,
         num_params: Some(3),
       },
-      func: Arc::new(move |_mc, args| func(args[0], args[1], args[2])),
+      func: Arc::new(move |_root, _ctx, args| func(args[0], args[1], args[2])),
     }
   }
 
@@ -141,7 +175,7 @@ impl Builtin {
         name,
         num_params: None,
       },
-      func: Arc::new(move |_mc, args| func(args)),
+      func: Arc::new(move |_root, _ctx, args| func(args)),
     }
   }
 }
@@ -278,6 +312,27 @@ pub fn default_builtins() -> Builtins {
         )),
       }
     }))
+    // (std.map list fn) -> List
+    //   Applies `fn` (a callable value: FunctionRef or Partial) to each element
+    //   of `list` and collects the results into a new list. Implemented as a
+    //   builtin with [`HostCtx`] access so it can synchronously invoke the
+    //   callable for each element.
+    .with_builtin(Builtin::binary_ctx(
+      "std",
+      "map",
+      |root, ctx, list, func| {
+        let items = match &*list {
+          SLVal::List(items) => items.clone(),
+          other => return Err(format!("std.map: expected a List, got {:?}", other)),
+        };
+        let mut results = Vec::with_capacity(items.len());
+        for item in items {
+          let result = ctx.call(root, func, &[item])?;
+          results.push(result);
+        }
+        Ok(SLVal::List(results))
+      },
+    ))
     .with_builtin(Builtin::ternary("std", "slice", |a, b, c| {
       match (&*a, &*b, &*c) {
         (SLVal::List(items), SLVal::Int(start), SLVal::Int(stop)) => {
@@ -464,25 +519,17 @@ mod test {
   #[case::big(123_456_789, "big", [17, 8, 18, 16, 14, 11, 11, 4, 10, 9])]
   #[case::huge(-8_589_934_592, "huge", [4, 18, 7, 17, 11, 14, 15, 18, 1, 9])]
   fn rand_roll_surface_chain(#[case] seed: i64, #[case] name: &str, #[case] expected: [i64; 10]) {
-    // rolln(rng, indices, acc):
-    //   if indices is empty: acc
-    //   else (block
-    //          (let r (rand.roll! rng 20))
-    //          (rolln rng (std.slice indices 1 (std.len indices)) (std.push acc r)))
+    // (std.map (std.range 0 10) (fn roll (_idx) (rand.roll! rng 20)))
     //
-    // `std.range 0 10` produces the list [0..9] that drives the iteration
-    // count; each step peels off the front via `std.slice` and pushes the roll
-    // onto the accumulator. `rand.roll!` mutates `rng` in place.
+    // `std.map` applies `roll` to each element of `(std.range 0 10)` and
+    // collects the rolls. `roll` ignores its argument (the index) and mutates
+    // the shared `rng` cell via `rand.roll!`. The closure transform wraps
+    // captured `rng` in a cell, so `rand.roll!` can mutate it.
     let src = format!(
-      "(fn rolln (rng indices acc)
-         (if (std.== (std.len indices) 0)
-           acc
-           (block
-             (let r (rand.roll! rng 20))
-             (rolln rng (std.slice indices 1 (std.len indices)) (std.push acc r)))))
-
-       (fn main () (rolln (rand.rng {seed} \"{name}\") (std.range 0 10) (std.list)))
-       "
+      "(fn main ()\n\
+        (let rng (rand.rng {seed} \"{name}\"))\n\
+        (fn roll (_idx) (rand.roll! rng 20))\n\
+        (std.map (std.range 0 10) roll))"
     );
     let result = eval_builtin_main(&src).unwrap();
     let got: Vec<i64> = match result {
@@ -493,7 +540,7 @@ mod test {
           other => panic!("expected Int in roll list, got {:?}", other),
         })
         .collect(),
-      other => panic!("expected List from rolln, got {:?}", other),
+      other => panic!("expected List from std.map, got {:?}", other),
     };
     assert_eq!(got, expected.to_vec(), "seed={} name={:?}", seed, name);
   }
@@ -536,6 +583,63 @@ mod test {
         SLValue::Int(1)
       ])
     );
+  }
+
+  /// `std.map` applies a function to each element of a list.
+  #[test]
+  fn map_doubles() {
+    assert_eq!(
+      eval_builtin_main(
+        "(fn main ()
+           (fn dbl (x) (std.+ x x))
+           (std.map (std.list 1 2 3) dbl))"
+      )
+      .unwrap(),
+      SLValue::List(vec![SLValue::Int(2), SLValue::Int(4), SLValue::Int(6)])
+    );
+  }
+
+  #[test]
+  fn map_empty_list() {
+    assert_eq!(
+      eval_builtin_main(
+        "(fn main ()
+           (fn id (x) x)
+           (std.map (std.list) id))"
+      )
+      .unwrap(),
+      SLValue::List(vec![])
+    );
+  }
+
+  #[test]
+  fn map_with_local_closure() {
+    assert_eq!(
+      eval_builtin_main(
+        "(fn main ()
+           (fn inc (x) (std.+ x 1))
+           (std.map (std.range 0 5) inc))"
+      )
+      .unwrap(),
+      SLValue::List(vec![
+        SLValue::Int(1),
+        SLValue::Int(2),
+        SLValue::Int(3),
+        SLValue::Int(4),
+        SLValue::Int(5)
+      ])
+    );
+  }
+
+  #[test]
+  fn map_non_list_errors() {
+    let err = eval_builtin_main(
+      "(fn main ()
+         (fn id (x) x)
+         (std.map 5 id))",
+    )
+    .unwrap_err();
+    assert!(err.contains("expected a List"), "got: {}", err);
   }
 
   /// `rand.roll!` rejects non-positive sides with a runtime error.
