@@ -47,6 +47,7 @@ pub enum SLVal<'gc> {
   FunctionRef(u32, u32),
   Partial(Partial<'gc>),
   Cell(Gc<'gc, RefLock<SLVal<'gc>>>),
+  List(Vec<Gc<'gc, SLVal<'gc>>>),
 }
 
 #[derive(Debug, PartialEq, Clone, Collect)]
@@ -74,6 +75,7 @@ pub enum SLValue {
     args: Vec<SLValue>,
   },
   Cell(Box<SLValue>),
+  List(Vec<SLValue>),
 }
 
 impl<'gc> SLVal<'gc> {
@@ -92,6 +94,7 @@ impl<'gc> SLVal<'gc> {
         args: p.args.iter().map(|a| a.to_value()).collect(),
       },
       SLVal::Cell(r) => SLValue::Cell(Box::new(r.borrow().to_value())),
+      SLVal::List(items) => SLValue::List(items.iter().map(|i| i.to_value()).collect()),
     }
   }
 
@@ -115,6 +118,9 @@ impl<'gc> SLVal<'gc> {
           mc,
           RefLock::new(SLVal::from_value(mc, inner).as_ref().clone()),
         )),
+        SLValue::List(items) => {
+          SLVal::List(items.iter().map(|i| SLVal::from_value(mc, i)).collect())
+        }
       },
     )
   }
@@ -1681,5 +1687,323 @@ mod test {
       "expected 0 live Gc allocations after collecting the cycle, got {}",
       after,
     );
+  }
+
+  #[test]
+  fn list_self_reference_cycle_is_collected() {
+    // A list that contains a cell which in turn refers back to the same list
+    // forms a cycle (List ↔ Cell). Surface syntax can't place a Cell into a
+    // List, so we build the cycle directly in bytecode:
+    //
+    //   let cell0 = cell(0)                 # local 0
+    //   let l    = (std.list cell0)         # local 1; a 1-element list
+    //   set! cell0 l                        # cell0 now holds the list -> cycle
+    //   99                                  # discard both, return 99
+    //
+    // After `main` returns, both locals are unreachable, so the cycle must be
+    // reclaimed by a full collection. This is the list analogue of
+    // `cycle_is_collected` (which builds a Partial↔Cell cycle via closures).
+    let std_mod = 1u32; // "std" is the second module after "main"
+    let std_list = 4u32; // `list` follows `+`, `-`, `==`, `concat`
+    let main = compiler::Function {
+      num_locals: 2,
+      num_params: 0,
+      instructions: vec![
+        Instruction::PushInt(0), // placeholder cell contents
+        Instruction::MakeCell,
+        Instruction::SetLocal(0), // local0 = cell0
+        Instruction::LoadLocal(0),
+        Instruction::Call((std_mod, std_list), 1), // [list]
+        Instruction::SetLocal(1),                  // local1 = list
+        Instruction::LoadLocal(1),                 // new value for the cell
+        Instruction::LoadLocal(0),                 // the cell (TOS)
+        Instruction::SetCell,                      // cell0 := list; pushes the new value (list)
+        Instruction::Pop,                          // discard; stack empty
+        Instruction::PushInt(99),
+        Instruction::Return,
+      ],
+    };
+    let pkg = Package {
+      modules: vec![
+        (
+          "main".to_string(),
+          vec![("main".to_string(), Callable::Function(main))],
+        ),
+        (
+          "std".to_string(),
+          vec![
+            ("+".to_string(), Callable::Builtin),
+            ("-".to_string(), Callable::Builtin),
+            ("==".to_string(), Callable::Builtin),
+            ("concat".to_string(), Callable::Builtin),
+            ("list".to_string(), Callable::Builtin),
+          ],
+        ),
+      ],
+      main: Some((0, 0)),
+    };
+    let interp = Interpreter::new(pkg);
+    let mut exec = interp.call_main().unwrap();
+
+    let result = exec.run_until_done().unwrap();
+    assert_eq!(result, SLValue::Int(99));
+
+    // The stack is now empty (run_until_done popped 99), so the List↔Cell
+    // cycle held in the dead frame's locals is unreachable. Forcing a full
+    // collection must reclaim it, leaving zero live allocations.
+    exec.collect_all();
+    let after = exec.gc_count();
+    assert_eq!(
+      after, 0,
+      "expected 0 live Gc allocations after collecting the List<->Cell cycle, got {}",
+      after,
+    );
+  }
+
+  #[test]
+  fn list_empty() {
+    assert_eq!(eval_main("(fn main () (std.list))"), SLValue::List(vec![]));
+  }
+
+  #[test]
+  fn list_with_ints() {
+    assert_eq!(
+      eval_main("(fn main () (std.list 1 2 3))"),
+      SLValue::List(vec![SLValue::Int(1), SLValue::Int(2), SLValue::Int(3)])
+    );
+  }
+
+  #[test]
+  fn list_first_class_as_callable_value() {
+    // `list` is a builtin (not a special form): its FunctionRef can be pushed
+    // onto the stack and invoked via CallDynamic, exactly as a future `(let l
+    // std.list)` binding would compile to once the compiler supports
+    // referencing builtins as values.
+    let std_mod = 1u32; // "std" is the second module after "main"
+                        // `list` is registered after `+`, `-`, `==`, `concat`, so its function
+                        // index in the `std` module is 4.
+    let std_list = 4u32;
+    let main = compiler::Function {
+      num_locals: 0,
+      num_params: 0,
+      instructions: vec![
+        Instruction::PushInt(1),
+        Instruction::PushInt(2),
+        Instruction::PushInt(3),
+        Instruction::MakeFunctionRef((std_mod, std_list)),
+        Instruction::CallDynamic(3),
+        Instruction::Return,
+      ],
+    };
+    let pkg = Package {
+      modules: vec![
+        (
+          "main".to_string(),
+          vec![("main".to_string(), Callable::Function(main))],
+        ),
+        (
+          "std".to_string(),
+          vec![
+            ("+".to_string(), Callable::Builtin),
+            ("-".to_string(), Callable::Builtin),
+            ("==".to_string(), Callable::Builtin),
+            ("concat".to_string(), Callable::Builtin),
+            ("list".to_string(), Callable::Builtin),
+          ],
+        ),
+      ],
+      main: Some((0, 0)),
+    };
+    let interp = Interpreter::new(pkg);
+    let mut exec = interp.call_main().unwrap();
+    assert_eq!(
+      exec.run_until_done().unwrap(),
+      SLValue::List(vec![SLValue::Int(1), SLValue::Int(2), SLValue::Int(3)])
+    );
+  }
+
+  #[test]
+  fn concat_empty_lists() {
+    assert_eq!(
+      eval_main("(fn main () (std.concat (std.list) (std.list)))"),
+      SLValue::List(vec![])
+    );
+  }
+
+  #[test]
+  fn concat_lists() {
+    assert_eq!(
+      eval_main("(fn main () (std.concat (std.list 1 2) (std.list 3 4)))"),
+      SLValue::List(vec![
+        SLValue::Int(1),
+        SLValue::Int(2),
+        SLValue::Int(3),
+        SLValue::Int(4)
+      ])
+    );
+  }
+
+  #[test]
+  fn concat_list_mismatch_errors() {
+    let err = eval_main_err("(fn main () (std.concat (std.list 1) \"x\"))");
+    assert!(err.contains("Couldn't concat"), "unexpected error: {}", err);
+  }
+
+  #[test]
+  fn list_equality() {
+    assert_eq!(
+      eval_main("(fn main () (std.== (std.list 1 2 3) (std.list 1 2 3)))"),
+      SLValue::Bool(true)
+    );
+    assert_eq!(
+      eval_main("(fn main () (std.== (std.list 1 2 3) (std.list 1 2 4)))"),
+      SLValue::Bool(false)
+    );
+    assert_eq!(
+      eval_main("(fn main () (std.== (std.list 1) (std.list 1 2)))"),
+      SLValue::Bool(false)
+    );
+  }
+
+  #[test]
+  fn idx_list_positive() {
+    assert_eq!(
+      eval_main("(fn main () (std.idx (std.list 10 20 30) 0))"),
+      SLValue::Int(10)
+    );
+    assert_eq!(
+      eval_main("(fn main () (std.idx (std.list 10 20 30) 2))"),
+      SLValue::Int(30)
+    );
+  }
+
+  #[test]
+  fn idx_list_negative() {
+    assert_eq!(
+      eval_main("(fn main () (std.idx (std.list 10 20 30) -1))"),
+      SLValue::Int(30)
+    );
+    assert_eq!(
+      eval_main("(fn main () (std.idx (std.list 10 20 30) -3))"),
+      SLValue::Int(10)
+    );
+  }
+
+  #[test]
+  fn idx_list_out_of_range_errors() {
+    let err = eval_main_err("(fn main () (std.idx (std.list 1 2) 5))");
+    assert!(err.contains("out of range"), "unexpected error: {}", err);
+    let err = eval_main_err("(fn main () (std.idx (std.list 1 2) -3))");
+    assert!(err.contains("out of range"), "unexpected error: {}", err);
+  }
+
+  #[test]
+  fn idx_string() {
+    assert_eq!(
+      eval_main("(fn main () (std.idx \"hello\" 0))"),
+      SLValue::String("h".to_string())
+    );
+    assert_eq!(
+      eval_main("(fn main () (std.idx \"hello\" 4))"),
+      SLValue::String("o".to_string())
+    );
+    assert_eq!(
+      eval_main("(fn main () (std.idx \"hello\" -1))"),
+      SLValue::String("o".to_string())
+    );
+  }
+
+  #[test]
+  fn idx_string_out_of_range_errors() {
+    let err = eval_main_err("(fn main () (std.idx \"hi\" 5))");
+    assert!(err.contains("out of range"), "unexpected error: {}", err);
+  }
+
+  #[test]
+  fn push_returns_new_list() {
+    assert_eq!(
+      eval_main("(fn main () (std.push (std.list 1 2) 3))"),
+      SLValue::List(vec![SLValue::Int(1), SLValue::Int(2), SLValue::Int(3)])
+    );
+    // empty + one
+    assert_eq!(
+      eval_main("(fn main () (std.push (std.list) 7))"),
+      SLValue::List(vec![SLValue::Int(7)])
+    );
+  }
+
+  #[test]
+  fn push_is_non_mutating() {
+    // The original list is unaffected: indexing it afterwards still works.
+    let source = "(fn main () (let l (std.list 1 2)) (std.push l 3) (std.idx l 1))";
+    assert_eq!(eval_main(source), SLValue::Int(2));
+  }
+
+  #[test]
+  fn slice_list_basic() {
+    assert_eq!(
+      eval_main("(fn main () (std.slice (std.list 1 2 3 4 5) 1 4))"),
+      SLValue::List(vec![SLValue::Int(2), SLValue::Int(3), SLValue::Int(4)])
+    );
+  }
+
+  #[test]
+  fn slice_list_negative_indices() {
+    assert_eq!(
+      eval_main("(fn main () (std.slice (std.list 1 2 3 4 5) -3 -1))"),
+      SLValue::List(vec![SLValue::Int(3), SLValue::Int(4)])
+    );
+  }
+
+  #[test]
+  fn slice_list_clamped_bounds() {
+    // stop past the end clamps to length.
+    assert_eq!(
+      eval_main("(fn main () (std.slice (std.list 1 2 3) 1 100))"),
+      SLValue::List(vec![SLValue::Int(2), SLValue::Int(3)])
+    );
+    // start before 0 clamps to 0.
+    assert_eq!(
+      eval_main("(fn main () (std.slice (std.list 1 2 3) -100 2))"),
+      SLValue::List(vec![SLValue::Int(1), SLValue::Int(2)])
+    );
+  }
+
+  #[test]
+  fn slice_list_empty_result() {
+    assert_eq!(
+      eval_main("(fn main () (std.slice (std.list 1 2 3) 2 2))"),
+      SLValue::List(vec![])
+    );
+    // start > stop yields empty.
+    assert_eq!(
+      eval_main("(fn main () (std.slice (std.list 1 2 3) 3 0))"),
+      SLValue::List(vec![])
+    );
+  }
+
+  #[test]
+  fn slice_string() {
+    assert_eq!(
+      eval_main("(fn main () (std.slice \"hello world\" 0 5))"),
+      SLValue::String("hello".to_string())
+    );
+    assert_eq!(
+      eval_main("(fn main () (std.slice \"hello\" -2 100))"),
+      SLValue::String("lo".to_string())
+    );
+  }
+
+  /// Helper: evaluate `main` and return the error string (panics if no error).
+  fn eval_main_err(source: &str) -> String {
+    let pkg = compile_executable_from_source(
+      &source.to_string(),
+      ("main", "main"),
+      &default_builtins().specs(),
+    )
+    .unwrap();
+    let interp = Interpreter::new(pkg);
+    let mut exec = interp.call_main().unwrap();
+    exec.run_until_done().unwrap_err()
   }
 }

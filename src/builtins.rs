@@ -168,6 +168,97 @@ pub fn default_builtins() -> Builtins {
     .with_builtin(Builtin::binary("std", "==", |a, b| Ok(SLVal::Bool(a == b))))
     .with_builtin(Builtin::binary("std", "concat", |a, b| match (&*a, &*b) {
       (SLVal::String(x), SLVal::String(y)) => Ok(SLVal::String(format!("{x}{y}"))),
+      (SLVal::List(x), SLVal::List(y)) => {
+        let mut combined = x.clone();
+        combined.extend(y.iter().cloned());
+        Ok(SLVal::List(combined))
+      }
       _ => Err(format!("Couldn't concat {:?} and {:?}", a, b)),
     }))
+    .with_builtin(Builtin::variadic("std", "list", |args| {
+      Ok(SLVal::List(args.to_vec()))
+    }))
+    .with_builtin(Builtin::binary("std", "idx", |a, b| match (&*a, &*b) {
+      (SLVal::List(items), SLVal::Int(i)) => {
+        let len = items.len() as i64;
+        let idx = if *i < 0 { *i + len } else { *i };
+        if idx < 0 || idx >= len {
+          Err(format!(
+            "idx: index {} out of range for list of length {}",
+            i, len
+          ))
+        } else {
+          Ok((**items.get(idx as usize).unwrap()).clone())
+        }
+      }
+      (SLVal::String(s), SLVal::Int(i)) => {
+        let len = s.chars().count() as i64;
+        let idx = if *i < 0 { *i + len } else { *i };
+        if idx < 0 || idx >= len {
+          Err(format!(
+            "idx: index {} out of range for string of length {}",
+            i, len
+          ))
+        } else {
+          Ok(SLVal::String(
+            s.chars().nth(idx as usize).unwrap().to_string(),
+          ))
+        }
+      }
+      _ => Err(format!(
+        "idx: expected (List, Int) or (String, Int), got ({:?}, {:?})",
+        a, b
+      )),
+    }))
+    .with_builtin(Builtin::binary("std", "push", |a, b| match &*a {
+      SLVal::List(items) => {
+        let mut new = items.clone();
+        new.push(b);
+        Ok(SLVal::List(new))
+      }
+      _ => Err(format!("push: expected a List, got {:?}", a)),
+    }))
+    .with_builtin(Builtin::ternary("std", "slice", |a, b, c| {
+      match (&*a, &*b, &*c) {
+        (SLVal::List(items), SLVal::Int(start), SLVal::Int(stop)) => {
+          let len = items.len() as i64;
+          let s = norm_index(*start, len);
+          let e = norm_index(*stop, len);
+          let s = s.clamp(0, len);
+          let e = e.clamp(0, len);
+          if s >= e {
+            Ok(SLVal::List(vec![]))
+          } else {
+            Ok(SLVal::List(items[s as usize..e as usize].to_vec()))
+          }
+        }
+        (SLVal::String(s), SLVal::Int(start), SLVal::Int(stop)) => {
+          let chars: Vec<char> = s.chars().collect();
+          let len = chars.len() as i64;
+          let st = norm_index(*start, len).clamp(0, len) as usize;
+          let en = norm_index(*stop, len).clamp(0, len) as usize;
+          if st >= en {
+            Ok(SLVal::String(String::new()))
+          } else {
+            Ok(SLVal::String(chars[st..en].iter().collect()))
+          }
+        }
+        _ => Err(format!(
+          "slice: expected (List, Int, Int) or (String, Int, Int), got ({:?}, {:?}, {:?})",
+          a, b, c
+        )),
+      }
+    }))
+}
+
+/// Normalize a possibly-negative index into a non-negative clamped index, using
+/// Python's `l[start:stop]` semantics: a negative index counts from the end.
+/// The result is *not* clamped to `[0, len]`; the caller does that after both
+/// bounds are normalized (so `l[2:100]` works on a length-3 list).
+fn norm_index(i: i64, len: i64) -> i64 {
+  if i < 0 {
+    i + len
+  } else {
+    i
+  }
 }
