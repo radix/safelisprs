@@ -256,6 +256,28 @@ pub fn default_builtins() -> Builtins {
       }
       _ => Err(format!("push: expected a List, got {:?}", a)),
     }))
+    // (std.range start stop) -> List<Int>
+    //   Like Python's `list(range(start, stop))`: half-open, `[start, stop)`.
+    //   `start >= stop` yields the empty list.
+    .with_builtin(Builtin::binary_alloc("std", "range", |mc, a, b| {
+      match (&*a, &*b) {
+        (SLVal::Int(start), SLVal::Int(stop)) => {
+          if stop < start {
+            Ok(SLVal::List(vec![]))
+          } else {
+            Ok(SLVal::List(
+              (*start..*stop)
+                .map(|i| Gc::new(mc, SLVal::Int(i)))
+                .collect(),
+            ))
+          }
+        }
+        _ => Err(format!(
+          "range: expected (Int, Int), got ({:?}, {:?})",
+          a, b
+        )),
+      }
+    }))
     .with_builtin(Builtin::ternary("std", "slice", |a, b, c| {
       match (&*a, &*b, &*c) {
         (SLVal::List(items), SLVal::Int(start), SLVal::Int(stop)) => {
@@ -388,6 +410,15 @@ mod test {
   use crate::interpreter::{Interpreter, SLValue};
   use rstest::rstest;
 
+  /// Helper: evaluate `main` with [`default_builtins`] and return the result.
+  fn eval_builtin_main(source: &str) -> Result<SLValue, String> {
+    let pkg = compile_executable_from_source(source, ("main", "main"), &default_builtins().specs())
+      .unwrap();
+    let interp = Interpreter::new(pkg);
+    let mut exec = interp.call_main().unwrap();
+    exec.run_until_done()
+  }
+
   /// End-to-end: the surface `(rand.rng seed "name")` returns a `Cell(Int)`
   /// whose contents match [`rand_rng`] directly.
   #[rstest]
@@ -403,12 +434,7 @@ mod test {
   #[case::huge(-8_589_934_592, "huge", 5640261956235639084)]
   fn rand_rng_surface(#[case] seed: i64, #[case] name: &str, #[case] expected: i64) {
     let source = format!("(fn main () (rand.rng {} \"{}\"))", seed, name);
-    let pkg =
-      compile_executable_from_source(&source, ("main", "main"), &default_builtins().specs())
-        .unwrap();
-    let interp = Interpreter::new(pkg);
-    let mut exec = interp.call_main().unwrap();
-    let result = exec.run_until_done().unwrap();
+    let result = eval_builtin_main(&source).unwrap();
     match result {
       SLValue::Cell(inner) => {
         assert_eq!(
@@ -438,22 +464,27 @@ mod test {
   #[case::big(123_456_789, "big", [14, 12, 19, 11, 7, 3, 3, 13, 9, 11])]
   #[case::huge(-8_589_934_592, "huge", [2, 15, 4, 6, 19, 1, 2, 9, 3, 18])]
   fn rand_roll_surface_chain(#[case] seed: i64, #[case] name: &str, #[case] expected: [i64; 10]) {
+    // rolln(rng, indices, acc):
+    //   if indices is empty: acc
+    //   else (block
+    //          (let r (rand.roll! rng 20))
+    //          (rolln rng (std.slice indices 1 (std.len indices)) (std.push acc r)))
+    //
+    // `std.range 0 10` produces the list [0..9] that drives the iteration
+    // count; each step peels off the front via `std.slice` and pushes the roll
+    // onto the accumulator. `rand.roll!` mutates `rng` in place.
     let src = format!(
-      "(fn rolln (rng n acc)
-         (if (std.== n 0)
+      "(fn rolln (rng indices acc)
+         (if (std.== (std.len indices) 0)
            acc
            (block
              (let r (rand.roll! rng 20))
-             (rolln rng (std.- n 1) (std.push acc r)))))
+             (rolln rng (std.slice indices 1 (std.len indices)) (std.push acc r)))))
 
-       (fn main () (rolln (rand.rng {seed} \"{name}\") 10 (std.list)))
+       (fn main () (rolln (rand.rng {seed} \"{name}\") (std.range 0 10) (std.list)))
        "
     );
-    let pkg =
-      compile_executable_from_source(&src, ("main", "main"), &default_builtins().specs()).unwrap();
-    let interp = Interpreter::new(pkg);
-    let mut exec = interp.call_main().unwrap();
-    let result = exec.run_until_done().unwrap();
+    let result = eval_builtin_main(&src).unwrap();
     let got: Vec<i64> = match result {
       SLValue::List(items) => items
         .into_iter()
@@ -467,39 +498,64 @@ mod test {
     assert_eq!(got, expected.to_vec(), "seed={} name={:?}", seed, name);
   }
 
+  /// `std.range` produces a half-open list of ints, like Python's `range`.
+  #[test]
+  fn range_basic() {
+    assert_eq!(
+      eval_builtin_main("(fn main () (std.range 0 5))").unwrap(),
+      SLValue::List(vec![
+        SLValue::Int(0),
+        SLValue::Int(1),
+        SLValue::Int(2),
+        SLValue::Int(3),
+        SLValue::Int(4)
+      ])
+    );
+  }
+
+  #[test]
+  fn range_empty() {
+    assert_eq!(
+      eval_builtin_main("(fn main () (std.range 3 3))").unwrap(),
+      SLValue::List(vec![])
+    );
+    assert_eq!(
+      eval_builtin_main("(fn main () (std.range 5 2))").unwrap(),
+      SLValue::List(vec![])
+    );
+  }
+
+  #[test]
+  fn range_negative_start() {
+    assert_eq!(
+      eval_builtin_main("(fn main () (std.range -2 2))").unwrap(),
+      SLValue::List(vec![
+        SLValue::Int(-2),
+        SLValue::Int(-1),
+        SLValue::Int(0),
+        SLValue::Int(1)
+      ])
+    );
+  }
+
   /// `rand.roll!` rejects non-positive sides with a runtime error.
   #[test]
   fn rand_roll_rejects_non_positive_sides() {
-    let source = "(fn main () (rand.roll! (rand.rng 0 \"x\") 0))";
-    let pkg = compile_executable_from_source(source, ("main", "main"), &default_builtins().specs())
-      .unwrap();
-    let interp = Interpreter::new(pkg);
-    let mut exec = interp.call_main().unwrap();
-    let err = exec.run_until_done().unwrap_err();
+    let err = eval_builtin_main("(fn main () (rand.roll! (rand.rng 0 \"x\") 0))").unwrap_err();
     assert!(err.contains("sides must be positive"), "got: {}", err);
   }
 
   /// `rand.roll!` rejects a non-Cell rng.
   #[test]
   fn rand_roll_rejects_non_cell_rng() {
-    let source = "(fn main () (rand.roll! \"not-a-cell\" 6))";
-    let pkg = compile_executable_from_source(source, ("main", "main"), &default_builtins().specs())
-      .unwrap();
-    let interp = Interpreter::new(pkg);
-    let mut exec = interp.call_main().unwrap();
-    let err = exec.run_until_done().unwrap_err();
+    let err = eval_builtin_main("(fn main () (rand.roll! \"not-a-cell\" 6))").unwrap_err();
     assert!(err.contains("expected Cell rng"), "got: {}", err);
   }
 
   /// `rand.rng` rejects non-Int seeds.
   #[test]
   fn rand_rng_rejects_non_int_seed() {
-    let source = "(fn main () (rand.rng \"x\" \"name\"))";
-    let pkg = compile_executable_from_source(source, ("main", "main"), &default_builtins().specs())
-      .unwrap();
-    let interp = Interpreter::new(pkg);
-    let mut exec = interp.call_main().unwrap();
-    let err = exec.run_until_done().unwrap_err();
+    let err = eval_builtin_main("(fn main () (rand.rng \"x\" \"name\"))").unwrap_err();
     assert!(err.contains("expected Int seed"), "got: {}", err);
   }
 }
