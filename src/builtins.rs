@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use blake3::Hasher;
-use gc_arena::{Gc, Mutation};
+use gc_arena::{Gc, Mutation, RefLock};
 use rand_chacha::rand_core::{RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
@@ -288,11 +288,13 @@ pub fn default_builtins() -> Builtins {
       }
     }))
     // ── rand module ────────────────────────────────────────────────────────
-    // (rand.rng seed "name") -> Int
+    // (rand.rng seed "name") -> Cell(Int)
     //   Deterministically derives a new 64-bit seed from `seed` (Int) and
-    //   `name` (String) using BLAKE3. Same inputs always produce the same
-    //   output; differing `name` or `seed` produces differing output.
-    .with_builtin(Builtin::binary("rand", "rng", |seed, name| {
+    //   `name` (String) using BLAKE3, and wraps it in a Cell so that
+    //   `rand.roll!` can mutate it in place. Same inputs always produce the
+    //   same Cell contents; differing `name` or `seed` produces differing
+    //   output.
+    .with_builtin(Builtin::binary_alloc("rand", "rng", |mc, seed, name| {
       let parent = match &*seed {
         SLVal::Int(i) => *i,
         other => return Err(format!("rand.rng: expected Int seed, got {:?}", other)),
@@ -301,29 +303,40 @@ pub fn default_builtins() -> Builtins {
         SLVal::String(s) => s.as_str(),
         other => return Err(format!("rand.rng: expected String name, got {:?}", other)),
       };
-      Ok(SLVal::Int(rand_rng(parent, ns)))
+      Ok(SLVal::Cell(Gc::new(
+        mc,
+        RefLock::new(SLVal::Int(rand_rng(parent, ns))),
+      )))
     }))
-    // (rand.roll seed sides) -> (list roll new_seed)
-    //   Pure: given an Int `seed` and an Int `sides` (> 0), returns a 2-element
-    //   list `[roll, new_seed]` where `roll` is in `1..=sides` and `new_seed`
-    //   is the advanced RNG state to thread into the next call.
-    .with_builtin(Builtin::binary_alloc("rand", "roll", |mc, seed, sides| {
-      let s = match &*seed {
-        SLVal::Int(i) => *i,
-        other => return Err(format!("rand.roll: expected Int seed, got {:?}", other)),
+    // (rand.roll! rng sides) -> Int
+    //   Mutates the `rng` in place, advancing it to the next seed,
+    //   and returns the roll (in `1..=sides`). The Cell is both the RNG state
+    //   and (after the call) the advanced state, so callers don't need to
+    //   thread a new seed through.
+    .with_builtin(Builtin::binary_alloc("rand", "roll!", |mc, rng, sides| {
+      let cell = match &*rng {
+        SLVal::Cell(c) => *c,
+        other => return Err(format!("rand.roll!: expected Cell rng, got {:?}", other)),
       };
       let n = match &*sides {
         SLVal::Int(i) => *i,
-        other => return Err(format!("rand.roll: expected Int sides, got {:?}", other)),
+        other => return Err(format!("rand.roll!: expected Int sides, got {:?}", other)),
       };
       if n <= 0 {
-        return Err(format!("rand.roll: sides must be positive, got {}", n));
+        return Err(format!("rand.roll!: sides must be positive, got {}", n));
       }
+      let s = match &*cell.borrow() {
+        SLVal::Int(i) => *i,
+        ref other => {
+          return Err(format!(
+            "rand.roll!: expected Cell to hold an Int, got {:?}",
+            other
+          ))
+        }
+      };
       let (roll, next) = rand_roll(s, n);
-      Ok(SLVal::List(vec![
-        Gc::new(mc, SLVal::Int(roll)),
-        Gc::new(mc, SLVal::Int(next)),
-      ]))
+      *Gc::write(mc, cell).unlock().borrow_mut() = SLVal::Int(next);
+      Ok(SLVal::Int(roll))
     }))
 }
 
@@ -375,8 +388,8 @@ mod test {
   use crate::interpreter::{Interpreter, SLValue};
   use rstest::rstest;
 
-  /// End-to-end: the surface `(rand.rng seed "name")` returns the same Int that
-  /// [`rand_rng`] produces directly.
+  /// End-to-end: the surface `(rand.rng seed "name")` returns a `Cell(Int)`
+  /// whose contents match [`rand_rng`] directly.
   #[rstest]
   #[case::alpha(0, "alpha", -1438303955140652998)]
   #[case::beta(1, "beta", 6165243067257761546)]
@@ -395,37 +408,43 @@ mod test {
         .unwrap();
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
-    assert_eq!(
-      exec.run_until_done().unwrap(),
-      SLValue::Int(expected),
-      "rand.rng {} {:?}",
-      seed,
-      name
-    );
+    let result = exec.run_until_done().unwrap();
+    match result {
+      SLValue::Cell(inner) => {
+        assert_eq!(
+          *inner,
+          SLValue::Int(expected),
+          "rand.rng {} {:?}",
+          seed,
+          name
+        )
+      }
+      other => panic!("expected Cell from rand.rng, got {:?}", other),
+    }
   }
 
-  /// End-to-end: the surface `(rand.roll seed sides)` returns a 2-element list
-  /// `[roll, new_seed]` matching [`rand_roll`], and threading `new_seed` into
-  /// the next call reproduces [`rand_roll_chain_pinned`]'s 10-roll chain.
+  /// End-to-end: `(rand.roll! rng sides)` mutates the Cell<Int> `rng` in place
+  /// and returns the roll as an Int. Calling it 10 times against the same cell
+  /// reproduces the expected 10-roll chain.
   #[rstest]
   #[case::alpha(0, "alpha", [1, 16, 13, 17, 12, 15, 1, 18, 14, 11])]
   #[case::beta(1, "beta", [17, 12, 8, 7, 12, 6, 18, 7, 8, 3])]
   #[case::battle(42, "battle", [15, 7, 6, 1, 16, 16, 12, 14, 17, 19])]
   #[case::neg(-1, "neg", [17, 20, 15, 19, 10, 11, 1, 5, 11, 17])]
-  #[case::weather(100, "weather",[3, 6, 9, 15, 9, 12, 15, 20, 10, 1])]
+  #[case::weather(100, "weather", [3, 6, 9, 15, 9, 12, 15, 20, 10, 1])]
   #[case::loop_(7, "loop", [3, 3, 1, 4, 4, 12, 19, 19, 10, 17])]
   #[case::doors(256, "doors", [11, 17, 19, 17, 10, 3, 4, 18, 2, 5])]
   #[case::shadow(-99, "shadow", [5, 20, 4, 15, 10, 3, 13, 4, 4, 9])]
   #[case::big(123_456_789, "big", [14, 12, 19, 11, 7, 3, 3, 13, 9, 11])]
-  #[case::huge(-8_589_934_592, "huge",[2, 15, 4, 6, 19, 1, 2, 9, 3, 18])]
+  #[case::huge(-8_589_934_592, "huge", [2, 15, 4, 6, 19, 1, 2, 9, 3, 18])]
   fn rand_roll_surface_chain(#[case] seed: i64, #[case] name: &str, #[case] expected: [i64; 10]) {
     let src = format!(
-      "(fn rolln (s n acc)
+      "(fn rolln (rng n acc)
          (if (std.== n 0)
            acc
            (block
-             (let r (rand.roll s 20))
-             (rolln (std.idx r 1) (std.- n 1) (std.push acc (std.idx r 0))))))
+             (let r (rand.roll! rng 20))
+             (rolln rng (std.- n 1) (std.push acc r)))))
 
        (fn main () (rolln (rand.rng {seed} \"{name}\") 10 (std.list)))
        "
@@ -448,10 +467,10 @@ mod test {
     assert_eq!(got, expected.to_vec(), "seed={} name={:?}", seed, name);
   }
 
-  /// `rand.roll` rejects non-positive sides with a runtime error.
+  /// `rand.roll!` rejects non-positive sides with a runtime error.
   #[test]
   fn rand_roll_rejects_non_positive_sides() {
-    let source = "(fn main () (rand.roll (rand.rng 0 \"x\") 0))";
+    let source = "(fn main () (rand.roll! (rand.rng 0 \"x\") 0))";
     let pkg = compile_executable_from_source(source, ("main", "main"), &default_builtins().specs())
       .unwrap();
     let interp = Interpreter::new(pkg);
@@ -460,16 +479,16 @@ mod test {
     assert!(err.contains("sides must be positive"), "got: {}", err);
   }
 
-  /// `rand.roll` rejects non-Int seeds.
+  /// `rand.roll!` rejects a non-Cell rng.
   #[test]
-  fn rand_roll_rejects_non_int_seed() {
-    let source = "(fn main () (rand.roll \"not-a-seed\" 6))";
+  fn rand_roll_rejects_non_cell_rng() {
+    let source = "(fn main () (rand.roll! \"not-a-cell\" 6))";
     let pkg = compile_executable_from_source(source, ("main", "main"), &default_builtins().specs())
       .unwrap();
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
     let err = exec.run_until_done().unwrap_err();
-    assert!(err.contains("expected Int seed"), "got: {}", err);
+    assert!(err.contains("expected Cell rng"), "got: {}", err);
   }
 
   /// `rand.rng` rejects non-Int seeds.
