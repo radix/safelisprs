@@ -1692,65 +1692,33 @@ mod test {
   #[test]
   fn list_self_reference_cycle_is_collected() {
     // A list that contains a cell which in turn refers back to the same list
-    // forms a cycle (List ↔ Cell). Surface syntax can't place a Cell into a
-    // List, so we build the cycle directly in bytecode:
-    //
-    //   let cell0 = cell(0)                 # local 0
-    //   let l    = (std.list cell0)         # local 1; a 1-element list
-    //   set! cell0 l                        # cell0 now holds the list -> cycle
-    //   99                                  # discard both, return 99
-    //
-    // After `main` returns, both locals are unreachable, so the cycle must be
-    // reclaimed by a full collection. This is the list analogue of
+    // forms a cycle (List ↔ Cell). This is the list analogue of
     // `cycle_is_collected` (which builds a Partial↔Cell cycle via closures).
-    let std_mod = 1u32; // "std" is the second module after "main"
-    let std_list = 4u32; // `list` follows `+`, `-`, `==`, `concat`
-    let main = compiler::Function {
-      num_locals: 2,
-      num_params: 0,
-      instructions: vec![
-        Instruction::PushInt(0), // placeholder cell contents
-        Instruction::MakeCell,
-        Instruction::SetLocal(0), // local0 = cell0
-        Instruction::LoadLocal(0),
-        Instruction::Call((std_mod, std_list), 1), // [list]
-        Instruction::SetLocal(1),                  // local1 = list
-        Instruction::LoadLocal(1),                 // new value for the cell
-        Instruction::LoadLocal(0),                 // the cell (TOS)
-        Instruction::SetCell,                      // cell0 := list; pushes the new value (list)
-        Instruction::Pop,                          // discard; stack empty
-        Instruction::PushInt(99),
-        Instruction::Return,
-      ],
-    };
-    let pkg = Package {
-      modules: vec![
-        (
-          "main".to_string(),
-          vec![("main".to_string(), Callable::Function(main))],
-        ),
-        (
-          "std".to_string(),
-          vec![
-            ("+".to_string(), Callable::Builtin),
-            ("-".to_string(), Callable::Builtin),
-            ("==".to_string(), Callable::Builtin),
-            ("concat".to_string(), Callable::Builtin),
-            ("list".to_string(), Callable::Builtin),
-          ],
-        ),
-      ],
-      main: Some((0, 0)),
-    };
+    let source = "
+      (fn make-cycle ()
+        (let l (std.list))
+        (fn mkcycle () (set! l (std.list l)))
+        mkcycle)
+      (fn main () ((make-cycle)))
+    ";
+    let pkg = compile_executable_from_source(
+      &source.to_string(),
+      ("main", "main"),
+      &default_builtins().specs(),
+    )
+    .unwrap();
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
 
     let result = exec.run_until_done().unwrap();
-    assert_eq!(result, SLValue::Int(99));
+    // `main` returns the cyclic list (a 1-element list containing itself),
+    // which `run_until_done` pops and hands back to us. The cycle is now only
+    // reachable through this returned `SLValue`-side copy — but the in-arena
+    // cycle was held alive by `make-cycle`'s frame, which is gone.
+    assert!(matches!(result, SLValue::List(_)));
 
-    // The stack is now empty (run_until_done popped 99), so the List↔Cell
-    // cycle held in the dead frame's locals is unreachable. Forcing a full
-    // collection must reclaim it, leaving zero live allocations.
+    // Forcing a full collection must reclaim the in-arena cycle, leaving zero
+    // live allocations (the popped result is an owned `SLValue`, not a `Gc`).
     exec.collect_all();
     let after = exec.gc_count();
     assert_eq!(
@@ -1992,6 +1960,21 @@ mod test {
       eval_main("(fn main () (std.slice \"hello\" -2 100))"),
       SLValue::String("lo".to_string())
     );
+  }
+
+  #[test]
+  fn recursive_sum_of_list() {
+    // Recursion over a list using `len` for the base case, `idx` for the head,
+    // and `slice` for the tail. `(std.slice l 1 (std.len l))` yields everything
+    // from index 1 to the end.
+    let source = "
+      (fn sum (l)
+        (if (std.== (std.len l) 0)
+          0
+          (std.+ (std.idx l 0) (sum (std.slice l 1 (std.len l))))))
+      (fn main () (sum (std.list 1 2 3 4 5)))
+    ";
+    assert_eq!(eval_main(source), SLValue::Int(15));
   }
 
   /// Helper: evaluate `main` and return the error string (panics if no error).

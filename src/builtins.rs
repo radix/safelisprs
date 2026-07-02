@@ -178,6 +178,10 @@ pub fn default_builtins() -> Builtins {
     .with_builtin(Builtin::variadic("std", "list", |args| {
       Ok(SLVal::List(args.to_vec()))
     }))
+    .with_builtin(Builtin::unary("std", "len", |a| match &*a {
+      SLVal::List(items) => Ok(SLVal::Int(items.len() as i64)),
+      _ => Err(format!("len: expected a List, got {:?}", a)),
+    }))
     .with_builtin(Builtin::binary("std", "idx", |a, b| match (&*a, &*b) {
       (SLVal::List(items), SLVal::Int(i)) => {
         let len = items.len() as i64;
