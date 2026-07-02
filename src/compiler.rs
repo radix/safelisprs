@@ -119,15 +119,15 @@ impl Package {
 
   pub fn from_modules_with_main(
     compiled_modules: CompiledModules,
-    main: (&str, &str),
+    path: (&str, &str),
     specs: &[BuiltinSpec],
   ) -> Result<Self, String> {
     let compiled_modules = inject_builtin_specs(compiled_modules, specs)?;
     let index = index_modules(compiled_modules.iter());
     let linked_modules = link(&index, compiled_modules)?;
-    let main = find_function(&index, main.0, main.1);
+    let main = find_function(&index, path.0, path.1);
     if main.is_none() {
-      Err(format!("Main function {:?} was not found!", main))
+      Err(format!("Main function {path:?} was not found!"))
     } else {
       Ok(Package {
         modules: linked_modules,
