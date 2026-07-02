@@ -613,7 +613,7 @@ impl<'gc> ExecRoot<'gc> {
           args.push(self.pop()?);
         }
         args.reverse();
-        let result = builtin.call(&args)?;
+        let result = builtin.call(mc, &args)?;
         self.stack.push(Gc::new(mc, result));
       }
     }
@@ -1988,5 +1988,53 @@ mod test {
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
     exec.run_until_done().unwrap_err()
+  }
+
+  #[test]
+  fn block_returns_value_of_last_expression() {
+    assert_eq!(eval_main("(fn main () (block 1 2 3))"), SLValue::Int(3));
+  }
+
+  #[test]
+  fn block_discards_non_final_values() {
+    // The `let` inside the block is for a side effect; its value is discarded
+    // and the block returns the trailing literal.
+    assert_eq!(
+      eval_main("(fn main () (block (let a 1) (let b 2) 3))"),
+      SLValue::Int(3)
+    );
+  }
+
+  #[test]
+  fn block_in_if_else_branch() {
+    // The else branch uses `block` to sequence two expressions; only the last
+    // is returned as the if's (and main's) value.
+    assert_eq!(
+      eval_main("(fn main () (if false 0 (block (let a 1) 42)))"),
+      SLValue::Int(42)
+    );
+  }
+
+  #[test]
+  fn block_let_visible_after_in_same_function() {
+    // A `let` introduced inside a block introduces a local that remains visible
+    // to later expressions in the enclosing function body (the compiler's
+    // `locals` map is shared across the block and its enclosing scope).
+    assert_eq!(
+      eval_main("(fn main () (block (let a 7) a) (std.+ a 1))"),
+      SLValue::Int(8)
+    );
+  }
+
+  #[test]
+  fn block_empty_is_a_parse_error() {
+    // The error surfaces at compile time, so `eval_main_err` (which unwraps
+    // compilation) would panic; instead, drive the parser directly.
+    let err = crate::parser::read_multiple("(fn main () (block))").unwrap_err();
+    assert!(
+      err.contains("`block` must have at least one expression"),
+      "got: {}",
+      err
+    );
   }
 }

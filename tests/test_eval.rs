@@ -176,6 +176,8 @@ fn register_one(linker: &mut Linker<()>, b: &safelisp::wasm::Builtin) {
   "(fn triangle (n) (if (std.== n 0) 0 (std.+ n (triangle (std.- n 1))))) (fn main () (triangle 10000))",
   Val::Int(50_005_000),
 )]
+#[case::block_returns_last("(fn main () (block 1 2 3))", Val::Int(3))]
+#[case::block_in_if_else("(fn main () (if false 0 (block (let a 1) 42)))", Val::Int(42))]
 fn both_backends_match_expected(#[case] source: &str, #[case] expected: Val) {
   assert_eq!(eval_interpreter(source), expected, "interpreter: {source}");
   assert_eq!(eval_wasm(source), expected, "wasm: {source}");

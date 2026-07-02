@@ -1,6 +1,9 @@
 use std::sync::Arc;
 
-use gc_arena::Gc;
+use blake3::Hasher;
+use gc_arena::{Gc, Mutation};
+use rand_chacha::rand_core::{RngCore, SeedableRng};
+use rand_chacha::ChaCha8Rng;
 
 use crate::interpreter::SLVal;
 
@@ -13,13 +16,15 @@ pub struct BuiltinSpec {
   pub num_params: Option<u16>,
 }
 
-/// A builtin's runtime handler. Takes the evaluated arguments (as `Gc` pointers
-/// into the current execution's arena) and returns either a result value or a
-/// runtime error string.
+/// A builtin's runtime handler. Takes the GC `Mutation` context (so builtins
+/// may allocate fresh `Gc` values) and the evaluated arguments (as `Gc`
+/// pointers into the current execution's arena), and returns either a result
+/// value or a runtime error string.
 ///
 /// The `for<'gc>` higher-ranked bound lets one `'static` handler serve any
 /// execution's arena.
-pub type HostFn = Arc<dyn for<'gc> Fn(&[Gc<'gc, SLVal<'gc>>]) -> Result<SLVal<'gc>, String>>;
+pub type HostFn =
+  Arc<dyn for<'gc> Fn(&Mutation<'gc>, &[Gc<'gc, SLVal<'gc>>]) -> Result<SLVal<'gc>, String>>;
 
 /// A builtin: metadata ([`BuiltinSpec`]) plus its handler ([`HostFn`]).
 #[derive(Clone)]
@@ -34,8 +39,12 @@ impl Builtin {
   }
 
   /// Invoke this builtin's handler with the given arguments.
-  pub fn call<'gc>(&self, args: &[Gc<'gc, SLVal<'gc>>]) -> Result<SLVal<'gc>, String> {
-    (self.func)(args)
+  pub fn call<'gc>(
+    &self,
+    mc: &'gc Mutation<'gc>,
+    args: &[Gc<'gc, SLVal<'gc>>],
+  ) -> Result<SLVal<'gc>, String> {
+    (self.func)(mc, args)
   }
 
   /// A unary (one-arg) builtin.
@@ -50,7 +59,7 @@ impl Builtin {
         name,
         num_params: Some(1),
       },
-      func: Arc::new(move |args| func(args[0])),
+      func: Arc::new(move |_mc, args| func(args[0])),
     }
   }
 
@@ -67,7 +76,32 @@ impl Builtin {
         name,
         num_params: Some(2),
       },
-      func: Arc::new(move |args| func(args[0], args[1])),
+      func: Arc::new(move |_mc, args| func(args[0], args[1])),
+    }
+  }
+
+  /// A binary builtin that needs the GC `Mutation` context (e.g. to allocate a
+  /// fresh `List`). `func` receives `(mc, left, right)`. The `mc` reference's
+  /// lifetime is left elided (independent of `'gc`) so that the coercion into
+  /// `HostFn` — whose `&Mutation<'gc>` and `&[Gc<'gc, …>]` references also have
+  /// independent lifetimes — succeeds despite `SLVal<'gc>` being invariant.
+  pub fn binary_alloc(
+    module: &'static str,
+    name: &'static str,
+    func: impl for<'gc> Fn(
+        &Mutation<'gc>,
+        Gc<'gc, SLVal<'gc>>,
+        Gc<'gc, SLVal<'gc>>,
+      ) -> Result<SLVal<'gc>, String>
+      + 'static,
+  ) -> Self {
+    Builtin {
+      spec: BuiltinSpec {
+        module,
+        name,
+        num_params: Some(2),
+      },
+      func: Arc::new(move |mc, args| func(mc, args[0], args[1])),
     }
   }
 
@@ -88,7 +122,7 @@ impl Builtin {
         name,
         num_params: Some(3),
       },
-      func: Arc::new(move |args| func(args[0], args[1], args[2])),
+      func: Arc::new(move |_mc, args| func(args[0], args[1], args[2])),
     }
   }
 
@@ -107,7 +141,7 @@ impl Builtin {
         name,
         num_params: None,
       },
-      func: Arc::new(move |args| func(args)),
+      func: Arc::new(move |_mc, args| func(args)),
     }
   }
 }
@@ -253,6 +287,73 @@ pub fn default_builtins() -> Builtins {
         )),
       }
     }))
+    // ── rand module ────────────────────────────────────────────────────────
+    // (rand.rng seed "name") -> Int
+    //   Deterministically derives a new 64-bit seed from `seed` (Int) and
+    //   `name` (String) using BLAKE3. Same inputs always produce the same
+    //   output; differing `name` or `seed` produces differing output.
+    .with_builtin(Builtin::binary("rand", "rng", |seed, name| {
+      let parent = match &*seed {
+        SLVal::Int(i) => *i,
+        other => return Err(format!("rand.rng: expected Int seed, got {:?}", other)),
+      };
+      let ns = match &*name {
+        SLVal::String(s) => s.as_str(),
+        other => return Err(format!("rand.rng: expected String name, got {:?}", other)),
+      };
+      Ok(SLVal::Int(rand_rng(parent, ns)))
+    }))
+    // (rand.roll seed sides) -> (list roll new_seed)
+    //   Pure: given an Int `seed` and an Int `sides` (> 0), returns a 2-element
+    //   list `[roll, new_seed]` where `roll` is in `1..=sides` and `new_seed`
+    //   is the advanced RNG state to thread into the next call.
+    .with_builtin(Builtin::binary_alloc("rand", "roll", |mc, seed, sides| {
+      let s = match &*seed {
+        SLVal::Int(i) => *i,
+        other => return Err(format!("rand.roll: expected Int seed, got {:?}", other)),
+      };
+      let n = match &*sides {
+        SLVal::Int(i) => *i,
+        other => return Err(format!("rand.roll: expected Int sides, got {:?}", other)),
+      };
+      if n <= 0 {
+        return Err(format!("rand.roll: sides must be positive, got {}", n));
+      }
+      let (roll, next) = rand_roll(s, n);
+      Ok(SLVal::List(vec![
+        Gc::new(mc, SLVal::Int(roll)),
+        Gc::new(mc, SLVal::Int(next)),
+      ]))
+    }))
+}
+
+/// Derive a deterministic 64-bit seed from a parent seed and a name, using
+/// BLAKE3. The 64-bit result is the first 8 bytes of the BLAKE3 XOF output.
+pub fn rand_rng(parent_seed: i64, name: &str) -> i64 {
+  let mut h = Hasher::new();
+  h.update(&parent_seed.to_le_bytes());
+  h.update(name.as_bytes());
+  let mut out = [0u8; 32];
+  h.finalize_xof().fill(&mut out);
+  i64::from_le_bytes(out[..8].try_into().unwrap())
+}
+
+/// Roll a die with `sides` faces from `seed`. Returns `(roll, new_seed)` where
+/// `roll` is in `1..=sides` and `new_seed` is the advanced state, so callers
+/// thread it into the next `rand_roll` (or `rand.rng`) call. Pure and
+/// deterministic: same inputs always yield the same outputs.
+pub fn rand_roll(seed: i64, sides: i64) -> (i64, i64) {
+  let mut h = Hasher::new();
+  h.update(&seed.to_le_bytes());
+  h.update(b"rand.roll");
+  let mut seed32 = [0u8; 32];
+  h.finalize_xof().fill(&mut seed32);
+  let mut rng = ChaCha8Rng::from_seed(seed32);
+  let roll = 1 + (rng.next_u64() % sides as u64) as i64;
+  let mut next_bytes = [0u8; 8];
+  rng.fill_bytes(&mut next_bytes);
+  let next_seed = i64::from_le_bytes(next_bytes);
+  (roll, next_seed)
 }
 
 /// Normalize a possibly-negative index into a non-negative clamped index, using
@@ -264,5 +365,122 @@ fn norm_index(i: i64, len: i64) -> i64 {
     i + len
   } else {
     i
+  }
+}
+
+#[cfg(test)]
+mod test {
+  use super::*;
+  use crate::compiler::compile_executable_from_source;
+  use crate::interpreter::{Interpreter, SLValue};
+  use rstest::rstest;
+
+  /// End-to-end: the surface `(rand.rng seed "name")` returns the same Int that
+  /// [`rand_rng`] produces directly.
+  #[rstest]
+  #[case::alpha(0, "alpha", -1438303955140652998)]
+  #[case::beta(1, "beta", 6165243067257761546)]
+  #[case::battle(42, "battle", -6532365554512174988)]
+  #[case::neg(-1, "neg", -2221088163922545247)]
+  #[case::weather(100, "weather", 6058102796144909055)]
+  #[case::loop_(7, "loop", 3200058603457882367)]
+  #[case::doors(256, "doors", -7515552181829398974)]
+  #[case::shadow(-99, "shadow", 6601820722361913051)]
+  #[case::big(123_456_789, "big", -7499502896394584729)]
+  #[case::huge(-8_589_934_592, "huge", 5640261956235639084)]
+  fn rand_rng_surface(#[case] seed: i64, #[case] name: &str, #[case] expected: i64) {
+    let source = format!("(fn main () (rand.rng {} \"{}\"))", seed, name);
+    let pkg =
+      compile_executable_from_source(&source, ("main", "main"), &default_builtins().specs())
+        .unwrap();
+    let interp = Interpreter::new(pkg);
+    let mut exec = interp.call_main().unwrap();
+    assert_eq!(
+      exec.run_until_done().unwrap(),
+      SLValue::Int(expected),
+      "rand.rng {} {:?}",
+      seed,
+      name
+    );
+  }
+
+  /// End-to-end: the surface `(rand.roll seed sides)` returns a 2-element list
+  /// `[roll, new_seed]` matching [`rand_roll`], and threading `new_seed` into
+  /// the next call reproduces [`rand_roll_chain_pinned`]'s 10-roll chain.
+  #[rstest]
+  #[case::alpha(0, "alpha", [1, 16, 13, 17, 12, 15, 1, 18, 14, 11])]
+  #[case::beta(1, "beta", [17, 12, 8, 7, 12, 6, 18, 7, 8, 3])]
+  #[case::battle(42, "battle", [15, 7, 6, 1, 16, 16, 12, 14, 17, 19])]
+  #[case::neg(-1, "neg", [17, 20, 15, 19, 10, 11, 1, 5, 11, 17])]
+  #[case::weather(100, "weather",[3, 6, 9, 15, 9, 12, 15, 20, 10, 1])]
+  #[case::loop_(7, "loop", [3, 3, 1, 4, 4, 12, 19, 19, 10, 17])]
+  #[case::doors(256, "doors", [11, 17, 19, 17, 10, 3, 4, 18, 2, 5])]
+  #[case::shadow(-99, "shadow", [5, 20, 4, 15, 10, 3, 13, 4, 4, 9])]
+  #[case::big(123_456_789, "big", [14, 12, 19, 11, 7, 3, 3, 13, 9, 11])]
+  #[case::huge(-8_589_934_592, "huge",[2, 15, 4, 6, 19, 1, 2, 9, 3, 18])]
+  fn rand_roll_surface_chain(#[case] seed: i64, #[case] name: &str, #[case] expected: [i64; 10]) {
+    let src = format!(
+      "(fn rolln (s n acc)
+         (if (std.== n 0)
+           acc
+           (block
+             (let r (rand.roll s 20))
+             (rolln (std.idx r 1) (std.- n 1) (std.push acc (std.idx r 0))))))
+
+       (fn main () (rolln (rand.rng {seed} \"{name}\") 10 (std.list)))
+       "
+    );
+    let pkg =
+      compile_executable_from_source(&src, ("main", "main"), &default_builtins().specs()).unwrap();
+    let interp = Interpreter::new(pkg);
+    let mut exec = interp.call_main().unwrap();
+    let result = exec.run_until_done().unwrap();
+    let got: Vec<i64> = match result {
+      SLValue::List(items) => items
+        .into_iter()
+        .map(|v| match v {
+          SLValue::Int(i) => i,
+          other => panic!("expected Int in roll list, got {:?}", other),
+        })
+        .collect(),
+      other => panic!("expected List from rolln, got {:?}", other),
+    };
+    assert_eq!(got, expected.to_vec(), "seed={} name={:?}", seed, name);
+  }
+
+  /// `rand.roll` rejects non-positive sides with a runtime error.
+  #[test]
+  fn rand_roll_rejects_non_positive_sides() {
+    let source = "(fn main () (rand.roll (rand.rng 0 \"x\") 0))";
+    let pkg = compile_executable_from_source(source, ("main", "main"), &default_builtins().specs())
+      .unwrap();
+    let interp = Interpreter::new(pkg);
+    let mut exec = interp.call_main().unwrap();
+    let err = exec.run_until_done().unwrap_err();
+    assert!(err.contains("sides must be positive"), "got: {}", err);
+  }
+
+  /// `rand.roll` rejects non-Int seeds.
+  #[test]
+  fn rand_roll_rejects_non_int_seed() {
+    let source = "(fn main () (rand.roll \"not-a-seed\" 6))";
+    let pkg = compile_executable_from_source(source, ("main", "main"), &default_builtins().specs())
+      .unwrap();
+    let interp = Interpreter::new(pkg);
+    let mut exec = interp.call_main().unwrap();
+    let err = exec.run_until_done().unwrap_err();
+    assert!(err.contains("expected Int seed"), "got: {}", err);
+  }
+
+  /// `rand.rng` rejects non-Int seeds.
+  #[test]
+  fn rand_rng_rejects_non_int_seed() {
+    let source = "(fn main () (rand.rng \"x\" \"name\"))";
+    let pkg = compile_executable_from_source(source, ("main", "main"), &default_builtins().specs())
+      .unwrap();
+    let interp = Interpreter::new(pkg);
+    let mut exec = interp.call_main().unwrap();
+    let err = exec.run_until_done().unwrap_err();
+    assert!(err.contains("expected Int seed"), "got: {}", err);
   }
 }

@@ -387,6 +387,11 @@ impl<'b> ModuleCompiler<'b> {
         self.discover_expr(then)?;
         self.discover_expr(els)?;
       }
+      AST::Block(body) => {
+        for expr in body {
+          self.discover_expr(expr)?;
+        }
+      }
       AST::CallFixed(ident, args) => {
         self.resolve_builtin_for_discovery(ident)?;
         for arg in args {
@@ -559,6 +564,11 @@ impl<'b> ModuleCompiler<'b> {
         self.count_let_locals(then, locals, next_pair)?;
         self.count_let_locals(els, locals, next_pair)?;
       }
+      AST::Block(body) => {
+        for expr in body {
+          self.count_let_locals(expr, locals, next_pair)?;
+        }
+      }
       AST::CallFixed(_, args) => {
         for arg in args {
           self.count_let_locals(arg, locals, next_pair)?;
@@ -679,6 +689,26 @@ impl<'b> ModuleCompiler<'b> {
           func,
         )?;
         func.instructions().end();
+      }
+      AST::Block(body) => {
+        let last_idx = body.len().saturating_sub(1);
+        for (i, expr) in body.iter().enumerate() {
+          self.compile_expr(
+            expr,
+            locals,
+            next_pair,
+            num_params,
+            num_lets,
+            def_index,
+            num_imports,
+            func,
+          )?;
+          if i != last_idx {
+            // Discard this sub-expression's (payload, tag) pair.
+            func.instructions().drop();
+            func.instructions().drop();
+          }
+        }
       }
       AST::CallFixed(ident, args) => self.compile_call_fixed(
         ident,

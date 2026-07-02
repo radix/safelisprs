@@ -15,6 +15,9 @@ bincode = "1.0"
 anyhow = "1.0.56"
 gc-arena = "0.6"
 wasm-encoder = "0.252.0"
+blake3 = {version = "1", default-features = false}
+rand_chacha = {version = "0.9", default-features = false}
+rand_core = {version = "0.9", default-features = false}
 
 [dev-dependencies]
 pretty_assertions = "1.2.1"
