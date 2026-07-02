@@ -365,12 +365,13 @@ pub fn default_builtins() -> Builtins {
 /// Derive a deterministic 64-bit seed from a parent seed and a name, using
 /// BLAKE3. The 64-bit result is the first 8 bytes of the BLAKE3 XOF output.
 pub fn rand_rng(parent_seed: i64, name: &str) -> i64 {
+  // NEVER CHANGE THIS CODE
   let mut h = Hasher::new();
   h.update(&parent_seed.to_le_bytes());
   h.update(name.as_bytes());
-  let mut out = [0u8; 32];
-  h.finalize_xof().fill(&mut out);
-  i64::from_le_bytes(out[..8].try_into().unwrap())
+  let mut out = [0u8; 8];
+  out.copy_from_slice(&h.finalize().as_bytes()[..8]);
+  i64::from_le_bytes(out)
 }
 
 /// Roll a die with `sides` faces from `seed`. Returns `(roll, new_seed)` where
@@ -378,12 +379,11 @@ pub fn rand_rng(parent_seed: i64, name: &str) -> i64 {
 /// thread it into the next `rand_roll` (or `rand.rng`) call. Pure and
 /// deterministic: same inputs always yield the same outputs.
 pub fn rand_roll(seed: i64, sides: i64) -> (i64, i64) {
-  let mut h = Hasher::new();
-  h.update(&seed.to_le_bytes());
-  h.update(b"rand.roll");
-  let mut seed32 = [0u8; 32];
-  h.finalize_xof().fill(&mut seed32);
-  let mut rng = ChaCha8Rng::from_seed(seed32);
+  // NEVER CHANGE THIS CODE
+  let mut chachaseed = [0u8; 32];
+  chachaseed[..8].copy_from_slice(&seed.to_le_bytes());
+  let mut rng = ChaCha8Rng::from_seed(chachaseed);
+  // I don't give a DANG about no modulo bias with a u64.
   let roll = 1 + (rng.next_u64() % sides as u64) as i64;
   let mut next_bytes = [0u8; 8];
   rng.fill_bytes(&mut next_bytes);
@@ -453,16 +453,16 @@ mod test {
   /// and returns the roll as an Int. Calling it 10 times against the same cell
   /// reproduces the expected 10-roll chain.
   #[rstest]
-  #[case::alpha(0, "alpha", [1, 16, 13, 17, 12, 15, 1, 18, 14, 11])]
-  #[case::beta(1, "beta", [17, 12, 8, 7, 12, 6, 18, 7, 8, 3])]
-  #[case::battle(42, "battle", [15, 7, 6, 1, 16, 16, 12, 14, 17, 19])]
-  #[case::neg(-1, "neg", [17, 20, 15, 19, 10, 11, 1, 5, 11, 17])]
-  #[case::weather(100, "weather", [3, 6, 9, 15, 9, 12, 15, 20, 10, 1])]
-  #[case::loop_(7, "loop", [3, 3, 1, 4, 4, 12, 19, 19, 10, 17])]
-  #[case::doors(256, "doors", [11, 17, 19, 17, 10, 3, 4, 18, 2, 5])]
-  #[case::shadow(-99, "shadow", [5, 20, 4, 15, 10, 3, 13, 4, 4, 9])]
-  #[case::big(123_456_789, "big", [14, 12, 19, 11, 7, 3, 3, 13, 9, 11])]
-  #[case::huge(-8_589_934_592, "huge", [2, 15, 4, 6, 19, 1, 2, 9, 3, 18])]
+  #[case::alpha(0, "alpha", [11, 6, 14, 18, 3, 4, 2, 7, 12, 1])]
+  #[case::beta(1, "beta", [18, 13, 1, 5, 18, 12, 9, 19, 4, 5])]
+  #[case::battle(42, "battle", [18, 17, 3, 10, 19, 15, 8, 5, 10, 12])]
+  #[case::neg(-1, "neg", [19, 18, 10, 12, 16, 20, 2, 1, 14, 2])]
+  #[case::weather(100, "weather", [13, 9, 6, 11, 15, 9, 4, 2, 15, 17])]
+  #[case::loop_(7, "loop", [12, 14, 15, 3, 19, 8, 1, 12, 7, 1])]
+  #[case::doors(256, "doors", [16, 5, 3, 10, 10, 8, 14, 12, 20, 9])]
+  #[case::shadow(-99, "shadow", [12, 4, 14, 9, 12, 7, 6, 15, 3, 18])]
+  #[case::big(123_456_789, "big", [17, 8, 18, 16, 14, 11, 11, 4, 10, 9])]
+  #[case::huge(-8_589_934_592, "huge", [4, 18, 7, 17, 11, 14, 15, 18, 1, 9])]
   fn rand_roll_surface_chain(#[case] seed: i64, #[case] name: &str, #[case] expected: [i64; 10]) {
     // rolln(rng, indices, acc):
     //   if indices is empty: acc
