@@ -31,6 +31,12 @@ struct Args {
   )]
   time_limit_ms: Option<u64>,
 
+  #[clap(
+    long,
+    help = "maximum number of live GC-allocated bytes (default: unlimited)"
+  )]
+  memory_limit_bytes: Option<usize>,
+
   #[clap(help = "A .slc file to interpret")]
   input_file: String,
 }
@@ -61,6 +67,9 @@ fn main() -> Result<()> {
 
   let interpreter = Interpreter::new(package);
   let mut exec = interpreter.call_main().expect("Error setting up main");
+  if let Some(bytes) = args.memory_limit_bytes {
+    exec.set_memory_limit(Some(bytes));
+  }
   match (args.instruction_limit, args.time_limit_ms) {
     (None, None) => {
       let result = exec.run_until_done().map_err(|e| anyhow!("{}", e))?;
