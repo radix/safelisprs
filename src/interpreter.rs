@@ -17,6 +17,12 @@ use crate::compiler::{Callable, Instruction, LinkedFunction as Function, Package
 pub(crate) struct ExecRoot<'gc> {
   stack: Vec<Gc<'gc, SLVal<'gc>>>,
   frames: Vec<Frame<'gc>>,
+  /// Optional cap on the live `Gc` allocation bytes (as reported by the
+  /// arena's `Metrics::total_gc_allocation`). When set, `step` errors as
+  /// soon as the live GC heap exceeds this many bytes. Only GC allocations
+  /// are counted — the value stack and call frames (which hold `Gc` pointers
+  /// but don't allocate new GC boxes themselves) are not separately tracked.
+  memory_limit_bytes: Option<usize>,
 }
 
 /// A stack frame. The function is stored by value (cloned on entry) so that
@@ -211,6 +217,7 @@ impl Execution {
     let arena = Arena::new(|_mc| ExecRoot {
       stack: Vec::new(),
       frames: Vec::new(),
+      memory_limit_bytes: None,
     });
     Execution {
       arena,
@@ -249,9 +256,31 @@ impl Execution {
   }
 
   /// The total bytes currently allocated by live `Gc` pointers in this
-  /// execution's arena.
+  /// execution's arena. This is the value the optional memory limit is
+  /// compared against on every `step`.
   pub fn gc_allocation_bytes(&self) -> usize {
     self.arena.metrics().total_gc_allocation()
+  }
+
+  /// The current live GC heap size in bytes (alias of
+  /// [`gc_allocation_bytes`](Self::gc_allocation_bytes)).
+  pub fn memory_usage(&self) -> usize {
+    self.gc_allocation_bytes()
+  }
+
+  /// Cap the live `Gc` allocation bytes for this execution. When set,
+  /// [`step`](Execution::step) (and the `run*` helpers that drive it) will
+  /// return an `Err` as soon as the live GC heap exceeds this many bytes. Set
+  /// to `None` to disable the limit (the default).
+  pub fn set_memory_limit(&mut self, limit: Option<usize>) {
+    self
+      .arena
+      .mutate_root(|_, root| root.memory_limit_bytes = limit);
+  }
+
+  /// The configured memory limit in bytes, or `None` if no limit is set.
+  pub fn memory_limit(&self) -> Option<usize> {
+    self.arena.mutate(|_, root| root.memory_limit_bytes)
   }
 
   /// Force a full garbage-collection cycle, freeing all unreachable `Gc`
@@ -352,6 +381,23 @@ impl<'gc> ExecRoot<'gc> {
     self.frames.is_empty()
   }
 
+  /// Returns `Ok(())` if the live GC heap is within the configured limit, or
+  /// `Err` with a descriptive message if it has been exceeded. No-op when no
+  /// limit is set. Only `Gc` allocations are counted (via
+  /// `Metrics::total_gc_allocation`); stack and frames are ignored.
+  fn check_memory_limit(&self, mc: &Mutation<'gc>) -> Result<(), String> {
+    if let Some(limit) = self.memory_limit_bytes {
+      let usage = mc.metrics().total_gc_allocation();
+      if usage > limit {
+        return Err(format!(
+          "memory limit exceeded: {} bytes live (limit {})",
+          usage, limit
+        ));
+      }
+    }
+    Ok(())
+  }
+
   /// Push a `Gc<SLVal>` onto the execution's value stack. Used by
   /// [`Builtin::call`] to push a builtin's result.
   pub(crate) fn push_gc(&mut self, val: Gc<'gc, SLVal<'gc>>) {
@@ -436,6 +482,8 @@ impl<'gc> ExecRoot<'gc> {
     executed: &mut u64,
   ) -> Result<(), String> {
     *executed = executed.saturating_add(1);
+    self.check_memory_limit(mc)?;
+
     let inst = {
       let frame = self
         .frames
@@ -1656,6 +1704,102 @@ mod test {
 
     // And the value must still be readable after collection.
     assert!(matches!(exec.peek_value().unwrap(), SLValue::Cell(_)));
+  }
+
+  #[test]
+  fn memory_limit_defaults_to_none() {
+    let pkg = Package::default();
+    let mut exec = Execution::new(pkg, default_builtins());
+    assert!(exec.memory_limit().is_none());
+    assert_eq!(exec.memory_usage(), exec.gc_allocation_bytes());
+    exec.set_memory_limit(Some(123));
+    assert_eq!(exec.memory_limit(), Some(123));
+    exec.set_memory_limit(None);
+    assert!(exec.memory_limit().is_none());
+  }
+
+  #[test]
+  fn memory_limit_errors_when_exceeded() {
+    // Allocate one Cell wrapping an Int. With a limit lower than the resulting
+    // live GC heap, the very first `step` (which allocates the void local on
+    // `enter_function`) or a later step should error before completing.
+    let main = compiler::Function {
+      num_locals: 1,
+      num_params: 0,
+      instructions: vec![
+        Instruction::PushInt(42),
+        Instruction::MakeCell,
+        Instruction::SetLocal(0),
+        Instruction::PushInt(99),
+        Instruction::Return,
+      ],
+    };
+    let pkg = Package {
+      modules: vec![(
+        "main".to_string(),
+        vec![("main".to_string(), Callable::Function(main))],
+      )],
+      main: Some((0, 0)),
+    };
+    let interp = Interpreter::new(pkg);
+    let mut exec = interp.call_main().unwrap();
+    // 1 byte is far below any allocation; the first step after entering main
+    // (which has allocated a Void local in the GC) must immediately trip the
+    // limit.
+    exec.set_memory_limit(Some(1));
+    let err = exec.run_until_done().unwrap_err();
+    assert!(
+      err.contains("memory limit exceeded"),
+      "unexpected error: {}",
+      err
+    );
+  }
+
+  #[test]
+  fn memory_limit_allows_small_program() {
+    // A trivial program that only pushes an int and returns should fit well
+    // under a generous limit and complete normally.
+    let source = "(fn main () 5)";
+    let pkg = compile_executable_from_source(
+      &source.to_string(),
+      ("main", "main"),
+      &default_builtins().specs(),
+    )
+    .unwrap();
+    let interp = Interpreter::new(pkg);
+    let mut exec = interp.call_main().unwrap();
+    exec.set_memory_limit(Some(1024 * 1024));
+    let result = exec.run_until_done().unwrap();
+    assert_eq!(result, SLValue::Int(5));
+  }
+
+  #[test]
+  fn memory_limit_triggers_during_unbounded_allocation() {
+    // A program that builds ever-growing lists: `loop(n)` returns a list of `n`
+    // ints by repeatedly `push`ing onto an accumulator. With a tight memory
+    // limit, the run must error instead of running to completion.
+    let source = "
+      (fn loop (n acc)
+        (if (std.== n 0)
+          acc
+          (loop (std.- n 1) (std.push acc n))))
+      (fn main () (loop 100000 (std.list)))
+    ";
+    let pkg = compile_executable_from_source(
+      &source.to_string(),
+      ("main", "main"),
+      &default_builtins().specs(),
+    )
+    .unwrap();
+    let interp = Interpreter::new(pkg);
+    let mut exec = interp.call_main().unwrap();
+    exec.set_memory_limit(Some(64 * 1024));
+    let err = exec.run_until_done().unwrap_err();
+    assert!(
+      err.contains("memory limit exceeded"),
+      "unexpected error: {}",
+      err
+    );
   }
 
   #[test]
