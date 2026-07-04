@@ -178,11 +178,11 @@ impl Drop for Accounted<'_> {
 /// `capacity() * size_of::<T>()`; it's reconciled on every capacity change
 /// (push/reserve/shrink_to_fit) and released in `Drop`.
 ///
-/// This is `!Collect` by itself — it's owned by `ExecRoot`/`Frame` whose
-/// `#[derive(Collect)]` uses `#[collect(require_static)]` on the `TrackedVec`
-/// fields (the tracker is `'static`; the `Vec<T>`'s `Gc` pointers are traced
-/// via the explicit `Collect` impl below, which delegates to `Vec<T>`'s
-/// `Collect` impl).
+/// `Collect` is implemented manually below: it traces `inner` (so any `Gc`
+/// pointers held by the elements are traced) and ignores the `tracker` (an
+/// `Rc<MemoryTracker>` holds no `Gc` pointers). The outer `ExecRoot`/`Frame`
+/// derives see this via the standard field-tracing the derive macro emits —
+/// no `require_static` annotation is needed on the `TrackedVec` fields.
 pub(crate) struct TrackedVec<T> {
   inner: Vec<T>,
   tracker: SharedTracker,
