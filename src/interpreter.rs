@@ -18,6 +18,12 @@ use crate::compiler::{Callable, Instruction, LinkedFunction as Function, Package
 pub struct MemoryTracker {
   external_bytes: Cell<usize>,
   limit: Cell<Option<usize>>,
+  /// The `external_bytes` value at the last `pacing_tick`. Used by
+  /// [`MemoryTracker::pacing_delta`] to compute how much the external heap has
+  /// grown/shrunk since the last call, so [`check_memory_limit`] can feed that
+  /// delta to `Metrics::adjust_debt` and keep incremental collection paced to
+  /// external allocation (not just `Gc`-box allocation).
+  last_seen_external: Cell<usize>,
 }
 
 impl MemoryTracker {
@@ -26,6 +32,8 @@ impl MemoryTracker {
   }
 
   /// Charge `n` bytes to this tracker's running count. Returns the new total.
+  /// Uses checked arithmetic so an overflow panics (rather than silently
+  /// wrapping and corrupting the limit).
   fn charge(&self, n: usize) -> usize {
     let new = self
       .external_bytes
@@ -38,7 +46,7 @@ impl MemoryTracker {
 
   /// Release `n` bytes from this tracker's running count (called from
   /// `Accounted::drop` when the GC sweeps an unreachable box). Returns the new
-  /// total.
+  /// total. Uses checked arithmetic so an underflow panics.
   fn release(&self, n: usize) -> usize {
     let prev = self.external_bytes.get();
     let new = prev.checked_sub(n).expect("external byte count underflow");
@@ -56,6 +64,19 @@ impl MemoryTracker {
 
   pub fn set_limit(&self, limit: Option<usize>) {
     self.limit.set(limit);
+  }
+
+  /// Returns the change in `external_bytes` since the last call, and updates
+  /// the last-seen snapshot. Positive deltas grow GC debt (the collector
+  /// should run sooner); negative deltas shrink it. Used by
+  /// [`ExecRoot::check_memory_limit`] to keep gc-arena's incremental
+  /// collection paced to *external* (non-`Gc`-box) allocation, which it
+  /// otherwise can't see.
+  fn pacing_delta(&self) -> f64 {
+    let now = self.external_bytes.get();
+    let delta = now as f64 - self.last_seen_external.get() as f64;
+    self.last_seen_external.set(now);
+    delta
   }
 }
 
@@ -729,11 +750,20 @@ impl<'gc> ExecRoot<'gc> {
 
   /// Returns `Ok(())` if the live memory (gc-arena's `total_gc_allocation` +
   /// this execution's external bytes) is within the configured limit, or `Err`
-  /// with a descriptive message if it has been exceeded. No-op when no limit is
-  /// set. Step 2 of the memory-limit plan: only GC-box bytes + per-`Gc`-box
-  /// external payload (String/List/Partial backing) are counted; stack and
-  /// frame `Vec` overhead lands in step 3.
+  /// with a descriptive message if it has been exceeded. No-op limit check when
+  /// no limit is set, but *always* feeds the external-bytes delta to
+  /// `Metrics::adjust_debt` so incremental collection stays paced to external
+  /// (non-`Gc`-box) allocation — gc-arena otherwise can't see String/List
+  /// backing storage and wouldn't collect soon enough to keep large external
+  /// heaps bounded.
   fn check_memory_limit(&self, mc: &Mutation<'gc>) -> Result<(), String> {
+    // Pace incremental collection to external allocation. Positive deltas grow
+    // debt (collect sooner); negative shrink it. This keeps `collect_debt`
+    // responsive to large strings/lists, not just `Gc`-box allocation.
+    let delta = self.tracker.pacing_delta();
+    if delta != 0.0 {
+      mc.metrics().adjust_debt(delta);
+    }
     if let Some(limit) = self.tracker.limit() {
       let usage = mc.metrics().total_gc_allocation() + self.tracker.external_bytes();
       if usage > limit {
@@ -830,6 +860,10 @@ impl<'gc> ExecRoot<'gc> {
     executed: &mut u64,
   ) -> Result<(), String> {
     *executed = executed.saturating_add(1);
+    // Pre-instruction check catches limits exceeded by *previous* allocations
+    // (e.g. a `Push` that pushed us over). The post-instruction check below
+    // catches the current instruction's allocations at the instruction that
+    // made them.
     self.check_memory_limit(mc)?;
 
     // Resolve the current frame's instructions. `Indexed` looks up via the
@@ -973,6 +1007,10 @@ impl<'gc> ExecRoot<'gc> {
         }
       }
     }
+    // Post-instruction check: catch the allocation made by *this* instruction
+    // (Push/MakeCell/PartialApply/etc.) at the instruction that made it, rather
+    // than one instruction late.
+    self.check_memory_limit(mc)?;
     Ok(())
   }
 

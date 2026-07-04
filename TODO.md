@@ -35,7 +35,7 @@ The plan (each step independently testable; commit after each):
       `MemoryTracker` by `capacity() * size_of::<T>()`. Use it for
       `ExecRoot.stack`, `ExecRoot.frames`, and `Frame.locals`. This is what
       makes `memory_limit_catches_unbounded_stack_and_frames` go green.
-- [ ] **4. Pacing + arithmetic polish.** Call
+- [x] **4. Pacing + arithmetic polish + charge-then-check.** Call
       `Metrics::adjust_debt(delta)` when external bytes grow/shrink so large
       strings pace incremental collection. Use checked arithmetic on the
       tracker. Move the per-step limit check to *after* the instruction
