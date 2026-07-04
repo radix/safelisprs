@@ -1,9 +1,153 @@
+use std::cell::Cell;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gc_arena::{collect::Collect, Arena, Gc, Mutation, RefLock, Rootable};
 
 use crate::builtins::{default_builtins, Builtins};
 use crate::compiler::{Callable, Instruction, LinkedFunction as Function, Package};
+
+/// Per-execution memory accounting. Shared between the `Execution` (which owns
+/// the canonical `Rc`) and every `Accounted` box allocated in that execution's
+/// arena (each carries a cloned `Rc`). Holds the running external-bytes count
+/// (Rust-heap storage owned by `SLVal` payloads but not seen by gc-arena's
+/// `Metrics`) and an optional cap. `Rc<Cell<_>>` is appropriate because
+/// gc-arena is single-threaded; if `Execution` ever needs to be `Send`, swap
+/// for `Arc<AtomicUsize>`.
+#[derive(Default)]
+pub struct MemoryTracker {
+  external_bytes: Cell<usize>,
+  limit: Cell<Option<usize>>,
+}
+
+impl MemoryTracker {
+  pub fn new() -> Self {
+    Self::default()
+  }
+
+  /// Charge `n` bytes to this tracker's running count. Returns the new total.
+  fn charge(&self, n: usize) -> usize {
+    let new = self
+      .external_bytes
+      .get()
+      .checked_add(n)
+      .expect("external byte count overflow");
+    self.external_bytes.set(new);
+    new
+  }
+
+  /// Release `n` bytes from this tracker's running count (called from
+  /// `Accounted::drop` when the GC sweeps an unreachable box). Returns the new
+  /// total.
+  fn release(&self, n: usize) -> usize {
+    let prev = self.external_bytes.get();
+    let new = prev.checked_sub(n).expect("external byte count underflow");
+    self.external_bytes.set(new);
+    new
+  }
+
+  pub fn external_bytes(&self) -> usize {
+    self.external_bytes.get()
+  }
+
+  pub fn limit(&self) -> Option<usize> {
+    self.limit.get()
+  }
+
+  pub fn set_limit(&self, limit: Option<usize>) {
+    self.limit.set(limit);
+  }
+}
+
+/// A `MemoryTracker` shared via `Rc` so it can live inside a GC'd `Accounted`
+/// box. Each `Execution` mints one `Rc<MemoryTracker>`; every value allocated
+/// in that execution receives a clone. The tracker stays alive until the last
+/// `Accounted` box is swept (which releases its `Rc`).
+pub type SharedTracker = Rc<MemoryTracker>;
+
+/// Measure the *directly owned* Rust-heap storage of an `SLVal` payload — the
+/// bytes that live outside the `GcBox` layout gc-arena records. This is what
+/// `Accounted` charges the tracker at allocation and releases at sweep:
+///
+/// - `String`: the `String`'s heap buffer (`capacity()`, not `len`).
+/// - `List`/`Partial`: the `Vec`'s backing array
+///   (`capacity() * size_of::<Gc<_>>()`).
+/// - Other variants: 0 (scalars, `Void`, `FunctionRef`, `Cell` whose contents
+///   are themselves `Gc`-pointed and accounted by their own box).
+///
+/// Only *directly owned* storage is counted; pointed-to `Gc` boxes are
+/// accounted by their own `Accounted` wrapper, so there's no double-counting.
+fn external_bytes_of<'gc>(value: &SLVal<'gc>) -> usize {
+  match value {
+    SLVal::String(s) => s.capacity(),
+    SLVal::List(items) => items.capacity() * std::mem::size_of::<Gc<'gc, Accounted<'gc>>>(),
+    SLVal::Partial(p) => p.args.capacity() * std::mem::size_of::<Gc<'gc, Accounted<'gc>>>(),
+    _ => 0,
+  }
+}
+
+/// A garbage-collected SafeLisp value wrapped with per-execution memory
+/// accounting. The `value: SLVal` is the actual payload; `tracker` and
+/// `external_bytes` record the Rust-heap storage `value` directly owns (string
+/// bytes, list/partial `Vec` backings) so the `Execution`'s memory limit can
+/// see storage that gc-arena's `Metrics` does not.
+///
+/// `Accounted` is `!Clone` by design: every runtime value must be created via
+/// `ExecRoot::alloc_value`, which charges the tracker. `Drop` releases the
+/// charge — it touches only `tracker` and the `usize`, never `value` (which
+/// may contain dead `Gc` pointers during sweep), satisfying the
+/// `#[collect(unsafe_drop)]` safety condition.
+#[derive(Collect)]
+#[collect(unsafe_drop)]
+pub struct Accounted<'gc> {
+  pub value: SLVal<'gc>,
+  #[collect(require_static)]
+  tracker: SharedTracker,
+  external_bytes: usize,
+}
+
+impl<'gc> std::fmt::Debug for Accounted<'gc> {
+  /// Debug-format only the `SLVal` payload; the tracker and byte count are
+  /// accounting metadata, not part of the value's identity.
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct("Accounted").field("value", &self.value).finish()
+  }
+}
+
+impl<'gc> PartialEq for Accounted<'gc> {
+  /// Compare accounted values by their `SLVal` payload. The tracker and
+  /// `external_bytes` are accounting metadata, not part of the value's identity.
+  fn eq(&self, other: &Self) -> bool {
+    self.value == other.value
+  }
+}
+
+impl<'gc> Eq for Accounted<'gc> {}
+
+impl<'gc> Accounted<'gc> {
+  /// Construct an `Accounted` value, charge its external storage to `tracker`,
+  /// and return it ready to be boxed via `Gc::new`. Callers should go through
+  /// `ExecRoot::alloc_value` rather than calling this directly.
+  fn new(value: SLVal<'gc>, tracker: SharedTracker) -> Self {
+    let external_bytes = external_bytes_of(&value);
+    tracker.charge(external_bytes);
+    Accounted {
+      value,
+      tracker,
+      external_bytes,
+    }
+  }
+}
+
+impl Drop for Accounted<'_> {
+  fn drop(&mut self) {
+    // SAFETY for `#[collect(unsafe_drop)]`: this must not inspect `self.value`,
+    // which may contain dangling `Gc` pointers during arena teardown. We touch
+    // only `tracker` (a `Rc<MemoryTracker>`, `require_static`) and the
+    // `external_bytes` count.
+    self.tracker.release(self.external_bytes);
+  }
+}
 
 /// Per-execution state held inside an `Execution`'s own arena. Each `Execution`
 /// owns a private `Arena` whose root is this type. All interpreter logic lives
@@ -12,17 +156,65 @@ use crate::compiler::{Callable, Instruction, LinkedFunction as Function, Package
 /// — the same shape the original `Rc`-based `Execution` had, just branded with
 /// the gc-arena invariant `'gc` lifetime so that `Gc` pointers never escape a
 /// single `mutate_root` callback.
-#[derive(Collect, Default)]
+#[derive(Collect)]
 #[collect(no_drop)]
 pub(crate) struct ExecRoot<'gc> {
-  stack: Vec<Gc<'gc, SLVal<'gc>>>,
+  stack: Vec<Gc<'gc, Accounted<'gc>>>,
   frames: Vec<Frame<'gc>>,
-  /// Optional cap on the live `Gc` allocation bytes (as reported by the
-  /// arena's `Metrics::total_gc_allocation`). When set, `step` errors as
-  /// soon as the live GC heap exceeds this many bytes. Only GC allocations
-  /// are counted — the value stack and call frames (which hold `Gc` pointers
-  /// but don't allocate new GC boxes themselves) are not separately tracked.
-  memory_limit_bytes: Option<usize>,
+  /// Per-execution memory tracker. Owns the running external-bytes count (Rust
+  /// heap storage not seen by gc-arena's `Metrics`) and the optional cap. Each
+  /// `Accounted` box allocated in this arena carries a clone of this `Rc`, so
+  /// `Accounted::drop` (invoked by the GC at sweep) decrements the count for
+  /// the right execution. The `require_static` field attribute on `Accounted`
+  /// excludes this `Rc` from tracing.
+  #[collect(require_static)]
+  tracker: SharedTracker,
+}
+
+impl<'gc> ExecRoot<'gc> {
+  /// The single chokepoint for creating a `Gc<Accounted>` value. Wraps the
+  /// `SLVal` in `Accounted` (charging the tracker for any directly-owned
+  /// external Rust-heap storage) and boxes it via `Gc::new`. Every runtime
+  /// allocation must go through here so unaccounted values are hard to create
+  /// by accident.
+  pub(crate) fn alloc_value(&mut self, mc: &'gc Mutation<'gc>, value: SLVal<'gc>) -> Gc<'gc, Accounted<'gc>> {
+    Gc::new(mc, Accounted::new(value, self.tracker.clone()))
+  }
+
+  /// Reconstruct a `Gc<Accounted>` inside this execution's arena from an owned
+  /// `SLValue`, allocating fresh accounted `Gc` pointers for any non-scalar
+  /// sub-values. The arena-agnostic `SLValue` is deep-copied in, with each new
+  /// `Accounted` box charged to this execution's tracker.
+  fn import_value(&mut self, mc: &'gc Mutation<'gc>, value: &SLValue) -> Gc<'gc, Accounted<'gc>> {
+    match value {
+      SLValue::Int(i) => self.alloc_value(mc, SLVal::Int(*i)),
+      SLValue::Float(x) => self.alloc_value(mc, SLVal::Float(*x)),
+      SLValue::String(s) => self.alloc_value(mc, SLVal::String(s.clone())),
+      SLValue::Bool(b) => self.alloc_value(mc, SLVal::Bool(*b)),
+      SLValue::Void => self.alloc_value(mc, SLVal::Void),
+      SLValue::FunctionRef(m, n) => self.alloc_value(mc, SLVal::FunctionRef(*m, *n)),
+      SLValue::Partial { function, args } => {
+        let sub: Vec<Gc<'gc, Accounted<'gc>>> =
+          args.iter().map(|a| self.import_value(mc, a)).collect();
+        self.alloc_value(
+          mc,
+          SLVal::Partial(Partial {
+            function: *function,
+            args: sub,
+          }),
+        )
+      }
+      SLValue::Cell(inner) => {
+        let inner_gc = self.import_value(mc, inner);
+        self.alloc_value(mc, SLVal::Cell(Gc::new(mc, RefLock::new(inner_gc.value.clone()))))
+      }
+      SLValue::List(items) => {
+        let sub: Vec<Gc<'gc, Accounted<'gc>>> =
+          items.iter().map(|i| self.import_value(mc, i)).collect();
+        self.alloc_value(mc, SLVal::List(sub))
+      }
+    }
+  }
 }
 
 /// A stack frame. The function is stored by `(module, function)` index
@@ -36,7 +228,7 @@ pub(crate) struct ExecRoot<'gc> {
 #[collect(no_drop)]
 struct Frame<'gc> {
   function: FrameFunc,
-  locals: Vec<Gc<'gc, SLVal<'gc>>>,
+  locals: Vec<Gc<'gc, Accounted<'gc>>>,
   ip: usize,
 }
 
@@ -68,15 +260,20 @@ pub enum SLVal<'gc> {
   Void,
   FunctionRef(u32, u32),
   Partial(Partial<'gc>),
+  /// A cell holding a mutable `SLVal`. The `RefLock<SLVal>` box is *not*
+  /// wrapped in `Accounted` (the contents are mutated in place via `SetCell`,
+  /// and `Accounted` is `!Clone`), so the contents' external bytes are not
+  /// charged here. This is a known undercount for cells holding strings/lists;
+  /// refine in a follow-up.
   Cell(Gc<'gc, RefLock<SLVal<'gc>>>),
-  List(Vec<Gc<'gc, SLVal<'gc>>>),
+  List(Vec<Gc<'gc, Accounted<'gc>>>),
 }
 
 #[derive(Debug, PartialEq, Clone, Collect)]
 #[collect(no_drop)]
 pub struct Partial<'gc> {
   function: (u32, u32),
-  args: Vec<Gc<'gc, SLVal<'gc>>>,
+  args: Vec<Gc<'gc, Accounted<'gc>>>,
 }
 
 /// An owned, arena-agnostic value that can escape the arena and be fed back
@@ -113,45 +310,11 @@ impl<'gc> SLVal<'gc> {
       SLVal::FunctionRef(m, n) => SLValue::FunctionRef(*m, *n),
       SLVal::Partial(p) => SLValue::Partial {
         function: p.function,
-        args: p.args.iter().map(|a| a.to_value()).collect(),
+        args: p.args.iter().map(|a| a.value.to_value()).collect(),
       },
       SLVal::Cell(r) => SLValue::Cell(Box::new(r.borrow().to_value())),
-      SLVal::List(items) => SLValue::List(items.iter().map(|i| i.to_value()).collect()),
+      SLVal::List(items) => SLValue::List(items.iter().map(|i| i.value.to_value()).collect()),
     }
-  }
-
-  /// Reconstruct a `Gc<SLVal>` inside the arena from an owned `SLValue`,
-  /// allocating fresh `Gc` pointers for any non-scalar sub-values.
-  fn from_value(mc: &Mutation<'gc>, value: &SLValue) -> Gc<'gc, SLVal<'gc>> {
-    Gc::new(
-      mc,
-      match value {
-        SLValue::Int(i) => SLVal::Int(*i),
-        SLValue::Float(x) => SLVal::Float(*x),
-        SLValue::String(s) => SLVal::String(s.clone()),
-        SLValue::Bool(b) => SLVal::Bool(*b),
-        SLValue::Void => SLVal::Void,
-        SLValue::FunctionRef(m, n) => SLVal::FunctionRef(*m, *n),
-        SLValue::Partial { function, args } => SLVal::Partial(Partial {
-          function: *function,
-          args: args.iter().map(|a| SLVal::from_value(mc, a)).collect(),
-        }),
-        SLValue::Cell(inner) => SLVal::Cell(Gc::new(
-          mc,
-          RefLock::new(SLVal::from_value(mc, inner).as_ref().clone()),
-        )),
-        SLValue::List(items) => {
-          SLVal::List(items.iter().map(|i| SLVal::from_value(mc, i)).collect())
-        }
-      },
-    )
-  }
-
-  /// Produce a `Gc<SLVal>` for this value. Used when deref-ing a cell: the
-  /// contents come out as a borrowed `SLVal`, and we re-box it onto the GC
-  /// heap so it can go back on the stack.
-  fn clone_value(&self, mc: &Mutation<'gc>) -> Gc<'gc, SLVal<'gc>> {
-    Gc::new(mc, self.clone())
   }
 }
 
@@ -226,20 +389,27 @@ pub struct Execution {
   package: Package,
   builtins: Builtins,
   pub executed: u64,
+  /// Per-execution memory tracker, shared with every `Accounted` box in this
+  /// arena. `Execution` owns the canonical `Rc`; cloned into each `Accounted`
+  /// at allocation (see `ExecRoot::alloc_value`).
+  tracker: SharedTracker,
 }
 
 impl Execution {
   pub fn new(package: Package, builtins: Builtins) -> Self {
-    let arena = Arena::new(|_mc| ExecRoot {
+    let tracker = Rc::new(MemoryTracker::new());
+    let tracker_for_root = tracker.clone();
+    let arena = Arena::new(move |_mc| ExecRoot {
       stack: Vec::new(),
       frames: Vec::new(),
-      memory_limit_bytes: None,
+      tracker: tracker_for_root.clone(),
     });
     Execution {
       arena,
       package,
       builtins,
       executed: 0,
+      tracker,
     }
   }
 
@@ -259,7 +429,7 @@ impl Execution {
     let mut result = Err("PEEK on an empty stack".to_string());
     self.arena.mutate(|_, root| {
       if let Some(top) = root.stack.last().copied() {
-        result = Ok(top.to_value());
+        result = Ok(top.value.to_value());
       }
     });
     result
@@ -272,31 +442,34 @@ impl Execution {
   }
 
   /// The total bytes currently allocated by live `Gc` pointers in this
-  /// execution's arena. This is the value the optional memory limit is
-  /// compared against on every `step`.
+  /// execution's arena (the gc-arena-reported portion of `memory_usage`).
   pub fn gc_allocation_bytes(&self) -> usize {
     self.arena.metrics().total_gc_allocation()
   }
 
-  /// The current live GC heap size in bytes (alias of
-  /// [`gc_allocation_bytes`](Self::gc_allocation_bytes)).
+  /// The current live memory in bytes: gc-arena's `total_gc_allocation` (the
+  /// `GcBox` layouts) plus this execution's `external_bytes` (Rust-heap
+  /// storage owned by `SLVal` payloads — String bytes, List/Partial `Vec`
+  /// backings — accounted via `Accounted`). This is the value the optional
+  /// memory limit is compared against on every `step`.
+  ///
+  /// Note (step 2): `stack`/`frames`/`locals` `Vec` overhead is not yet
+  /// included; step 3 of the memory-limit plan lands that.
   pub fn memory_usage(&self) -> usize {
-    self.gc_allocation_bytes()
+    self.arena.metrics().total_gc_allocation() + self.tracker.external_bytes()
   }
 
-  /// Cap the live `Gc` allocation bytes for this execution. When set,
-  /// [`step`](Execution::step) (and the `run*` helpers that drive it) will
-  /// return an `Err` as soon as the live GC heap exceeds this many bytes. Set
-  /// to `None` to disable the limit (the default).
+  /// Cap the live memory for this execution. When set, `step` (and the
+  /// `run*` helpers that drive it) will return an `Err` as soon as
+  /// `memory_usage` exceeds this many bytes. Set to `None` to disable the
+  /// limit (the default).
   pub fn set_memory_limit(&mut self, limit: Option<usize>) {
-    self
-      .arena
-      .mutate_root(|_, root| root.memory_limit_bytes = limit);
+    self.tracker.set_limit(limit);
   }
 
   /// The configured memory limit in bytes, or `None` if no limit is set.
   pub fn memory_limit(&self) -> Option<usize> {
-    self.arena.mutate(|_, root| root.memory_limit_bytes)
+    self.tracker.limit()
   }
 
   /// Force a full garbage-collection cycle, freeing all unreachable `Gc`
@@ -373,8 +546,8 @@ impl Execution {
     pre_bound: Vec<SLValue>,
   ) -> Result<(), String> {
     let result = self.arena.mutate_root(|mc, root| {
-      let pre_bound_gc: Vec<Gc<'_, SLVal<'_>>> =
-        pre_bound.iter().map(|v| SLVal::from_value(mc, v)).collect();
+      let pre_bound_gc: Vec<Gc<'_, Accounted<'_>>> =
+        pre_bound.iter().map(|v| root.import_value(mc, v)).collect();
       root.enter_inline_function(mc, function.clone(), pre_bound_gc)
     });
     result
@@ -400,8 +573,8 @@ impl Execution {
       }
     };
     let result = self.arena.mutate_root(|mc, root| {
-      let pre_bound_gc: Vec<Gc<'_, SLVal<'_>>> =
-        pre_bound.iter().map(|v| SLVal::from_value(mc, v)).collect();
+      let pre_bound_gc: Vec<Gc<'_, Accounted<'_>>> =
+        pre_bound.iter().map(|v| root.import_value(mc, v)).collect();
       root.enter_function(mc, mod_idx, func_idx, &function, pre_bound_gc)
     });
     result
@@ -413,7 +586,7 @@ impl Execution {
     let package = self.package.clone();
     let builtins = self.builtins.clone();
     let result = self.arena.mutate_root(|mc, root| {
-      let gc = SLVal::from_value(mc, &value);
+      let gc = root.import_value(mc, &value);
       root.stack.push(gc);
       root.call_dynamic(mc, &package, &builtins, 0)
     });
@@ -427,13 +600,15 @@ impl<'gc> ExecRoot<'gc> {
     self.frames.is_empty()
   }
 
-  /// Returns `Ok(())` if the live GC heap is within the configured limit, or
-  /// `Err` with a descriptive message if it has been exceeded. No-op when no
-  /// limit is set. Only `Gc` allocations are counted (via
-  /// `Metrics::total_gc_allocation`); stack and frames are ignored.
+  /// Returns `Ok(())` if the live memory (gc-arena's `total_gc_allocation` +
+  /// this execution's external bytes) is within the configured limit, or `Err`
+  /// with a descriptive message if it has been exceeded. No-op when no limit is
+  /// set. Step 2 of the memory-limit plan: only GC-box bytes + per-`Gc`-box
+  /// external payload (String/List/Partial backing) are counted; stack and
+  /// frame `Vec` overhead lands in step 3.
   fn check_memory_limit(&self, mc: &Mutation<'gc>) -> Result<(), String> {
-    if let Some(limit) = self.memory_limit_bytes {
-      let usage = mc.metrics().total_gc_allocation();
+    if let Some(limit) = self.tracker.limit() {
+      let usage = mc.metrics().total_gc_allocation() + self.tracker.external_bytes();
       if usage > limit {
         return Err(format!(
           "memory limit exceeded: {} bytes live (limit {})",
@@ -444,14 +619,14 @@ impl<'gc> ExecRoot<'gc> {
     Ok(())
   }
 
-  /// Push a `Gc<SLVal>` onto the execution's value stack. Used by
+  /// Push a `Gc<Accounted>` onto the execution's value stack. Used by
   /// [`Builtin::call`] to push a builtin's result.
-  pub(crate) fn push_gc(&mut self, val: Gc<'gc, SLVal<'gc>>) {
+  pub(crate) fn push_gc(&mut self, val: Gc<'gc, Accounted<'gc>>) {
     self.stack.push(val);
   }
 
   /// Pop a value off the execution's value stack.
-  fn pop(&mut self) -> Result<Gc<'gc, SLVal<'gc>>, String> {
+  fn pop(&mut self) -> Result<Gc<'gc, Accounted<'gc>>, String> {
     self
       .stack
       .pop()
@@ -475,7 +650,7 @@ impl<'gc> ExecRoot<'gc> {
     }
     if self.is_done() {
       let top = self.pop()?;
-      Ok(Status::Done(top.to_value()))
+      Ok(Status::Done(top.value.to_value()))
     } else {
       Ok(Status::Paused)
     }
@@ -494,7 +669,7 @@ impl<'gc> ExecRoot<'gc> {
       self.step(mc, package, builtins, executed)?;
     }
     let top = self.pop()?;
-    Ok(top.to_value())
+    Ok(top.value.to_value())
   }
 
   /// Run until `deadline` is reached or execution completes. Returns `Paused`
@@ -513,7 +688,7 @@ impl<'gc> ExecRoot<'gc> {
     }
     if self.is_done() {
       let top = self.pop()?;
-      Ok(Status::Done(top.to_value()))
+      Ok(Status::Done(top.value.to_value()))
     } else {
       Ok(Status::Paused)
     }
@@ -575,10 +750,10 @@ impl<'gc> ExecRoot<'gc> {
     }
 
     match inst {
-      Instruction::PushInt(i) => self.stack.push(Gc::new(mc, SLVal::Int(i))),
-      Instruction::PushFloat(f) => self.stack.push(Gc::new(mc, SLVal::Float(f))),
-      Instruction::PushString(s) => self.stack.push(Gc::new(mc, SLVal::String(s))),
-      Instruction::PushBool(b) => self.stack.push(Gc::new(mc, SLVal::Bool(b))),
+      Instruction::PushInt(i) => { let v = self.alloc_value(mc, SLVal::Int(i)); self.stack.push(v); },
+      Instruction::PushFloat(f) => { let v = self.alloc_value(mc, SLVal::Float(f)); self.stack.push(v); },
+      Instruction::PushString(s) => { let v = self.alloc_value(mc, SLVal::String(s)); self.stack.push(v); },
+      Instruction::PushBool(b) => { let v = self.alloc_value(mc, SLVal::Bool(b)); self.stack.push(v); },
       Instruction::Pop => {
         self.pop()?;
       }
@@ -608,21 +783,25 @@ impl<'gc> ExecRoot<'gc> {
         self.call_dynamic(mc, package, builtins, arity)?;
       }
       Instruction::MakeFunctionRef((mod_index, func_index)) => {
-        self
-          .stack
-          .push(Gc::new(mc, SLVal::FunctionRef(mod_index, func_index)));
+        let v = self.alloc_value(mc, SLVal::FunctionRef(mod_index, func_index));
+        self.stack.push(v);
       }
       Instruction::MakeCell => {
         let val = self.pop()?;
-        self.stack.push(Gc::new(
+        let cell = self.alloc_value(
           mc,
-          SLVal::Cell(Gc::new(mc, RefLock::new((*val).clone()))),
-        ));
+          SLVal::Cell(Gc::new(mc, RefLock::new(val.value.clone()))),
+        );
+        self.stack.push(cell);
       }
       Instruction::DerefCell => {
         let val = self.pop()?;
-        match &*val {
-          SLVal::Cell(r) => self.stack.push(r.borrow().clone_value(mc)),
+        match &val.value {
+          SLVal::Cell(r) => {
+            let cloned: SLVal<'gc> = r.borrow().clone();
+            let gc = self.alloc_value(mc, cloned);
+            self.stack.push(gc);
+          }
           other => return Err(format!("Not a cell: {:?}", other)),
         }
       }
@@ -631,10 +810,10 @@ impl<'gc> ExecRoot<'gc> {
         // into the Cell, and push the value back as the result of `set!`.
         let cell_gc = self.pop()?;
         let new_val = self.pop()?;
-        match &*cell_gc {
+        match &cell_gc.value {
           SLVal::Cell(cell_ref) => {
             // Mutate the Cell's contents in a GC-safe way.
-            *Gc::write(mc, *cell_ref).unlock().borrow_mut() = (*new_val).clone();
+            *Gc::write(mc, *cell_ref).unlock().borrow_mut() = new_val.value.clone();
           }
           other => return Err(format!("Not a cell: {:?}", other)),
         }
@@ -654,7 +833,7 @@ impl<'gc> ExecRoot<'gc> {
       }
       Instruction::JumpIfFalse(offset) => {
         let val = self.pop()?;
-        match &*val {
+        match &val.value {
           SLVal::Bool(false) => {
             let frame = self
               .frames
@@ -677,8 +856,8 @@ impl<'gc> ExecRoot<'gc> {
       args.push(self.pop()?);
     }
     args.reverse();
-    let closure = match &*func {
-      SLVal::FunctionRef(mod_index, func_index) => Gc::new(
+    let closure = match &func.value {
+      SLVal::FunctionRef(mod_index, func_index) => self.alloc_value(
         mc,
         SLVal::Partial(Partial {
           function: (*mod_index, *func_index),
@@ -768,7 +947,7 @@ impl<'gc> ExecRoot<'gc> {
     arity: u16,
   ) -> Result<(), String> {
     let callable = self.pop()?;
-    match &*callable {
+    match &callable.value {
       SLVal::FunctionRef(mod_index, func_index) => {
         self.call_fixed(mc, package, builtins, *mod_index, *func_index, arity)
       }
@@ -810,17 +989,17 @@ impl<'gc> ExecRoot<'gc> {
   /// into the frame.
   fn enter_function(
     &mut self,
-    mc: &Mutation<'gc>,
+    mc: &'gc Mutation<'gc>,
     mod_idx: u32,
     func_idx: u32,
     function: &Function,
-    pre_bound: Vec<Gc<'gc, SLVal<'gc>>>,
+    pre_bound: Vec<Gc<'gc, Accounted<'gc>>>,
   ) -> Result<(), String> {
     let start = pre_bound.len();
     let mut locals = pre_bound;
     // Initialize all remaining local slots to `Void`. `SLVal::Void` holds no
     // `Gc` pointers, so allocating it on the GC heap is cheap and safe.
-    let void = Gc::new(mc, SLVal::Void);
+    let void = self.alloc_value(mc, SLVal::Void);
     for _ in locals.len()..usize::from(function.num_locals) {
       locals.push(void);
     }
@@ -844,13 +1023,13 @@ impl<'gc> ExecRoot<'gc> {
   /// vector.
   fn enter_inline_function(
     &mut self,
-    mc: &Mutation<'gc>,
+    mc: &'gc Mutation<'gc>,
     function: Function,
-    pre_bound: Vec<Gc<'gc, SLVal<'gc>>>,
+    pre_bound: Vec<Gc<'gc, Accounted<'gc>>>,
   ) -> Result<(), String> {
     let start = pre_bound.len();
     let mut locals = pre_bound;
-    let void = Gc::new(mc, SLVal::Void);
+    let void = self.alloc_value(mc, SLVal::Void);
     for _ in locals.len()..usize::from(function.num_locals) {
       locals.push(void);
     }
@@ -902,9 +1081,9 @@ impl<'gc, 'a> HostCtx<'gc, 'a> {
   pub(crate) fn call(
     &self,
     root: &mut ExecRoot<'gc>,
-    callable: Gc<'gc, SLVal<'gc>>,
-    args: &[Gc<'gc, SLVal<'gc>>],
-  ) -> Result<Gc<'gc, SLVal<'gc>>, String> {
+    callable: Gc<'gc, Accounted<'gc>>,
+    args: &[Gc<'gc, Accounted<'gc>>],
+  ) -> Result<Gc<'gc, Accounted<'gc>>, String> {
     // Remember the current frame depth so we know when the sub-call has
     // returned: we push a frame for the callable, run until the frame stack
     // is back to the original depth, then the result is on top of the stack.
@@ -1015,7 +1194,7 @@ mod test {
 
   #[test]
   fn extending_builtins() {
-    let builtins = Builtins::new().with_builtin(Builtin::unary("main", "add2", |a| match &*a {
+    let builtins = Builtins::new().with_builtin(Builtin::unary("main", "add2", |a| match &a.value {
       SLVal::Int(n) => Ok(SLVal::Int(n + 2)),
       other => Err(format!("nope: {:?}", other)),
     }));

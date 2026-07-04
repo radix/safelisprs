@@ -19,7 +19,7 @@ The plan (each step independently testable; commit after each):
       threaded through `step`'s callers). Removes ~120 bytes/call of cloned
       instructions — most of the `spin` test's runaway allocation. Independent
       win; shrinks the gap before accounting even lands.
-- [ ] **2. Add `MemoryTracker` + `Accounted<SLVal>` wrapper.** A per-`Execution`
+- [x] **2. Add `MemoryTracker` + `Accounted<SLVal>` wrapper.** A per-`Execution`
       `Rc<MemoryTracker>` holds `external_bytes: Cell<usize>` and
       `limit: Cell<Option<usize>>`. Wrap `SLVal` in
       `#[derive(Collect)] #[collect(unsafe_drop)] struct Accounted<'gc> {
