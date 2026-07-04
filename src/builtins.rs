@@ -5,7 +5,7 @@ use gc_arena::{Gc, Mutation, RefLock};
 use rand_chacha::rand_core::{RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
-use crate::interpreter::{ExecRoot, HostCtx, SLVal};
+use crate::interpreter::{Accounted, ExecRoot, HostCtx, SLVal};
 
 /// A compile-time description of a builtin: which module/name it lives in and
 /// how many arguments it takes. `num_params` is `None` for variadic builtins.
@@ -29,10 +29,10 @@ pub struct BuiltinSpec {
 /// borrows) is left elided — it is independent of `'gc` and inferred per-call.
 pub(crate) type HostFn = Arc<
   dyn for<'gc> Fn(
-    &mut ExecRoot<'gc>,
-    &mut HostCtx<'gc, '_>,
-    &[Gc<'gc, SLVal<'gc>>],
-  ) -> Result<SLVal<'gc>, String>,
+      &mut ExecRoot<'gc>,
+      &mut HostCtx<'gc, '_>,
+      &[Gc<'gc, Accounted<'gc>>],
+    ) -> Result<SLVal<'gc>, String>,
 >;
 
 /// A builtin: metadata ([`BuiltinSpec`]) plus its handler ([`HostFn`]).
@@ -48,15 +48,17 @@ impl Builtin {
   }
 
   /// Invoke this builtin's handler with the given arguments. The handler's
-  /// return value is pushed onto the execution's value stack by this method.
+  /// return value is wrapped in `Accounted` (charging the execution's tracker)
+  /// and pushed onto the execution's value stack by this method.
   pub(crate) fn call<'gc, 'a>(
     &self,
     root: &mut ExecRoot<'gc>,
     ctx: &mut HostCtx<'gc, 'a>,
-    args: &[Gc<'gc, SLVal<'gc>>],
+    args: &[Gc<'gc, Accounted<'gc>>],
   ) -> Result<(), String> {
     let result = (self.func)(root, ctx, args)?;
-    root.push_gc(Gc::new(ctx.mc(), result));
+    let gc = root.alloc_value(ctx.mc(), result);
+    root.push_gc(gc);
     Ok(())
   }
 
@@ -64,7 +66,7 @@ impl Builtin {
   pub fn unary(
     module: &'static str,
     name: &'static str,
-    func: impl for<'gc> Fn(Gc<'gc, SLVal<'gc>>) -> Result<SLVal<'gc>, String> + 'static,
+    func: impl for<'gc> Fn(Gc<'gc, Accounted<'gc>>) -> Result<SLVal<'gc>, String> + 'static,
   ) -> Self {
     Builtin {
       spec: BuiltinSpec {
@@ -80,7 +82,10 @@ impl Builtin {
   pub fn binary(
     module: &'static str,
     name: &'static str,
-    func: impl for<'gc> Fn(Gc<'gc, SLVal<'gc>>, Gc<'gc, SLVal<'gc>>) -> Result<SLVal<'gc>, String>
+    func: impl for<'gc> Fn(
+        Gc<'gc, Accounted<'gc>>,
+        Gc<'gc, Accounted<'gc>>,
+      ) -> Result<SLVal<'gc>, String>
       + 'static,
   ) -> Self {
     Builtin {
@@ -100,8 +105,8 @@ impl Builtin {
     name: &'static str,
     func: impl for<'gc> Fn(
         &Mutation<'gc>,
-        Gc<'gc, SLVal<'gc>>,
-        Gc<'gc, SLVal<'gc>>,
+        Gc<'gc, Accounted<'gc>>,
+        Gc<'gc, Accounted<'gc>>,
       ) -> Result<SLVal<'gc>, String>
       + 'static,
   ) -> Self {
@@ -124,8 +129,8 @@ impl Builtin {
     func: impl for<'gc> Fn(
         &mut ExecRoot<'gc>,
         &mut HostCtx<'gc, '_>,
-        Gc<'gc, SLVal<'gc>>,
-        Gc<'gc, SLVal<'gc>>,
+        Gc<'gc, Accounted<'gc>>,
+        Gc<'gc, Accounted<'gc>>,
       ) -> Result<SLVal<'gc>, String>
       + 'static,
   ) -> Self {
@@ -144,9 +149,9 @@ impl Builtin {
     module: &'static str,
     name: &'static str,
     func: impl for<'gc> Fn(
-        Gc<'gc, SLVal<'gc>>,
-        Gc<'gc, SLVal<'gc>>,
-        Gc<'gc, SLVal<'gc>>,
+        Gc<'gc, Accounted<'gc>>,
+        Gc<'gc, Accounted<'gc>>,
+        Gc<'gc, Accounted<'gc>>,
       ) -> Result<SLVal<'gc>, String>
       + 'static,
   ) -> Self {
@@ -167,7 +172,7 @@ impl Builtin {
   pub fn variadic(
     module: &'static str,
     name: &'static str,
-    func: impl for<'gc> Fn(&[Gc<'gc, SLVal<'gc>>]) -> Result<SLVal<'gc>, String> + 'static,
+    func: impl for<'gc> Fn(&[Gc<'gc, Accounted<'gc>>]) -> Result<SLVal<'gc>, String> + 'static,
   ) -> Self {
     Builtin {
       spec: BuiltinSpec {
@@ -222,19 +227,19 @@ impl Builtins {
 /// The default builtin registry.
 pub fn default_builtins() -> Builtins {
   Builtins::new()
-    .with_builtin(Builtin::binary("std", "+", |a, b| match (&*a, &*b) {
+    .with_builtin(Builtin::binary("std", "+", |a, b| match (&a.value, &b.value) {
       (SLVal::Int(x), SLVal::Int(y)) => Ok(SLVal::Int(x + y)),
       (SLVal::Float(x), SLVal::Float(y)) => Ok(SLVal::Float(x + y)),
       _ => Err(format!("Couldn't add {:?} and {:?}", a, b)),
     }))
-    .with_builtin(Builtin::binary("std", "-", |a, b| match (&*a, &*b) {
+    .with_builtin(Builtin::binary("std", "-", |a, b| match (&a.value, &b.value) {
       // `a` is the left operand, `b` is the right operand: left - right.
       (SLVal::Int(x), SLVal::Int(y)) => Ok(SLVal::Int(x - y)),
       (SLVal::Float(x), SLVal::Float(y)) => Ok(SLVal::Float(x - y)),
       _ => Err(format!("Couldn't sub {:?} and {:?}", a, b)),
     }))
     .with_builtin(Builtin::binary("std", "==", |a, b| Ok(SLVal::Bool(a == b))))
-    .with_builtin(Builtin::binary("std", "concat", |a, b| match (&*a, &*b) {
+    .with_builtin(Builtin::binary("std", "concat", |a, b| match (&a.value, &b.value) {
       (SLVal::String(x), SLVal::String(y)) => Ok(SLVal::String(format!("{x}{y}"))),
       (SLVal::List(x), SLVal::List(y)) => {
         let mut combined = x.clone();
@@ -246,11 +251,11 @@ pub fn default_builtins() -> Builtins {
     .with_builtin(Builtin::variadic("std", "list", |args| {
       Ok(SLVal::List(args.to_vec()))
     }))
-    .with_builtin(Builtin::unary("std", "len", |a| match &*a {
+    .with_builtin(Builtin::unary("std", "len", |a| match &a.value {
       SLVal::List(items) => Ok(SLVal::Int(items.len() as i64)),
       _ => Err(format!("len: expected a List, got {:?}", a)),
     }))
-    .with_builtin(Builtin::binary("std", "idx", |a, b| match (&*a, &*b) {
+    .with_builtin(Builtin::binary("std", "idx", |a, b| match (&a.value, &b.value) {
       (SLVal::List(items), SLVal::Int(i)) => {
         let len = items.len() as i64;
         let idx = if *i < 0 { *i + len } else { *i };
@@ -260,7 +265,7 @@ pub fn default_builtins() -> Builtins {
             i, len
           ))
         } else {
-          Ok((**items.get(idx as usize).unwrap()).clone())
+          Ok(items.get(idx as usize).unwrap().value.clone())
         }
       }
       (SLVal::String(s), SLVal::Int(i)) => {
@@ -282,7 +287,7 @@ pub fn default_builtins() -> Builtins {
         a, b
       )),
     }))
-    .with_builtin(Builtin::binary("std", "push", |a, b| match &*a {
+    .with_builtin(Builtin::binary("std", "push", |a, b| match &a.value {
       SLVal::List(items) => {
         let mut new = items.clone();
         new.push(b);
@@ -293,15 +298,15 @@ pub fn default_builtins() -> Builtins {
     // (std.range start stop) -> List<Int>
     //   Like Python's `list(range(start, stop))`: half-open, `[start, stop)`.
     //   `start >= stop` yields the empty list.
-    .with_builtin(Builtin::binary_alloc("std", "range", |mc, a, b| {
-      match (&*a, &*b) {
+    .with_builtin(Builtin::binary_ctx("std", "range", |root, ctx, a, b| {
+      match (&a.value, &b.value) {
         (SLVal::Int(start), SLVal::Int(stop)) => {
           if stop < start {
             Ok(SLVal::List(vec![]))
           } else {
             Ok(SLVal::List(
               (*start..*stop)
-                .map(|i| Gc::new(mc, SLVal::Int(i)))
+                .map(|i| root.alloc_value(ctx.mc(), SLVal::Int(i)))
                 .collect(),
             ))
           }
@@ -321,7 +326,7 @@ pub fn default_builtins() -> Builtins {
       "std",
       "map",
       |root, ctx, list, func| {
-        let items = match &*list {
+        let items = match &list.value {
           SLVal::List(items) => items.clone(),
           other => return Err(format!("std.map: expected a List, got {:?}", other)),
         };
@@ -334,7 +339,7 @@ pub fn default_builtins() -> Builtins {
       },
     ))
     .with_builtin(Builtin::ternary("std", "slice", |a, b, c| {
-      match (&*a, &*b, &*c) {
+      match (&a.value, &b.value, &c.value) {
         (SLVal::List(items), SLVal::Int(start), SLVal::Int(stop)) => {
           let len = items.len() as i64;
           let s = norm_index(*start, len);
@@ -372,11 +377,11 @@ pub fn default_builtins() -> Builtins {
     //   same Cell contents; differing `name` or `seed` produces differing
     //   output.
     .with_builtin(Builtin::binary_alloc("rand", "rng", |mc, seed, name| {
-      let parent = match &*seed {
+      let parent = match &seed.value {
         SLVal::Int(i) => *i,
         other => return Err(format!("rand.rng: expected Int seed, got {:?}", other)),
       };
-      let ns = match &*name {
+      let ns = match &name.value {
         SLVal::String(s) => s.as_str(),
         other => return Err(format!("rand.rng: expected String name, got {:?}", other)),
       };
@@ -391,11 +396,11 @@ pub fn default_builtins() -> Builtins {
     //   and (after the call) the advanced state, so callers don't need to
     //   thread a new seed through.
     .with_builtin(Builtin::binary_alloc("rand", "roll!", |mc, rng, sides| {
-      let cell = match &*rng {
+      let cell = match &rng.value {
         SLVal::Cell(c) => *c,
         other => return Err(format!("rand.roll!: expected Cell rng, got {:?}", other)),
       };
-      let n = match &*sides {
+      let n = match &sides.value {
         SLVal::Int(i) => *i,
         other => return Err(format!("rand.roll!: expected Int sides, got {:?}", other)),
       };
