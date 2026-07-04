@@ -25,19 +25,35 @@ pub(crate) struct ExecRoot<'gc> {
   memory_limit_bytes: Option<usize>,
 }
 
-/// A stack frame. The function is stored by value (cloned on entry) so that
-/// the frame is self-contained and can live inside the arena root without
-/// borrowing the `Package`.
+/// A stack frame. The function is stored by `(module, function)` index
+/// (`FrameFunc::Indexed`) so a frame is cheap to push — no
+/// `instructions: Vec<…>` clone — and the `Function` is looked up via
+/// `package.get_function(...)` at `step` time. The `FrameFunc::Inline` variant
+/// holds an owned `Function` for ad-hoc entry points (e.g. tests that build a
+/// `Function` without registering it in a `Package`); it clones once on
+/// frame push, which is fine for shallow test recursion.
 #[derive(Collect, Clone)]
 #[collect(no_drop)]
 struct Frame<'gc> {
-  function: Function,
+  function: FrameFunc,
   locals: Vec<Gc<'gc, SLVal<'gc>>>,
   ip: usize,
 }
 
+#[derive(Collect, Clone)]
+#[collect(no_drop)]
+enum FrameFunc {
+  /// Look up the function by `(module, function)` index via the `Package` at
+  /// `step` time. The production path (call_main, call_fixed, call_dynamic).
+  Indexed((u32, u32)),
+  /// An ad-hoc `Function` not registered in any `Package` (test entry points
+  /// that build bytecode directly). Owns its instructions.
+  Inline(Function),
+}
+
 // `Function` (a.k.a. `LinkedFunction`) is `'static` and holds no `Gc` pointers,
-// so it gets a trivial, empty `Collect` impl.
+// so it gets a trivial, empty `Collect` impl. (Kept for callers that store
+// `Function` directly, e.g. `Execution::enter_function`'s signature.)
 gc_arena::static_collect!(Function);
 
 /// A SafeLisp value. This is the in-arena representation: anything that needs
@@ -163,9 +179,9 @@ impl Interpreter {
         .package
         .get_function(module, function)
         .ok_or_else(|| format!("Couldn't find module {} function {}", module, function))?;
-      if let Callable::Function(function) = callable {
+      if let Callable::Function(_) = callable {
         let mut exec = Execution::new(self.package.clone(), self.builtins.clone());
-        exec.enter_function(function.clone(), vec![])?;
+        exec.enter_function_at(module, function, vec![])?;
         Ok(exec)
       } else {
         Err(format!(
@@ -347,7 +363,10 @@ impl Execution {
 
   /// Push a frame for a function, with optional pre-bound values given as owned
   /// `SLValue`s (used by external/test entry points). The remaining params
-  /// (after the pre-bound ones) are popped from the stack.
+  /// (after the pre-bound ones) are popped from the stack. The function is
+  /// stored inline in the frame (not looked up via a `Package`), so this is
+  /// suitable for ad-hoc/test entry points that build bytecode directly. For
+  /// production paths prefer `enter_function_at` (indexed lookup, no clone).
   pub fn enter_function(
     &mut self,
     function: Function,
@@ -356,7 +375,34 @@ impl Execution {
     let result = self.arena.mutate_root(|mc, root| {
       let pre_bound_gc: Vec<Gc<'_, SLVal<'_>>> =
         pre_bound.iter().map(|v| SLVal::from_value(mc, v)).collect();
-      root.enter_function(mc, function.clone(), pre_bound_gc)
+      root.enter_inline_function(mc, function.clone(), pre_bound_gc)
+    });
+    result
+  }
+
+  /// Push a frame for a function looked up by `(module, function)` index in
+  /// this execution's `Package`, with optional pre-bound values given as owned
+  /// `SLValue`s. The frame stores the index (not a clone of the function's
+  /// instructions), so deep recursion is cheap.
+  pub fn enter_function_at(
+    &mut self,
+    mod_idx: u32,
+    func_idx: u32,
+    pre_bound: Vec<SLValue>,
+  ) -> Result<(), String> {
+    let function = match self.package.get_function(mod_idx, func_idx) {
+      Some(crate::compiler::Callable::Function(f)) => f.clone(),
+      _ => {
+        return Err(format!(
+          "Function not found: {}/{}",
+          mod_idx, func_idx
+        ))
+      }
+    };
+    let result = self.arena.mutate_root(|mc, root| {
+      let pre_bound_gc: Vec<Gc<'_, SLVal<'_>>> =
+        pre_bound.iter().map(|v| SLVal::from_value(mc, v)).collect();
+      root.enter_function(mc, mod_idx, func_idx, &function, pre_bound_gc)
     });
     result
   }
@@ -484,18 +530,49 @@ impl<'gc> ExecRoot<'gc> {
     *executed = executed.saturating_add(1);
     self.check_memory_limit(mc)?;
 
-    let inst = {
+    // Resolve the current frame's instructions. `Indexed` looks up via the
+    // package (production path — no clone); `Inline` reads the owned
+    // `Function` directly (test path). Either way we advance `ip` after
+    // fetching the instruction.
+    let (ip, inst) = {
+      let frame = self
+        .frames
+        .last()
+        .ok_or_else(|| "step with no frames".to_string())?;
+      let ip = frame.ip;
+      let inst = match &frame.function {
+        FrameFunc::Indexed((mod_idx, func_idx)) => {
+          match package.get_function(*mod_idx, *func_idx) {
+            Some(crate::compiler::Callable::Function(f)) => {
+              if ip >= f.instructions.len() {
+                return Err("ran past end of function without Return".to_string());
+              }
+              f.instructions[ip].clone()
+            }
+            _ => {
+              return Err(format!(
+                "Function not found while stepping: {}/{}",
+                mod_idx, func_idx
+              ))
+            }
+          }
+        }
+        FrameFunc::Inline(f) => {
+          if ip >= f.instructions.len() {
+            return Err("ran past end of function without Return".to_string());
+          }
+          f.instructions[ip].clone()
+        }
+      };
+      (ip, inst)
+    };
+    {
       let frame = self
         .frames
         .last_mut()
         .ok_or_else(|| "step with no frames".to_string())?;
-      if frame.ip >= frame.function.instructions.len() {
-        return Err("ran past end of function without Return".to_string());
-      }
-      let inst = &frame.function.instructions[frame.ip];
-      frame.ip += 1;
-      inst.clone()
-    };
+      frame.ip = ip + 1;
+    }
 
     match inst {
       Instruction::PushInt(i) => self.stack.push(Gc::new(mc, SLVal::Int(i))),
@@ -643,7 +720,7 @@ impl<'gc> ExecRoot<'gc> {
             module_name, func_name, func.num_params, arity
           ));
         }
-        self.enter_function(mc, func.clone(), vec![])?;
+        self.enter_function(mc, mod_index, func_index, func, vec![])?;
       }
       Callable::Builtin => {
         let builtin = builtins
@@ -716,7 +793,7 @@ impl<'gc> ExecRoot<'gc> {
                 mod_index, func_name, expected, arity
               ));
             }
-            self.enter_function(mc, func.clone(), args.clone())
+            self.enter_function(mc, *mod_index, *func_index, func, args.clone())
           }
           Callable::Builtin => Err("Can't invoke a builtin as a closure".to_string()),
         }
@@ -727,10 +804,16 @@ impl<'gc> ExecRoot<'gc> {
 
   /// Push a new frame for a function, with optional pre-bound values. The
   /// remaining params (after the pre-bound ones) are popped from the stack.
+  /// `function` is the looked-up `Function` (used for `num_locals`/`num_params`
+  /// metadata); `(mod_idx, func_idx)` is stored in the frame so the
+  /// instructions are looked up by reference at `step` time rather than cloned
+  /// into the frame.
   fn enter_function(
     &mut self,
     mc: &Mutation<'gc>,
-    function: Function,
+    mod_idx: u32,
+    func_idx: u32,
+    function: &Function,
     pre_bound: Vec<Gc<'gc, SLVal<'gc>>>,
   ) -> Result<(), String> {
     let start = pre_bound.len();
@@ -747,7 +830,35 @@ impl<'gc> ExecRoot<'gc> {
       locals[param_idx] = self.pop()?;
     }
     self.frames.push(Frame {
-      function,
+      function: FrameFunc::Indexed((mod_idx, func_idx)),
+      locals,
+      ip: 0,
+    });
+    Ok(())
+  }
+
+  /// Push a new frame for an ad-hoc `Function` not registered in any
+  /// `Package` (used by test entry points that build bytecode directly). The
+  /// frame owns a clone of the `Function` and reads its instructions inline at
+  /// `step` time. Shallow recursion only — each push clones the instruction
+  /// vector.
+  fn enter_inline_function(
+    &mut self,
+    mc: &Mutation<'gc>,
+    function: Function,
+    pre_bound: Vec<Gc<'gc, SLVal<'gc>>>,
+  ) -> Result<(), String> {
+    let start = pre_bound.len();
+    let mut locals = pre_bound;
+    let void = Gc::new(mc, SLVal::Void);
+    for _ in locals.len()..usize::from(function.num_locals) {
+      locals.push(void);
+    }
+    for param_idx in (start..usize::from(function.num_params)).rev() {
+      locals[param_idx] = self.pop()?;
+    }
+    self.frames.push(Frame {
+      function: FrameFunc::Inline(function),
       locals,
       ip: 0,
     });
@@ -1799,6 +1910,135 @@ mod test {
       err.contains("memory limit exceeded"),
       "unexpected error: {}",
       err
+    );
+  }
+
+  #[test]
+  fn memory_limit_catches_unbounded_stack_and_frames() {
+    // A deliberately adversarial program: `spin` recurses forever, taking no
+    // arguments and allocating nothing on the GC heap. Every recursive call
+    // pushes a new `Frame` — and each `Frame` clones the function's
+    // `instructions: Vec<…>` and allocates a fresh `locals: Vec<Gc<_>>` (even
+    // if empty, the `Vec` header / capacity lives on `ExecRoot`'s heap) — and
+    // grows the value stack by one slot for the pending call result. These are
+    // *plain Rust `Vec` allocations owned by `ExecRoot`*, not `Gc` allocations,
+    // so they don't show up in `Metrics::total_gc_allocation`.
+    //
+    // The live GC heap stays at essentially zero (no `Gc::new` runs inside
+    // `spin`), so the current GC-only memory limit never fires — even though
+    // 200 000 piled-up frames consume ~24 MB of real Rust heap. A *correct*
+    // memory limit would trip. This test asserts that the run errors with
+    // "memory limit exceeded"; it currently FAILS because the limit is never
+    // reached. Once stack/frame overhead is tracked, the error will fire and
+    // the test will pass.
+    let source = "
+      (fn spin () (spin))
+      (fn main () (spin))
+    ";
+    let pkg = compile_executable_from_source(
+      &source.to_string(),
+      ("main", "main"),
+      &default_builtins().specs(),
+    )
+    .unwrap();
+    let interp = Interpreter::new(pkg);
+    let mut exec = interp.call_main().unwrap();
+    // 64 KiB is far below what 200 000 cloned instruction vectors + frame
+    // slots actually consume (~24 MB), yet comfortably above this program's
+    // live GC heap at any moment.
+    exec.set_memory_limit(Some(64 * 1024));
+    // Drive execution in small batches so `collect_debt` reclaims the per-frame
+    // `Gc<Void>` garbage and the live GC heap stays bounded — while the frame
+    // objects (cloning `instructions: Vec<Instruction>`) pile up unboundedly
+    // on the Rust heap. The loop expects one of the `run` calls to error with
+    // "memory limit exceeded"; today none does, so the loop completes and the
+    // final `unwrap_err` / unreachable panic fails the test.
+    let mut hit = false;
+    for _ in 0..2_000 {
+      match exec.run(100) {
+        Ok(_) if exec.is_done() => panic!("spin terminated unexpectedly"),
+        Ok(_) => {}
+        Err(e) => {
+          assert!(
+            e.contains("memory limit exceeded"),
+            "unexpected error: {}",
+            e,
+          );
+          hit = true;
+          break;
+        }
+      }
+    }
+    assert!(
+      hit,
+      "expected the memory limit to fire, but the run completed with only {} bytes of live GC (limit {}); \
+       the GC-only limit does not see the ~200 000 piled-up frames' Rust-heap overhead",
+      exec.gc_allocation_bytes(),
+      64 * 1024,
+    );
+  }
+
+  #[test]
+  fn memory_limit_catches_large_string_contents() {
+    // `SLVal::String(String)` stores the `String` inline inside the `Gc`-boxed
+    // `SLVal`. The GC arena only counts the box itself (the `SLVal` enum +
+    // `String`'s 24-byte ptr/len/cap header, ≈ 40 bytes) toward
+    // `total_gc_allocation`. The actual string *bytes* live on the ordinary
+    // Rust heap and are invisible to the GC metrics — they're freed when the
+    // `Gc` box is dropped, but never counted.
+    //
+    // This program doubles a string on each recursive call: after 25
+    // iterations the string is 2^25 = 32 MB of actual bytes, but the live GC
+    // heap stays at a handful of ~40-byte `Gc<SLVal::String>` boxes (the old
+    // ones become garbage and are reclaimed by `collect_debt` between
+    // batches). A *correct* memory limit would trip; the current GC-only
+    // limit never does. This test asserts the limit fires and currently
+    // FAILS — once string-contents (or any non-Gc heap) overhead is tracked,
+    // it will pass.
+    let source = "
+      (fn grow (s n)
+        (if (std.== n 0)
+          s
+          (grow (std.concat s s) (std.- n 1))))
+      (fn main () (grow \"x\" 25))
+    ";
+    let pkg = compile_executable_from_source(
+      &source.to_string(),
+      ("main", "main"),
+      &default_builtins().specs(),
+    )
+    .unwrap();
+    let interp = Interpreter::new(pkg);
+    let mut exec = interp.call_main().unwrap();
+    // 64 KiB is far below the 32 MB string this program builds, yet
+    // comfortably above the handful of `Gc<SLVal::String>` boxes live at any
+    // one moment.
+    exec.set_memory_limit(Some(64 * 1024));
+    // Drive in small batches so `collect_debt` reclaims dead string boxes and
+    // the live GC heap stays tiny — while the actual string bytes grow to
+    // 32 MB on the Rust heap, unseen by the limit.
+    let mut hit = false;
+    for _ in 0..10_000 {
+      match exec.run(50) {
+        Ok(Status::Done(_)) => break,
+        Ok(_) => {}
+        Err(e) => {
+          assert!(
+            e.contains("memory limit exceeded"),
+            "unexpected error: {}",
+            e,
+          );
+          hit = true;
+          break;
+        }
+      }
+    }
+    assert!(
+      hit,
+      "expected the memory limit to fire, but the run completed with only {} bytes of live GC (limit {}); \
+       the GC-only limit does not see the ~32 MB of string contents on the Rust heap",
+      exec.gc_allocation_bytes(),
+      64 * 1024,
     );
   }
 
