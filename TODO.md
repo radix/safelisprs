@@ -30,7 +30,7 @@ The plan (each step independently testable; commit after each):
       `String::capacity()` / `Vec::capacity() * size_of::<Gc<_>>()`, etc.
       Centralize all `Gc<Accounted>` creation in one `ExecRoot::alloc_value`
       chokepoint so unaccounted values are hard to create by accident.
-- [ ] **3. Track `stack`/`frames`/`locals` capacity via a `TrackedVec<T>`
+- [x] **3. Track `stack`/`frames`/`locals` capacity via a `TrackedVec<T>`
       wrapper.** A `Vec` wrapper whose `push`/`reserve`/`Drop` update the
       `MemoryTracker` by `capacity() * size_of::<T>()`. Use it for
       `ExecRoot.stack`, `ExecRoot.frames`, and `Frame.locals`. This is what
