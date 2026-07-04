@@ -149,6 +149,132 @@ impl Drop for Accounted<'_> {
   }
 }
 
+/// A `Vec<T>` that charges its backing-allocation capacity to a per-execution
+/// [`MemoryTracker`]. Used for `ExecRoot.stack`, `ExecRoot.frames`, and
+/// `Frame.locals` so the memory limit sees the Rust-heap overhead of the
+/// interpreter's own `Vec`s (which hold `Gc` pointers but allocate plain Rust
+/// heap, invisible to gc-arena's `Metrics`). The charge is
+/// `capacity() * size_of::<T>()`; it's reconciled on every capacity change
+/// (push/reserve/shrink_to_fit) and released in `Drop`.
+///
+/// This is `!Collect` by itself — it's owned by `ExecRoot`/`Frame` whose
+/// `#[derive(Collect)]` uses `#[collect(require_static)]` on the `TrackedVec`
+/// fields (the tracker is `'static`; the `Vec<T>`'s `Gc` pointers are traced
+/// via the explicit `Collect` impl below, which delegates to `Vec<T>`'s
+/// `Collect` impl).
+pub(crate) struct TrackedVec<T> {
+  inner: Vec<T>,
+  tracker: SharedTracker,
+  charged: usize,
+}
+
+impl<T> TrackedVec<T> {
+  /// Current charge (capacity × element size). Stored on the struct so we can
+  /// compute the delta to release without re-reading `capacity()` after the
+  /// underlying `Vec` has been moved/dropped.
+  fn bytes_for(capacity: usize) -> usize {
+    capacity * std::mem::size_of::<T>()
+  }
+
+  /// Reconcile the tracker to the current `inner.capacity()`: release the old
+  /// charge and apply the new one. Called after any capacity-changing op.
+  fn reconcile(&mut self) {
+    let new = Self::bytes_for(self.inner.capacity());
+    if new != self.charged {
+      // Release the old charge, then apply the new. Using release/charge
+      // (rather than a delta) keeps the tracker's running total exact even if
+      // other callers charged in between.
+      self.tracker.release(self.charged);
+      self.tracker.charge(new);
+      self.charged = new;
+    }
+  }
+
+  pub fn new(tracker: SharedTracker) -> Self {
+    TrackedVec {
+      inner: Vec::new(),
+      tracker,
+      charged: 0,
+    }
+  }
+
+  /// Build a `TrackedVec` from an existing `Vec`, adopting its capacity. Used
+  /// when a `Vec` of pre-bound values is handed to `enter_function`: the
+  /// `Vec`'s backing storage is charged to `tracker` so the memory limit sees
+  /// it. Excess capacity is shrunk to fit so the charge is tight.
+  pub fn from_vec(inner: Vec<T>, tracker: SharedTracker) -> Self {
+    let mut inner = inner;
+    inner.shrink_to_fit();
+    let charged = Self::bytes_for(inner.capacity());
+    tracker.charge(charged);
+    TrackedVec {
+      inner,
+      tracker,
+      charged,
+    }
+  }
+
+  pub fn push(&mut self, value: T) {
+    self.inner.push(value);
+    // push may have grown the capacity; reconcile if so.
+    if Self::bytes_for(self.inner.capacity()) != self.charged {
+      self.reconcile();
+    }
+  }
+
+  pub fn pop(&mut self) -> Option<T> {
+    // pop doesn't shrink capacity, so no reconcile needed.
+    self.inner.pop()
+  }
+
+  pub fn last(&self) -> Option<&T> {
+    self.inner.last()
+  }
+
+  pub fn last_mut(&mut self) -> Option<&mut T> {
+    self.inner.last_mut()
+  }
+
+  pub fn len(&self) -> usize {
+    self.inner.len()
+  }
+
+  pub fn is_empty(&self) -> bool {
+    self.inner.is_empty()
+  }
+}
+
+impl<T> Drop for TrackedVec<T> {
+  fn drop(&mut self) {
+    // Release the full charge so the tracker reflects this vec's removal.
+    self.tracker.release(self.charged);
+    self.charged = 0;
+  }
+}
+
+impl<T> std::ops::Index<usize> for TrackedVec<T> {
+  type Output = T;
+  fn index(&self, index: usize) -> &T {
+    &self.inner[index]
+  }
+}
+
+impl<T> std::ops::IndexMut<usize> for TrackedVec<T> {
+  fn index_mut(&mut self, index: usize) -> &mut T {
+    &mut self.inner[index]
+  }
+}
+
+unsafe impl<'gc, T: Collect<'gc>> Collect<'gc> for TrackedVec<T> {
+  fn trace<C: gc_arena::collect::Trace<'gc>>(&self, cc: &mut C) {
+    // Delegate to the inner `Vec<T>`'s `Collect` impl so any `Gc` pointers
+    // held by the elements are traced. The `tracker` is `require_static`-shaped
+    // (an `Rc<MemoryTracker>`) and holds no `Gc` pointers, so it's not traced
+    // here.
+    self.inner.trace(cc);
+  }
+}
+
 /// Per-execution state held inside an `Execution`'s own arena. Each `Execution`
 /// owns a private `Arena` whose root is this type. All interpreter logic lives
 /// as methods on `ExecRoot`, so that stepping a single bytecode or running to
@@ -159,14 +285,15 @@ impl Drop for Accounted<'_> {
 #[derive(Collect)]
 #[collect(no_drop)]
 pub(crate) struct ExecRoot<'gc> {
-  stack: Vec<Gc<'gc, Accounted<'gc>>>,
-  frames: Vec<Frame<'gc>>,
+  stack: TrackedVec<Gc<'gc, Accounted<'gc>>>,
+  frames: TrackedVec<Frame<'gc>>,
   /// Per-execution memory tracker. Owns the running external-bytes count (Rust
   /// heap storage not seen by gc-arena's `Metrics`) and the optional cap. Each
   /// `Accounted` box allocated in this arena carries a clone of this `Rc`, so
   /// `Accounted::drop` (invoked by the GC at sweep) decrements the count for
   /// the right execution. The `require_static` field attribute on `Accounted`
-  /// excludes this `Rc` from tracing.
+  /// excludes this `Rc` from tracing. `TrackedVec` also clones this `Rc` so
+  /// `stack`/`frames`/`locals` capacity is charged to the same tracker.
   #[collect(require_static)]
   tracker: SharedTracker,
 }
@@ -224,11 +351,11 @@ impl<'gc> ExecRoot<'gc> {
 /// holds an owned `Function` for ad-hoc entry points (e.g. tests that build a
 /// `Function` without registering it in a `Package`); it clones once on
 /// frame push, which is fine for shallow test recursion.
-#[derive(Collect, Clone)]
+#[derive(Collect)]
 #[collect(no_drop)]
 struct Frame<'gc> {
   function: FrameFunc,
-  locals: Vec<Gc<'gc, Accounted<'gc>>>,
+  locals: TrackedVec<Gc<'gc, Accounted<'gc>>>,
   ip: usize,
 }
 
@@ -400,8 +527,8 @@ impl Execution {
     let tracker = Rc::new(MemoryTracker::new());
     let tracker_for_root = tracker.clone();
     let arena = Arena::new(move |_mc| ExecRoot {
-      stack: Vec::new(),
-      frames: Vec::new(),
+      stack: TrackedVec::new(tracker_for_root.clone()),
+      frames: TrackedVec::new(tracker_for_root.clone()),
       tracker: tracker_for_root.clone(),
     });
     Execution {
@@ -1008,6 +1135,7 @@ impl<'gc> ExecRoot<'gc> {
     for param_idx in (start..usize::from(function.num_params)).rev() {
       locals[param_idx] = self.pop()?;
     }
+    let locals = TrackedVec::from_vec(locals, self.tracker.clone());
     self.frames.push(Frame {
       function: FrameFunc::Indexed((mod_idx, func_idx)),
       locals,
@@ -1036,6 +1164,7 @@ impl<'gc> ExecRoot<'gc> {
     for param_idx in (start..usize::from(function.num_params)).rev() {
       locals[param_idx] = self.pop()?;
     }
+    let locals = TrackedVec::from_vec(locals, self.tracker.clone());
     self.frames.push(Frame {
       function: FrameFunc::Inline(function),
       locals,
