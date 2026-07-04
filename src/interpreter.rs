@@ -86,6 +86,52 @@ impl MemoryTracker {
 /// `Accounted` box is swept (which releases its `Rc`).
 pub type SharedTracker = Rc<MemoryTracker>;
 
+/// A RAII handle that releases a fixed byte charge to a [`MemoryTracker`] on
+/// `Drop`. Held as a `#[collect(require_static)]` field inside `Accounted` and
+/// `TrackedVec` so those outer types have *no custom `Drop`* of their own —
+/// the charge cleanup lives entirely in this `'static` helper, and gc-arena's
+/// safe `#[collect(no_drop)]` derive is honest.
+///
+/// `MemoryCharge` is `'static` (it holds only an `Rc<MemoryTracker>` and a
+/// `usize`), so the `require_static` annotation is valid and the derive skips
+/// tracing it. The `Drop` here touches only the tracker and the byte count —
+/// never any `Gc` pointers — which is the invariant `#[collect(no_drop)]`
+/// preserves.
+struct MemoryCharge {
+  tracker: SharedTracker,
+  bytes: usize,
+}
+
+impl MemoryCharge {
+  /// Create a charge of `bytes` against `tracker` (charges immediately).
+  fn new(tracker: SharedTracker, bytes: usize) -> Self {
+    tracker.charge(bytes);
+    MemoryCharge { tracker, bytes }
+  }
+
+  /// The byte count currently held by this charge.
+  fn bytes(&self) -> usize {
+    self.bytes
+  }
+
+  /// Adjust this charge to a new byte count: releases the old, charges the
+  /// new. Used by `TrackedVec::reconcile` when the underlying `Vec`'s capacity
+  /// changes.
+  fn set(&mut self, bytes: usize) {
+    if bytes != self.bytes {
+      self.tracker.release(self.bytes);
+      self.tracker.charge(bytes);
+      self.bytes = bytes;
+    }
+  }
+}
+
+impl Drop for MemoryCharge {
+  fn drop(&mut self) {
+    self.tracker.release(self.bytes);
+  }
+}
+
 /// Measure the *directly owned* Rust-heap storage of an `SLVal` payload — the
 /// bytes that live outside the `GcBox` layout gc-arena records. This is what
 /// `Accounted` charges the tracker at allocation and releases at sweep:
@@ -108,36 +154,42 @@ fn external_bytes_of<'gc>(value: &SLVal<'gc>) -> usize {
 }
 
 /// A garbage-collected SafeLisp value wrapped with per-execution memory
-/// accounting. The `value: SLVal` is the actual payload; `tracker` and
-/// `external_bytes` record the Rust-heap storage `value` directly owns (string
-/// bytes, list/partial `Vec` backings) so the `Execution`'s memory limit can
-/// see storage that gc-arena's `Metrics` does not.
+/// accounting. The `value: SLVal` is the actual payload; `charge` holds the
+/// byte count of the Rust-heap storage `value` directly owns (string bytes,
+/// list/partial `Vec` backings) and releases it to the per-execution
+/// [`MemoryTracker`] on `Drop`.
 ///
 /// `Accounted` is `!Clone` by design: every runtime value must be created via
-/// `ExecRoot::alloc_value`, which charges the tracker. `Drop` releases the
-/// charge — it touches only `tracker` and the `usize`, never `value` (which
-/// may contain dead `Gc` pointers during sweep), satisfying the
-/// `#[collect(unsafe_drop)]` safety condition.
+/// `ExecRoot::alloc_value`, which charges the tracker. The `charge` field is
+/// `#[collect(require_static)]` (it's `'static` — only an `Rc<MemoryTracker>`
+/// and a `usize`, no `Gc` pointers), so gc-arena's derive skips tracing it and
+/// the `#[collect(no_drop)]` on `Accounted` is honest: the only `Drop` glue is
+/// `MemoryCharge`'s, which touches no `Gc` pointers (the safety invariant).
+///
+/// Field order matters: `value` is declared before `charge` so Rust drops the
+/// `SLVal` payload first, then releases the accounting charge.
 #[derive(Collect)]
-#[collect(unsafe_drop)]
+#[collect(no_drop)]
 pub struct Accounted<'gc> {
   pub value: SLVal<'gc>,
+  /// Held only for its `Drop` (which releases the charge to the tracker); the
+  /// byte count is read via `MemoryCharge::bytes()` only on `TrackedVec`.
+  #[allow(dead_code)]
   #[collect(require_static)]
-  tracker: SharedTracker,
-  external_bytes: usize,
+  charge: MemoryCharge,
 }
 
 impl<'gc> std::fmt::Debug for Accounted<'gc> {
-  /// Debug-format only the `SLVal` payload; the tracker and byte count are
-  /// accounting metadata, not part of the value's identity.
+  /// Debug-format only the `SLVal` payload; the charge is accounting metadata,
+  /// not part of the value's identity.
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     f.debug_struct("Accounted").field("value", &self.value).finish()
   }
 }
 
 impl<'gc> PartialEq for Accounted<'gc> {
-  /// Compare accounted values by their `SLVal` payload. The tracker and
-  /// `external_bytes` are accounting metadata, not part of the value's identity.
+  /// Compare accounted values by their `SLVal` payload. The charge is
+  /// accounting metadata, not part of the value's identity.
   fn eq(&self, other: &Self) -> bool {
     self.value == other.value
   }
@@ -151,22 +203,10 @@ impl<'gc> Accounted<'gc> {
   /// `ExecRoot::alloc_value` rather than calling this directly.
   fn new(value: SLVal<'gc>, tracker: SharedTracker) -> Self {
     let external_bytes = external_bytes_of(&value);
-    tracker.charge(external_bytes);
     Accounted {
       value,
-      tracker,
-      external_bytes,
+      charge: MemoryCharge::new(tracker, external_bytes),
     }
-  }
-}
-
-impl Drop for Accounted<'_> {
-  fn drop(&mut self) {
-    // SAFETY for `#[collect(unsafe_drop)]`: this must not inspect `self.value`,
-    // which may contain dangling `Gc` pointers during arena teardown. We touch
-    // only `tracker` (a `Rc<MemoryTracker>`, `require_static`) and the
-    // `external_bytes` count.
-    self.tracker.release(self.external_bytes);
   }
 }
 
@@ -176,46 +216,43 @@ impl Drop for Accounted<'_> {
 /// interpreter's own `Vec`s (which hold `Gc` pointers but allocate plain Rust
 /// heap, invisible to gc-arena's `Metrics`). The charge is
 /// `capacity() * size_of::<T>()`; it's reconciled on every capacity change
-/// (push/reserve/shrink_to_fit) and released in `Drop`.
+/// (push/reserve/shrink_to_fit) and released when the `MemoryCharge` field
+/// drops.
 ///
-/// `Collect` is implemented manually below: it traces `inner` (so any `Gc`
-/// pointers held by the elements are traced) and ignores the `tracker` (an
-/// `Rc<MemoryTracker>` holds no `Gc` pointers). The outer `ExecRoot`/`Frame`
-/// derives see this via the standard field-tracing the derive macro emits —
-/// no `require_static` annotation is needed on the `TrackedVec` fields.
+/// `TrackedVec` has no custom `Drop` — the charge cleanup lives in the
+/// `charge: MemoryCharge` field, which is `#[collect(require_static)]` (it's
+/// `'static`: an `Rc<MemoryTracker>` + `usize`, no `Gc` pointers). gc-arena's
+/// `#[collect(no_drop)]` derive is therefore honest: the only `Drop` glue is
+/// `MemoryCharge`'s, which touches no `Gc` pointers. The derive traces `inner`
+/// normally (so element `Gc` pointers are traced) and skips `charge`.
+///
+/// Field order matters: `inner` is declared before `charge` so Rust drops the
+/// `Vec<T>` payload first, then releases the accounting charge.
+#[derive(Collect)]
+#[collect(no_drop)]
 pub(crate) struct TrackedVec<T> {
   inner: Vec<T>,
-  tracker: SharedTracker,
-  charged: usize,
+  #[collect(require_static)]
+  charge: MemoryCharge,
 }
 
 impl<T> TrackedVec<T> {
-  /// Current charge (capacity × element size). Stored on the struct so we can
-  /// compute the delta to release without re-reading `capacity()` after the
-  /// underlying `Vec` has been moved/dropped.
+  /// Current charge (capacity × element size).
   fn bytes_for(capacity: usize) -> usize {
     capacity * std::mem::size_of::<T>()
   }
 
-  /// Reconcile the tracker to the current `inner.capacity()`: release the old
-  /// charge and apply the new one. Called after any capacity-changing op.
+  /// Reconcile the charge to the current `inner.capacity()`. Called after any
+  /// capacity-changing op.
   fn reconcile(&mut self) {
     let new = Self::bytes_for(self.inner.capacity());
-    if new != self.charged {
-      // Release the old charge, then apply the new. Using release/charge
-      // (rather than a delta) keeps the tracker's running total exact even if
-      // other callers charged in between.
-      self.tracker.release(self.charged);
-      self.tracker.charge(new);
-      self.charged = new;
-    }
+    self.charge.set(new);
   }
 
   pub fn new(tracker: SharedTracker) -> Self {
     TrackedVec {
       inner: Vec::new(),
-      tracker,
-      charged: 0,
+      charge: MemoryCharge::new(tracker, 0),
     }
   }
 
@@ -227,18 +264,16 @@ impl<T> TrackedVec<T> {
     let mut inner = inner;
     inner.shrink_to_fit();
     let charged = Self::bytes_for(inner.capacity());
-    tracker.charge(charged);
     TrackedVec {
       inner,
-      tracker,
-      charged,
+      charge: MemoryCharge::new(tracker, charged),
     }
   }
 
   pub fn push(&mut self, value: T) {
     self.inner.push(value);
     // push may have grown the capacity; reconcile if so.
-    if Self::bytes_for(self.inner.capacity()) != self.charged {
+    if Self::bytes_for(self.inner.capacity()) != self.charge.bytes() {
       self.reconcile();
     }
   }
@@ -265,14 +300,6 @@ impl<T> TrackedVec<T> {
   }
 }
 
-impl<T> Drop for TrackedVec<T> {
-  fn drop(&mut self) {
-    // Release the full charge so the tracker reflects this vec's removal.
-    self.tracker.release(self.charged);
-    self.charged = 0;
-  }
-}
-
 impl<T> std::ops::Index<usize> for TrackedVec<T> {
   type Output = T;
   fn index(&self, index: usize) -> &T {
@@ -283,16 +310,6 @@ impl<T> std::ops::Index<usize> for TrackedVec<T> {
 impl<T> std::ops::IndexMut<usize> for TrackedVec<T> {
   fn index_mut(&mut self, index: usize) -> &mut T {
     &mut self.inner[index]
-  }
-}
-
-unsafe impl<'gc, T: Collect<'gc>> Collect<'gc> for TrackedVec<T> {
-  fn trace<C: gc_arena::collect::Trace<'gc>>(&self, cc: &mut C) {
-    // Delegate to the inner `Vec<T>`'s `Collect` impl so any `Gc` pointers
-    // held by the elements are traced. The `tracker` is `require_static`-shaped
-    // (an `Rc<MemoryTracker>`) and holds no `Gc` pointers, so it's not traced
-    // here.
-    self.inner.trace(cc);
   }
 }
 
