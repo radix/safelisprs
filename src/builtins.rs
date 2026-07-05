@@ -5,7 +5,7 @@ use gc_arena::{Gc, Mutation, RefLock};
 use rand_chacha::rand_core::{RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
-use crate::interpreter::{Accounted, CellContents, ExecRoot, HostCtx, SLVal};
+use crate::interpreter::{Accounted, CellContents, HostCtx, SLVal};
 
 /// A compile-time description of a builtin: which module/name it lives in and
 /// how many arguments it takes. `num_params` is `None` for variadic builtins.
@@ -16,21 +16,19 @@ pub struct BuiltinSpec {
   pub num_params: Option<u16>,
 }
 
-/// A builtin's runtime handler. Takes a `&mut ExecRoot` (the execution's
-/// stack/frames), a [`HostCtx`] (GC context + registries, so the builtin can
-/// allocate and invoke callables), and the evaluated arguments.
+/// A builtin's runtime handler. Takes a [`HostCtx`] (which bundles the
+/// `&mut ExecRoot`, the GC `Mutation` context, and the `Package`/`Builtins`
+/// registries) and the evaluated arguments.
 ///
-/// The `&mut ExecRoot<'gc>` is passed *separately* from `HostCtx` (rather than
-/// stored inside it) so the borrow checker can track its lifetime without the
-/// `'gc` invariance issue that `Mutation<'gc>` would otherwise cause.
-///
-/// The `for<'gc>` higher-ranked bound lets one `'static` handler serve any
-/// execution's arena. The `HostCtx`'s second lifetime (for `package`/`builtins`
-/// borrows) is left elided — it is independent of `'gc` and inferred per-call.
+/// The `for<'gc, 'call>` higher-ranked bound lets one `'static` handler serve
+/// any execution's arena. `'gc` is the arena brand (invariant, used in `Gc`
+/// and `ExecRoot`); `'call` is the short mutable borrow of the root while
+/// invoking one builtin (distinct from `'gc` so the borrow checker can
+/// reborrow `&'gc mut ExecRoot<'gc>` as `&'call mut ExecRoot<'gc>` without
+/// affecting the inner arena brand).
 pub(crate) type HostFn = Arc<
-  dyn for<'gc> Fn(
-      &mut ExecRoot<'gc>,
-      &mut HostCtx<'gc, '_>,
+  dyn for<'gc, 'call> Fn(
+      &mut HostCtx<'gc, 'call>,
       &[Gc<'gc, Accounted<'gc>>],
     ) -> Result<SLVal<'gc>, String>,
 >;
@@ -50,15 +48,14 @@ impl Builtin {
   /// Invoke this builtin's handler with the given arguments. The handler's
   /// return value is wrapped in `Accounted` (charging the execution's tracker)
   /// and pushed onto the execution's value stack by this method.
-  pub(crate) fn call<'gc, 'a>(
+  pub(crate) fn call<'gc, 'call>(
     &self,
-    root: &mut ExecRoot<'gc>,
-    ctx: &mut HostCtx<'gc, 'a>,
+    ctx: &mut HostCtx<'gc, 'call>,
     args: &[Gc<'gc, Accounted<'gc>>],
   ) -> Result<(), String> {
-    let result = (self.func)(root, ctx, args)?;
-    let gc = root.alloc_value(ctx.mc(), result);
-    root.push_gc(gc);
+    let result = (self.func)(ctx, args)?;
+    let gc = ctx.alloc_value(result);
+    ctx.push_gc(gc);
     Ok(())
   }
 
@@ -74,7 +71,7 @@ impl Builtin {
         name,
         num_params: Some(1),
       },
-      func: Arc::new(move |_root, _ctx, args| func(args[0])),
+      func: Arc::new(move |_ctx, args| func(args[0])),
     }
   }
 
@@ -94,7 +91,7 @@ impl Builtin {
         name,
         num_params: Some(2),
       },
-      func: Arc::new(move |_root, _ctx, args| func(args[0], args[1])),
+      func: Arc::new(move |_ctx, args| func(args[0], args[1])),
     }
   }
 
@@ -116,19 +113,18 @@ impl Builtin {
         name,
         num_params: Some(2),
       },
-      func: Arc::new(move |_root, ctx, args| func(ctx.mc(), args[0], args[1])),
+      func: Arc::new(move |ctx, args| func(ctx.mc(), args[0], args[1])),
     }
   }
 
   /// A binary builtin that needs full access to the execution context (e.g.
-  /// to invoke SafeLisp callables via [`HostCtx::call`]). `func` receives
-  /// `(root, ctx, left, right)`.
+  /// to invoke SafeLisp callables via [`HostCtx::call`] or to allocate
+  /// `CellContents`). `func` receives `(ctx, left, right)`.
   pub(crate) fn binary_ctx(
     module: &'static str,
     name: &'static str,
-    func: impl for<'gc> Fn(
-        &mut ExecRoot<'gc>,
-        &mut HostCtx<'gc, '_>,
+    func: impl for<'gc, 'call> Fn(
+        &mut HostCtx<'gc, 'call>,
         Gc<'gc, Accounted<'gc>>,
         Gc<'gc, Accounted<'gc>>,
       ) -> Result<SLVal<'gc>, String>
@@ -140,7 +136,7 @@ impl Builtin {
         name,
         num_params: Some(2),
       },
-      func: Arc::new(move |root, ctx, args| func(root, ctx, args[0], args[1])),
+      func: Arc::new(move |ctx, args| func(ctx, args[0], args[1])),
     }
   }
 
@@ -161,7 +157,7 @@ impl Builtin {
         name,
         num_params: Some(3),
       },
-      func: Arc::new(move |_root, _ctx, args| func(args[0], args[1], args[2])),
+      func: Arc::new(move |_ctx, args| func(args[0], args[1], args[2])),
     }
   }
 
@@ -180,7 +176,7 @@ impl Builtin {
         name,
         num_params: None,
       },
-      func: Arc::new(move |_root, _ctx, args| func(args)),
+      func: Arc::new(move |_ctx, args| func(args)),
     }
   }
 }
@@ -298,7 +294,7 @@ pub fn default_builtins() -> Builtins {
     // (std.range start stop) -> List<Int>
     //   Like Python's `list(range(start, stop))`: half-open, `[start, stop)`.
     //   `start >= stop` yields the empty list.
-    .with_builtin(Builtin::binary_ctx("std", "range", |root, ctx, a, b| {
+    .with_builtin(Builtin::binary_ctx("std", "range", |ctx, a, b| {
       match (&a.value, &b.value) {
         (SLVal::Int(start), SLVal::Int(stop)) => {
           if stop < start {
@@ -306,7 +302,7 @@ pub fn default_builtins() -> Builtins {
           } else {
             Ok(SLVal::List(
               (*start..*stop)
-                .map(|i| root.alloc_value(ctx.mc(), SLVal::Int(i)))
+                .map(|i| ctx.alloc_value(SLVal::Int(i)))
                 .collect(),
             ))
           }
@@ -325,14 +321,14 @@ pub fn default_builtins() -> Builtins {
     .with_builtin(Builtin::binary_ctx(
       "std",
       "map",
-      |root, ctx, list, func| {
+      |ctx, list, func| {
         let items = match &list.value {
           SLVal::List(items) => items.clone(),
           other => return Err(format!("std.map: expected a List, got {:?}", other)),
         };
         let mut results = Vec::with_capacity(items.len());
         for item in items {
-          let result = ctx.call(root, func, &[item])?;
+          let result = ctx.call(func, &[item])?;
           results.push(result);
         }
         Ok(SLVal::List(results))
@@ -376,7 +372,7 @@ pub fn default_builtins() -> Builtins {
     //   `rand.roll!` can mutate it in place. Same inputs always produce the
     //   same Cell contents; differing `name` or `seed` produces differing
     //   output.
-    .with_builtin(Builtin::binary_ctx("rand", "rng", |root, ctx, seed, name| {
+    .with_builtin(Builtin::binary_ctx("rand", "rng", |ctx, seed, name| {
       let parent = match &seed.value {
         SLVal::Int(i) => *i,
         other => return Err(format!("rand.rng: expected Int seed, got {:?}", other)),
@@ -385,7 +381,7 @@ pub fn default_builtins() -> Builtins {
         SLVal::String(s) => s.as_str(),
         other => return Err(format!("rand.rng: expected String name, got {:?}", other)),
       };
-      let contents = CellContents::new(SLVal::Int(rand_rng(parent, ns)), root.tracker());
+      let contents = CellContents::new(SLVal::Int(rand_rng(parent, ns)), ctx.tracker());
       Ok(SLVal::Cell(Gc::new(ctx.mc(), RefLock::new(contents))))
     }))
     // (rand.roll! rng sides) -> Int
