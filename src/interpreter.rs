@@ -1213,11 +1213,12 @@ impl<'gc> ExecRoot<'gc> {
         }
         args.reverse();
         let mut ctx = HostCtx {
+          root: self,
           mc,
           package,
           builtins,
         };
-        builtin.call(self, &mut ctx, &args)?;
+        builtin.call(&mut ctx, &args)?;
       }
     }
     Ok(())
@@ -1337,23 +1338,49 @@ impl<'gc> ExecRoot<'gc> {
 }
 
 /// The runtime context passed to a builtin handler ([`crate::builtins::HostFn`]).
-/// It carries the GC `Mutation` context and the `Package` / `Builtins`
-/// registries — enough for a builtin to look up callables and allocate values.
-/// The mutable `ExecRoot` reference is passed separately to the handler so the
-/// borrow checker can track its lifetime independently of the `'gc` invariance
-/// (see [`HostCtx::call`]).
+/// It carries the GC `Mutation` context, the `Package` / `Builtins` registries,
+/// and a short-lived mutable borrow of the execution's [`ExecRoot`] — enough
+/// for a builtin to allocate values, push results, and invoke SafeLisp
+/// callables.
 ///
-/// `package` and `builtins` get their own lifetime `'a` (independent of `'gc`)
-/// because they are borrows from the `Execution`, not from the arena.
-pub struct HostCtx<'gc, 'a> {
+/// # Lifetimes
+///
+/// - `'gc`: the arena brand, invariant. Used inside `Gc<'gc, …>`,
+///   `ExecRoot<'gc>`, and `Mutation<'gc>`. Values branded `'gc` cannot escape
+///   the arena callback.
+/// - `'call`: the short mutable borrow of `ExecRoot` while invoking one
+///   builtin. Distinct from `'gc` so the borrow checker can reborrow
+///   `&'gc mut ExecRoot<'gc>` as `&'call mut ExecRoot<'gc>` (shortening the
+///   outer reference without affecting the inner arena brand). This is what
+///   lets `HostCtx` hold the root directly rather than passing it separately.
+pub struct HostCtx<'gc, 'call> {
+  root: &'call mut ExecRoot<'gc>,
   mc: &'gc Mutation<'gc>,
-  package: &'a Package,
-  builtins: &'a Builtins,
+  package: &'call Package,
+  builtins: &'call Builtins,
 }
 
-impl<'gc, 'a> HostCtx<'gc, 'a> {
+impl<'gc, 'call> HostCtx<'gc, 'call> {
+  /// The GC `Mutation` context for allocating new `Gc` pointers.
   pub fn mc(&self) -> &'gc Mutation<'gc> {
     self.mc
+  }
+
+  /// Allocate a `Gc<Accounted>` value via the execution's chokepoint, charging
+  /// the tracker. This is the supported way for a builtin to box a result.
+  pub fn alloc_value(&mut self, value: SLVal<'gc>) -> Gc<'gc, Accounted<'gc>> {
+    self.root.alloc_value(self.mc, value)
+  }
+
+  /// Push a `Gc<Accounted>` onto the execution's value stack.
+  pub fn push_gc(&mut self, value: Gc<'gc, Accounted<'gc>>) {
+    self.root.push_gc(value);
+  }
+
+  /// The per-execution shared memory tracker. Exposed so builtins that
+  /// construct `CellContents` directly can charge the tracker.
+  pub fn tracker(&self) -> SharedTracker {
+    self.root.tracker()
   }
 
   /// Synchronously invoke a SafeLisp callable (`FunctionRef` or `Partial`)
@@ -1362,19 +1389,15 @@ impl<'gc, 'a> HostCtx<'gc, 'a> {
   /// result off the stack — so the builtin gets the return value before
   /// control returns to the caller's bytecode dispatch loop.
   ///
-  /// `root` is passed explicitly (rather than stored in `HostCtx`) so the
-  /// borrow checker can track the `&mut ExecRoot<'gc>` lifetime independently
-  /// of `'gc`'s invariance.
-  ///
   /// The `callable` must be a `FunctionRef` or `Partial` value; anything else
   /// is a runtime error. The `args` are pushed left-to-right (so the first arg
   /// is the callable's first parameter).
-  pub(crate) fn call(
-    &self,
-    root: &mut ExecRoot<'gc>,
+  pub fn call(
+    &mut self,
     callable: Gc<'gc, Accounted<'gc>>,
     args: &[Gc<'gc, Accounted<'gc>>],
   ) -> Result<Gc<'gc, Accounted<'gc>>, String> {
+    let root: &mut ExecRoot<'gc> = self.root;
     // Remember the current frame depth so we know when the sub-call has
     // returned: we push a frame for the callable, run until the frame stack
     // is back to the original depth, then the result is on top of the stack.
