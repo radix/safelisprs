@@ -408,15 +408,48 @@ struct Frame<'gc> {
   ip: usize,
 }
 
-#[derive(Collect, Clone)]
+#[derive(Collect)]
 #[collect(no_drop)]
 enum FrameFunc {
   /// Look up the function by `(module, function)` index via the `Package` at
   /// `step` time. The production path (call_main, call_fixed, call_dynamic).
+  /// No charge: the `Function` (including its `instructions: Vec<Instruction>`)
+  /// lives in the shared `Package`, not this execution's heap.
   Indexed((u32, u32)),
   /// An ad-hoc `Function` not registered in any `Package` (test entry points
-  /// that build bytecode directly). Owns its instructions.
-  Inline(Function),
+  /// that build bytecode directly). Owns its `instructions: Vec<Instruction>`,
+  /// whose backing array is charged to the per-execution tracker via the
+  /// `MemoryCharge` so the memory limit sees the `Inline` frame's heap
+  /// overhead. (Without this, deep `Inline` recursion would evade the limit
+  /// the same way cloned instruction vectors did before step 1.)
+  Inline {
+    function: Function,
+    /// Held only for its `Drop` (which releases the instruction-vector charge
+    /// to the tracker); the byte count is read via `FrameFunc::instruction_bytes`
+    /// only when constructing.
+    #[allow(dead_code)]
+    #[collect(require_static)]
+    charge: MemoryCharge,
+  },
+}
+
+impl FrameFunc {
+  /// The byte footprint of an `Inline` function's `instructions: Vec<…>`:
+  /// `capacity() * size_of::<Instruction>()`.
+  fn instruction_bytes(f: &Function) -> usize {
+    let elem_size = std::mem::size_of::<crate::compiler::Instruction<(u32, u32)>>();
+    f.instructions.capacity() * elem_size
+  }
+
+  /// Construct an `Inline` `FrameFunc`, charging the function's instruction
+  /// vector to `tracker`.
+  fn inline(function: Function, tracker: SharedTracker) -> Self {
+    let bytes = Self::instruction_bytes(&function);
+    FrameFunc::Inline {
+      function,
+      charge: MemoryCharge::new(tracker, bytes),
+    }
+  }
 }
 
 // `Function` (a.k.a. `LinkedFunction`) is `'static` and holds no `Gc` pointers,
@@ -980,7 +1013,7 @@ impl<'gc> ExecRoot<'gc> {
             }
           }
         }
-        FrameFunc::Inline(f) => {
+        FrameFunc::Inline { function: f, .. } => {
           if ip >= f.instructions.len() {
             return Err("ran past end of function without Return".to_string());
           }
@@ -1295,7 +1328,7 @@ impl<'gc> ExecRoot<'gc> {
     }
     let locals = TrackedVec::from_vec(locals, self.tracker.clone());
     self.frames.push(Frame {
-      function: FrameFunc::Inline(function),
+      function: FrameFunc::inline(function, self.tracker.clone()),
       locals,
       ip: 0,
     });
