@@ -139,11 +139,14 @@ impl Drop for MemoryCharge {
 /// - `String`: the `String`'s heap buffer (`capacity()`, not `len`).
 /// - `List`/`Partial`: the `Vec`'s backing array
 ///   (`capacity() * size_of::<Gc<_>>()`).
-/// - Other variants: 0 (scalars, `Void`, `FunctionRef`, `Cell` whose contents
-///   are themselves `Gc`-pointed and accounted by their own box).
+/// - `Cell`: 0 — the cell's *contents* are accounted separately by
+///   `CellContents` (which holds its own `MemoryCharge` for the held
+///   `SLVal`'s external bytes). The `Cell` variant itself owns only the
+///   `Gc` box pointer, which gc-arena's `total_gc_allocation` already counts.
 ///
 /// Only *directly owned* storage is counted; pointed-to `Gc` boxes are
-/// accounted by their own `Accounted` wrapper, so there's no double-counting.
+/// accounted by their own wrappers (`Accounted` for values, `CellContents`
+/// for cell contents), so there's no double-counting.
 fn external_bytes_of<'gc>(value: &SLVal<'gc>) -> usize {
   match value {
     SLVal::String(s) => s.capacity(),
@@ -346,6 +349,13 @@ impl<'gc> ExecRoot<'gc> {
     Gc::new(mc, Accounted::new(value, self.tracker.clone()))
   }
 
+  /// The per-execution shared memory tracker. Exposed so builtins that
+  /// allocate `CellContents` directly (e.g. `rand.rng`) can charge the
+  /// tracker without going through `alloc_value`.
+  pub(crate) fn tracker(&self) -> SharedTracker {
+    self.tracker.clone()
+  }
+
   /// Reconstruct a `Gc<Accounted>` inside this execution's arena from an owned
   /// `SLValue`, allocating fresh accounted `Gc` pointers for any non-scalar
   /// sub-values. The arena-agnostic `SLValue` is deep-copied in, with each new
@@ -371,7 +381,8 @@ impl<'gc> ExecRoot<'gc> {
       }
       SLValue::Cell(inner) => {
         let inner_gc = self.import_value(mc, inner);
-        self.alloc_value(mc, SLVal::Cell(Gc::new(mc, RefLock::new(inner_gc.value.clone()))))
+        let contents = CellContents::new(inner_gc.value.clone(), self.tracker.clone());
+        self.alloc_value(mc, SLVal::Cell(Gc::new(mc, RefLock::new(contents))))
       }
       SLValue::List(items) => {
         let sub: Vec<Gc<'gc, Accounted<'gc>>> =
@@ -413,6 +424,66 @@ enum FrameFunc {
 // `Function` directly, e.g. `Execution::enter_function`'s signature.)
 gc_arena::static_collect!(Function);
 
+/// The mutable contents of a `Cell`: the held `SLVal` plus a [`MemoryCharge`]
+/// for that `SLVal`'s directly-owned external Rust-heap storage (string bytes,
+/// list/partial `Vec` backings). `SetCell` updates both fields together so the
+/// charge tracks the live contents across mutation.
+///
+/// Allocated as `Gc<RefLock<CellContents>>` (the `RefLock` provides interior
+/// mutability; the `Gc` box gives it an identity in the arena and makes it
+/// eligible for cycle collection). `CellContents` derives `Collect` with
+/// `#[collect(no_drop)]` — the only `Drop` glue is `MemoryCharge`'s, which
+/// touches no `Gc` pointers (the `#[collect(no_drop)]` safety invariant). The
+/// `charge` field is `#[collect(require_static)]` (it's `'static`: an
+/// `Rc<MemoryTracker>` + `usize`), so the derive skips tracing it and traces
+/// only `value`.
+///
+/// Field order matters: `value` is declared before `charge` so Rust drops the
+/// `SLVal` payload first, then releases the accounting charge.
+#[derive(Collect)]
+#[collect(no_drop)]
+pub struct CellContents<'gc> {
+  pub value: SLVal<'gc>,
+  #[collect(require_static)]
+  charge: MemoryCharge,
+}
+
+impl<'gc> std::fmt::Debug for CellContents<'gc> {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct("CellContents").field("value", &self.value).finish()
+  }
+}
+
+impl<'gc> PartialEq for CellContents<'gc> {
+  fn eq(&self, other: &Self) -> bool {
+    self.value == other.value
+  }
+}
+
+impl<'gc> Eq for CellContents<'gc> {}
+
+impl<'gc> CellContents<'gc> {
+  /// Construct `CellContents` holding `value`, charging `value`'s external
+  /// bytes to `tracker`. Used by `MakeCell`, `import_value`'s `Cell` case, and
+  /// `rand.rng`.
+  pub(crate) fn new(value: SLVal<'gc>, tracker: SharedTracker) -> Self {
+    let bytes = external_bytes_of(&value);
+    CellContents {
+      value,
+      charge: MemoryCharge::new(tracker, bytes),
+    }
+  }
+
+  /// Replace the held value, reconciling the charge: releases the old value's
+  /// external bytes and charges the new value's. Used by `SetCell` and
+  /// `rand.roll!`.
+  pub(crate) fn set(&mut self, value: SLVal<'gc>) {
+    let new_bytes = external_bytes_of(&value);
+    self.charge.set(new_bytes);
+    self.value = value;
+  }
+}
+
 /// A SafeLisp value. This is the in-arena representation: anything that needs
 /// sharing or cycle-detection is held behind a `Gc` pointer.
 #[derive(Debug, PartialEq, Clone, Collect)]
@@ -425,12 +496,11 @@ pub enum SLVal<'gc> {
   Void,
   FunctionRef(u32, u32),
   Partial(Partial<'gc>),
-  /// A cell holding a mutable `SLVal`. The `RefLock<SLVal>` box is *not*
-  /// wrapped in `Accounted` (the contents are mutated in place via `SetCell`,
-  /// and `Accounted` is `!Clone`), so the contents' external bytes are not
-  /// charged here. This is a known undercount for cells holding strings/lists;
-  /// refine in a follow-up.
-  Cell(Gc<'gc, RefLock<SLVal<'gc>>>),
+  /// A cell holding a mutable value. The `RefLock<CellContents>` box wraps
+  /// `CellContents { value: SLVal, charge: MemoryCharge }` so the cell's
+  /// contents are individually accounted to the per-execution tracker (and
+  /// the charge is reconciled on `SetCell`).
+  Cell(Gc<'gc, RefLock<CellContents<'gc>>>),
   List(Vec<Gc<'gc, Accounted<'gc>>>),
 }
 
@@ -477,7 +547,7 @@ impl<'gc> SLVal<'gc> {
         function: p.function,
         args: p.args.iter().map(|a| a.value.to_value()).collect(),
       },
-      SLVal::Cell(r) => SLValue::Cell(Box::new(r.borrow().to_value())),
+      SLVal::Cell(r) => SLValue::Cell(Box::new(r.borrow().value.to_value())),
       SLVal::List(items) => SLValue::List(items.iter().map(|i| i.value.to_value()).collect()),
     }
   }
@@ -966,17 +1036,15 @@ impl<'gc> ExecRoot<'gc> {
       }
       Instruction::MakeCell => {
         let val = self.pop()?;
-        let cell = self.alloc_value(
-          mc,
-          SLVal::Cell(Gc::new(mc, RefLock::new(val.value.clone()))),
-        );
+        let contents = CellContents::new(val.value.clone(), self.tracker.clone());
+        let cell = self.alloc_value(mc, SLVal::Cell(Gc::new(mc, RefLock::new(contents))));
         self.stack.push(cell);
       }
       Instruction::DerefCell => {
         let val = self.pop()?;
         match &val.value {
           SLVal::Cell(r) => {
-            let cloned: SLVal<'gc> = r.borrow().clone();
+            let cloned: SLVal<'gc> = r.borrow().value.clone();
             let gc = self.alloc_value(mc, cloned);
             self.stack.push(gc);
           }
@@ -985,13 +1053,19 @@ impl<'gc> ExecRoot<'gc> {
       }
       Instruction::SetCell => {
         // Pop the Cell (TOS) and the new value (below it), write the value
-        // into the Cell, and push the value back as the result of `set!`.
+        // into the Cell (reconciling the cell's charge), and push the value
+        // back as the result of `set!`.
         let cell_gc = self.pop()?;
         let new_val = self.pop()?;
         match &cell_gc.value {
           SLVal::Cell(cell_ref) => {
-            // Mutate the Cell's contents in a GC-safe way.
-            *Gc::write(mc, *cell_ref).unlock().borrow_mut() = new_val.value.clone();
+            // Mutate the Cell's contents in a GC-safe way. `CellContents::set`
+            // replaces the held `SLVal` and reconciles the `MemoryCharge` so
+            // the cell's contents stay accounted.
+            Gc::write(mc, *cell_ref)
+              .unlock()
+              .borrow_mut()
+              .set(new_val.value.clone());
           }
           other => return Err(format!("Not a cell: {:?}", other)),
         }
@@ -2344,20 +2418,18 @@ mod test {
   #[test]
   fn memory_limit_catches_large_string_contents() {
     // `SLVal::String(String)` stores the `String` inline inside the `Gc`-boxed
-    // `SLVal`. The GC arena only counts the box itself (the `SLVal` enum +
-    // `String`'s 24-byte ptr/len/cap header, ≈ 40 bytes) toward
+    // `Accounted`. gc-arena counts only the box layout (the `Accounted` struct
+    // + `SLVal` enum + `String`'s 24-byte ptr/len/cap header) toward
     // `total_gc_allocation`. The actual string *bytes* live on the ordinary
-    // Rust heap and are invisible to the GC metrics — they're freed when the
-    // `Gc` box is dropped, but never counted.
+    // Rust heap and are invisible to gc-arena's `Metrics` — but `Accounted`
+    // charges them to the per-execution `MemoryTracker` via `external_bytes_of`
+    // (which returns `String::capacity()`), so the limit sees them.
     //
     // This program doubles a string on each recursive call: after 25
-    // iterations the string is 2^25 = 32 MB of actual bytes, but the live GC
-    // heap stays at a handful of ~40-byte `Gc<SLVal::String>` boxes (the old
-    // ones become garbage and are reclaimed by `collect_debt` between
-    // batches). A *correct* memory limit would trip; the current GC-only
-    // limit never does. This test asserts the limit fires and currently
-    // FAILS — once string-contents (or any non-Gc heap) overhead is tracked,
-    // it will pass.
+    // iterations the string is 2^25 = 32 MB of actual bytes. A tight memory
+    // limit catches it because the `Accounted` wrapper charges the string's
+    // capacity to the tracker, and the limit check sums
+    // `total_gc_allocation + tracker.external_bytes()`.
     let source = "
       (fn grow (s n)
         (if (std.== n 0)
@@ -2373,13 +2445,7 @@ mod test {
     .unwrap();
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
-    // 64 KiB is far below the 32 MB string this program builds, yet
-    // comfortably above the handful of `Gc<SLVal::String>` boxes live at any
-    // one moment.
     exec.set_memory_limit(Some(64 * 1024));
-    // Drive in small batches so `collect_debt` reclaims dead string boxes and
-    // the live GC heap stays tiny — while the actual string bytes grow to
-    // 32 MB on the Rust heap, unseen by the limit.
     let mut hit = false;
     for _ in 0..10_000 {
       match exec.run(50) {
@@ -2398,10 +2464,52 @@ mod test {
     }
     assert!(
       hit,
-      "expected the memory limit to fire, but the run completed with only {} bytes of live GC (limit {}); \
-       the GC-only limit does not see the ~32 MB of string contents on the Rust heap",
+      "expected the memory limit to fire for a 32 MB string, but the run completed (gc_bytes={}, limit {})",
       exec.gc_allocation_bytes(),
       64 * 1024,
+    );
+  }
+
+  #[test]
+  fn memory_limit_catches_large_string_in_cell() {
+    // A cell holding a large string must also be caught: `CellContents`
+    // charges the held `SLVal`'s external bytes to the tracker (via
+    // `MemoryCharge`), so a cell's contents are accounted even though they're
+    // stored in a `RefLock` box (not an `Accounted` box). This was the known
+    // undercount before `CellContents` was introduced.
+    //
+    // The program builds a large string, then a closure that captures it
+    // (the closure transform wraps the captured variable in a `Cell`). The
+    // cell keeps the string live; with a tight limit, the charge for the
+    // string's contents (held in the cell) trips the limit.
+    let source = "
+      (fn grow (s n)
+        (if (std.== n 0)
+          s
+          (grow (std.concat s s) (std.- n 1))))
+      (fn make-holder (big)
+        (fn holder () big)
+        holder)
+      (fn main ()
+        (let big (grow \"x\" 20))
+        (let h (make-holder big))
+        0)
+    ";
+    let pkg = compile_executable_from_source(
+      &source.to_string(),
+      ("main", "main"),
+      &default_builtins().specs(),
+    )
+    .unwrap();
+    let interp = Interpreter::new(pkg);
+    let mut exec = interp.call_main().unwrap();
+    // 64 KiB is far below the 2^20 = 1 MB string stored in the captured cell.
+    exec.set_memory_limit(Some(64 * 1024));
+    let err = exec.run_until_done().unwrap_err();
+    assert!(
+      err.contains("memory limit exceeded"),
+      "unexpected error: {}",
+      err,
     );
   }
 
