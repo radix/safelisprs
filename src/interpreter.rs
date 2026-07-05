@@ -18,12 +18,16 @@ use crate::compiler::{Callable, Instruction, LinkedFunction as Function, Package
 pub struct MemoryTracker {
   external_bytes: Cell<usize>,
   limit: Cell<Option<usize>>,
-  /// The `external_bytes` value at the last `pacing_tick`. Used by
-  /// [`MemoryTracker::pacing_delta`] to compute how much the external heap has
-  /// grown/shrunk since the last call, so [`check_memory_limit`] can feed that
-  /// delta to `Metrics::adjust_debt` and keep incremental collection paced to
-  /// external allocation (not just `Gc`-box allocation).
-  last_seen_external: Cell<usize>,
+  /// Accumulated *positive* external allocation debt waiting to be fed to
+  /// gc-arena's `Metrics::adjust_debt`. Incremented by [`charge`] (external
+  /// allocation grows the heap, so the collector should run sooner); *not*
+  /// decremented by [`release`] (sweep-time reclaims reduce `external_bytes`
+  /// but must not produce negative debt, because `collect_debt` runs outside
+  /// interpreter steps and may have already reset the GC cycle — a stale
+  /// negative delta would suppress collection until an equivalent amount of
+  /// new allocation occurs). Drained to `adjust_debt` (and reset to 0) by
+  /// [`drain_pacing_debt`] at each `check_memory_limit`.
+  pending_pacing_debt: Cell<usize>,
 }
 
 impl MemoryTracker {
@@ -31,9 +35,11 @@ impl MemoryTracker {
     Self::default()
   }
 
-  /// Charge `n` bytes to this tracker's running count. Returns the new total.
-  /// Uses checked arithmetic so an overflow panics (rather than silently
-  /// wrapping and corrupting the limit).
+  /// Charge `n` bytes to this tracker's running count and accumulate `n` as
+  /// pending pacing debt (so the next `check_memory_limit` grows GC debt by
+  /// `n`, pacing incremental collection to external allocation). Uses checked
+  /// arithmetic so an overflow panics (rather than silently wrapping and
+  /// corrupting the limit).
   fn charge(&self, n: usize) -> usize {
     let new = self
       .external_bytes
@@ -41,12 +47,22 @@ impl MemoryTracker {
       .checked_add(n)
       .expect("external byte count overflow");
     self.external_bytes.set(new);
+    let debt = self
+      .pending_pacing_debt
+      .get()
+      .checked_add(n)
+      .expect("pending pacing debt overflow");
+    self.pending_pacing_debt.set(debt);
     new
   }
 
   /// Release `n` bytes from this tracker's running count (called from
-  /// `Accounted::drop` when the GC sweeps an unreachable box). Returns the new
-  /// total. Uses checked arithmetic so an underflow panics.
+  /// `Accounted::drop` / `MemoryCharge::drop` when the GC sweeps an
+  /// unreachable box or a `TrackedVec` is dropped). Does *not* touch
+  /// `pending_pacing_debt`: a release is a sweep-time reclamation, and
+  /// applying it as a negative `adjust_debt` would be stale if `collect_debt`
+  /// already reset the GC cycle. Returns the new total. Uses checked
+  /// arithmetic so an underflow panics.
   fn release(&self, n: usize) -> usize {
     let prev = self.external_bytes.get();
     let new = prev.checked_sub(n).expect("external byte count underflow");
@@ -66,17 +82,17 @@ impl MemoryTracker {
     self.limit.set(limit);
   }
 
-  /// Returns the change in `external_bytes` since the last call, and updates
-  /// the last-seen snapshot. Positive deltas grow GC debt (the collector
-  /// should run sooner); negative deltas shrink it. Used by
-  /// [`ExecRoot::check_memory_limit`] to keep gc-arena's incremental
-  /// collection paced to *external* (non-`Gc`-box) allocation, which it
-  /// otherwise can't see.
-  fn pacing_delta(&self) -> f64 {
-    let now = self.external_bytes.get();
-    let delta = now as f64 - self.last_seen_external.get() as f64;
-    self.last_seen_external.set(now);
-    delta
+  /// Drain the accumulated positive pacing debt, returning the amount to feed
+  /// to `Metrics::adjust_debt` (and resetting the accumulator to 0). Only
+  /// ever returns a non-negative value: `charge` accumulates, `release`
+  /// doesn't subtract. This keeps incremental collection paced to external
+  /// allocation without risking a stale negative delta suppressing a fresh
+  /// GC cycle. May collect slightly more aggressively than a sampled-delta
+  /// scheme, but is safe and deterministic.
+  fn drain_pacing_debt(&self) -> usize {
+    let debt = self.pending_pacing_debt.get();
+    self.pending_pacing_debt.set(0);
+    debt
   }
 }
 
@@ -871,18 +887,20 @@ impl<'gc> ExecRoot<'gc> {
   /// Returns `Ok(())` if the live memory (gc-arena's `total_gc_allocation` +
   /// this execution's external bytes) is within the configured limit, or `Err`
   /// with a descriptive message if it has been exceeded. No-op limit check when
-  /// no limit is set, but *always* feeds the external-bytes delta to
-  /// `Metrics::adjust_debt` so incremental collection stays paced to external
-  /// (non-`Gc`-box) allocation — gc-arena otherwise can't see String/List
-  /// backing storage and wouldn't collect soon enough to keep large external
-  /// heaps bounded.
+  /// no limit is set, but *always* drains the pending positive external-allocation
+  /// debt into `Metrics::adjust_debt` so incremental collection stays paced to
+  /// external (non-`Gc`-box) allocation — gc-arena otherwise can't see
+  /// String/List backing storage and wouldn't collect soon enough to keep large
+  /// external heaps bounded. Only positive debt is applied (see
+  /// [`MemoryTracker::drain_pacing_debt`]) to avoid a stale negative delta
+  /// suppressing a fresh GC cycle after `collect_debt` resets.
   fn check_memory_limit(&self, mc: &Mutation<'gc>) -> Result<(), String> {
-    // Pace incremental collection to external allocation. Positive deltas grow
-    // debt (collect sooner); negative shrink it. This keeps `collect_debt`
-    // responsive to large strings/lists, not just `Gc`-box allocation.
-    let delta = self.tracker.pacing_delta();
-    if delta != 0.0 {
-      mc.metrics().adjust_debt(delta);
+    // Drain accumulated positive pacing debt into the arena's allocation debt
+    // so incremental collection runs sooner when external heaps grow. Releases
+    // (sweep-time reclaims) do not contribute, so this is always >= 0.
+    let debt = self.tracker.drain_pacing_debt();
+    if debt > 0 {
+      mc.metrics().adjust_debt(debt as f64);
     }
     if let Some(limit) = self.tracker.limit() {
       let usage = mc.metrics().total_gc_allocation() + self.tracker.external_bytes();
@@ -2751,6 +2769,38 @@ mod test {
       "expected 0 live Gc allocations after collecting the List<->Cell cycle, got {}",
       after,
     );
+  }
+
+  #[test]
+  fn pacing_debt_is_positive_only() {
+    // Direct unit test of the pacing-debt invariant: `charge` accumulates
+    // positive debt; `release` does *not* subtract from it; `drain_pacing_debt`
+    // returns the accumulated total and resets it to 0. This is the invariant
+    // that prevents the stale-negative-debt bug (where a sweep-time
+    // `release`, applied as a negative `Metrics::adjust_debt` after the GC
+    // cycle reset, would suppress collection on the fresh cycle).
+    let tracker = MemoryTracker::new();
+
+    // charge accumulates positive debt.
+    tracker.charge(100);
+    assert_eq!(tracker.drain_pacing_debt(), 100);
+
+    // after draining, the accumulator is 0.
+    assert_eq!(tracker.drain_pacing_debt(), 0);
+
+    // release does NOT contribute negative debt.
+    tracker.charge(100);
+    tracker.release(100);
+    assert_eq!(tracker.drain_pacing_debt(), 100);
+
+    // a subsequent charge still adds, unaffected by the earlier release.
+    tracker.charge(50);
+    assert_eq!(tracker.drain_pacing_debt(), 50);
+
+    // external_bytes still tracks live bytes independently of pacing debt.
+    // The sequence: charge(100)→100, charge(100)→200, release(100)→100,
+    // charge(50)→150. Drains don't affect external_bytes.
+    assert_eq!(tracker.external_bytes(), 150);
   }
 
   #[test]
