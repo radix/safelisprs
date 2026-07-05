@@ -2472,16 +2472,22 @@ mod test {
 
   #[test]
   fn memory_limit_catches_large_string_in_cell() {
-    // A cell holding a large string must also be caught: `CellContents`
-    // charges the held `SLVal`'s external bytes to the tracker (via
-    // `MemoryCharge`), so a cell's contents are accounted even though they're
-    // stored in a `RefLock` box (not an `Accounted` box). This was the known
-    // undercount before `CellContents` was introduced.
+    // A cell holding a large string must be charged for the string's bytes.
+    // `CellContents` wraps the held `SLVal` in a `MemoryCharge` (reconciled on
+    // `SetCell`), so a cell's contents are accounted even though they're stored
+    // in a `RefLock` box (not an `Accounted` box). This was the known undercount
+    // before `CellContents` was introduced.
     //
-    // The program builds a large string, then a closure that captures it
-    // (the closure transform wraps the captured variable in a `Cell`). The
-    // cell keeps the string live; with a tight limit, the charge for the
-    // string's contents (held in the cell) trips the limit.
+    // The program builds a 2^20 = 1 MiB string, then a closure that captures it
+    // (the closure transform wraps the captured variable in a `Cell`). `main`
+    // returns the closure so the cell stays reachable. We step `main` to
+    // completion *without* a limit (so the string builds unhindered) — but use
+    // `step` rather than `run_until_done` so the closure (and its captured
+    // cell) stays live on the arena's value stack rather than being popped out.
+    // Then we force collection of transient garbage and check `memory_usage`:
+    // if `CellContents` is charging the cell's contents, usage includes the
+    // ~1 MiB string; if it weren't, usage would be just a handful of `Gc` box
+    // bytes.
     let source = "
       (fn grow (s n)
         (if (std.== n 0)
@@ -2492,8 +2498,7 @@ mod test {
         holder)
       (fn main ()
         (let big (grow \"x\" 20))
-        (let h (make-holder big))
-        0)
+        (make-holder big))
     ";
     let pkg = compile_executable_from_source(
       &source.to_string(),
@@ -2503,13 +2508,47 @@ mod test {
     .unwrap();
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
-    // 64 KiB is far below the 2^20 = 1 MB string stored in the captured cell.
-    exec.set_memory_limit(Some(64 * 1024));
-    let err = exec.run_until_done().unwrap_err();
+    // Step to completion with no limit: builds the 1 MiB string and the cell.
+    // Stepping leaves the final value (the closure) on the arena's value stack,
+    // so the captured cell stays reachable for the subsequent collection + check.
+    while !exec.is_done() {
+      exec.step().unwrap();
+    }
+    // The closure (Partial) is now on top of the arena's value stack, holding
+    // the captured cell, which holds the 1 MiB string.
     assert!(
-      err.contains("memory limit exceeded"),
-      "unexpected error: {}",
-      err,
+      matches!(exec.peek_value().unwrap(), SLValue::Partial { .. }),
+      "expected a closure (Partial) on the stack from main",
+    );
+    // Force collection to reclaim transient garbage (the intermediate strings
+    // from `grow`, the original `Accounted` for `big` once it's captured, etc.).
+    // After this, the only live charge for the 1 MiB string should be the
+    // `CellContents` inside the captured cell.
+    exec.collect_all();
+    let usage_after = exec.memory_usage();
+    // The cell's `CellContents` charges the 1 MiB string. gc-arena's
+    // `total_gc_allocation` contributes only a few hundred bytes of `Gc` box
+    // headers; the rest is the tracker's `external_bytes`. If `CellContents`
+    // were not charging, usage would be < 1 KiB.
+    assert!(
+      usage_after >= 1_000_000,
+      "expected the cell's 1 MiB string to be charged, but memory_usage was only {} bytes",
+      usage_after,
+    );
+    // Sanity: the gc-arena-reported portion is tiny (box headers only).
+    let gc_only = exec.gc_allocation_bytes();
+    assert!(
+      gc_only < 1_000,
+      "expected gc-arena to report only box headers (< 1 KiB), got {} bytes",
+      gc_only,
+    );
+    // So the bulk of the charge is the tracker's external bytes (the cell's
+    // string contents), proving `CellContents` is doing the accounting.
+    let external = exec.memory_usage() - gc_only;
+    assert!(
+      external >= 1_000_000,
+      "expected >= 1 MiB of external (cell-contents) bytes, got {}",
+      external,
     );
   }
 
