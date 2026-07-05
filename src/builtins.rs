@@ -5,7 +5,7 @@ use gc_arena::{Gc, Mutation, RefLock};
 use rand_chacha::rand_core::{RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
-use crate::interpreter::{Accounted, ExecRoot, HostCtx, SLVal};
+use crate::interpreter::{Accounted, CellContents, ExecRoot, HostCtx, SLVal};
 
 /// A compile-time description of a builtin: which module/name it lives in and
 /// how many arguments it takes. `num_params` is `None` for variadic builtins.
@@ -376,7 +376,7 @@ pub fn default_builtins() -> Builtins {
     //   `rand.roll!` can mutate it in place. Same inputs always produce the
     //   same Cell contents; differing `name` or `seed` produces differing
     //   output.
-    .with_builtin(Builtin::binary_alloc("rand", "rng", |mc, seed, name| {
+    .with_builtin(Builtin::binary_ctx("rand", "rng", |root, ctx, seed, name| {
       let parent = match &seed.value {
         SLVal::Int(i) => *i,
         other => return Err(format!("rand.rng: expected Int seed, got {:?}", other)),
@@ -385,10 +385,8 @@ pub fn default_builtins() -> Builtins {
         SLVal::String(s) => s.as_str(),
         other => return Err(format!("rand.rng: expected String name, got {:?}", other)),
       };
-      Ok(SLVal::Cell(Gc::new(
-        mc,
-        RefLock::new(SLVal::Int(rand_rng(parent, ns))),
-      )))
+      let contents = CellContents::new(SLVal::Int(rand_rng(parent, ns)), root.tracker());
+      Ok(SLVal::Cell(Gc::new(ctx.mc(), RefLock::new(contents))))
     }))
     // (rand.roll! rng sides) -> Int
     //   Mutates the `rng` in place, advancing it to the next seed,
@@ -408,16 +406,19 @@ pub fn default_builtins() -> Builtins {
         return Err(format!("rand.roll!: sides must be positive, got {}", n));
       }
       let s = match &*cell.borrow() {
-        SLVal::Int(i) => *i,
-        ref other => {
+        CellContents { value: SLVal::Int(i), .. } => *i,
+        other => {
           return Err(format!(
             "rand.roll!: expected Cell to hold an Int, got {:?}",
-            other
+            other.value
           ))
         }
       };
       let (roll, next) = rand_roll(s, n);
-      *Gc::write(mc, cell).unlock().borrow_mut() = SLVal::Int(next);
+      // `CellContents::set` replaces the held value and reconciles the charge.
+      // For an Int→Int swap the external bytes are 0 on both sides, so the
+      // charge is a no-op, but going through `set` keeps the discipline uniform.
+      Gc::write(mc, cell).unlock().borrow_mut().set(SLVal::Int(next));
       Ok(SLVal::Int(roll))
     }))
 }
