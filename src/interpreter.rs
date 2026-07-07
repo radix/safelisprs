@@ -220,14 +220,12 @@ impl Drop for MemoryCharge {
 /// - `String`: the `String`'s heap buffer (`capacity()`, not `len`).
 /// - `List`/`Partial`: the `Vec`'s backing array
 ///   (`capacity() * size_of::<Gc<_>>()`).
-/// - `Cell`: 0 — the cell's *contents* are accounted separately by
-///   `CellContents` (which holds its own `MemoryCharge` for the held
-///   `SLVal`'s external bytes). The `Cell` variant itself owns only the
+/// - `Cell`: 0 — the cell stores a `Gc<Accounted>` handle whose target owns
+///   its own external-memory charge. The `Cell` variant itself owns only the
 ///   `Gc` box pointer, which gc-arena's `total_gc_allocation` already counts.
 ///
 /// Only *directly owned* storage is counted; pointed-to `Gc` boxes are
-/// accounted by their own wrappers (`Accounted` for values, `CellContents`
-/// for cell contents), so there's no double-counting.
+/// accounted by their own `Accounted` wrappers, so there's no double-counting.
 pub(crate) fn external_bytes_of<'gc>(value: &SLVal<'gc>) -> usize {
   match value {
     SLVal::String(s) => s.capacity(),
@@ -295,6 +293,11 @@ impl<'gc> Accounted<'gc> {
     }
   }
 }
+
+/// The shared handle used for every existing in-arena value. Passing or
+/// storing a `Value` copies only a GC pointer; the underlying `SLVal` payload
+/// and its memory charge remain owned by one [`Accounted`] allocation.
+pub type Value<'gc> = Gc<'gc, Accounted<'gc>>;
 
 /// A `Vec<T>` that charges its backing-allocation capacity to a per-execution
 /// [`MemoryTracker`]. Used for `ExecRoot.stack`, `ExecRoot.frames`, and
@@ -436,9 +439,7 @@ impl<'gc> ExecRoot<'gc> {
     Gc::new(mc, Accounted::new(value, self.tracker.clone()))
   }
 
-  /// The per-execution shared memory tracker. Exposed so builtins that
-  /// allocate `CellContents` directly (e.g. `rand.rng`) can charge the
-  /// tracker without going through `alloc_value`.
+  /// The per-execution shared memory tracker.
   pub(crate) fn tracker(&self) -> SharedTracker {
     self.tracker.clone()
   }
@@ -468,7 +469,7 @@ impl<'gc> ExecRoot<'gc> {
       }
       SLValue::Cell(inner) => {
         let inner_gc = self.import_value(mc, inner);
-        let contents = CellContents::new(inner_gc.value.clone(), self.tracker.clone());
+        let contents = CellContents::new(inner_gc);
         self.alloc_value(mc, SLVal::Cell(Gc::new(mc, RefLock::new(contents))))
       }
       SLValue::List(items) => {
@@ -544,28 +545,18 @@ impl FrameFunc {
 // `Function` directly, e.g. `Execution::enter_function`'s signature.)
 gc_arena::static_collect!(Function);
 
-/// The mutable contents of a `Cell`: the held `SLVal` plus a [`MemoryCharge`]
-/// for that `SLVal`'s directly-owned external Rust-heap storage (string bytes,
-/// list/partial `Vec` backings). `SetCell` updates both fields together so the
-/// charge tracks the live contents across mutation.
+/// The mutable contents of a `Cell`: a shared handle to an existing accounted
+/// value. Cells retain the original value object rather than cloning its
+/// `SLVal` payload, matching ordinary function/list reference semantics.
 ///
 /// Allocated as `Gc<RefLock<CellContents>>` (the `RefLock` provides interior
 /// mutability; the `Gc` box gives it an identity in the arena and makes it
-/// eligible for cycle collection). `CellContents` derives `Collect` with
-/// `#[collect(no_drop)]` — the only `Drop` glue is `MemoryCharge`'s, which
-/// touches no `Gc` pointers (the `#[collect(no_drop)]` safety invariant). The
-/// `charge` field is `#[collect(require_static)]` (it's `'static`: an
-/// `Rc<MemoryTracker>` + `usize`), so the derive skips tracing it and traces
-/// only `value`.
-///
-/// Field order matters: `value` is declared before `charge` so Rust drops the
-/// `SLVal` payload first, then releases the accounting charge.
+/// eligible for cycle collection). Tracing the `value` handle keeps its
+/// [`Accounted`] allocation—and therefore its external-memory charge—alive.
 #[derive(Collect)]
 #[collect(no_drop)]
 pub struct CellContents<'gc> {
-  pub value: SLVal<'gc>,
-  #[collect(require_static)]
-  charge: MemoryCharge,
+  pub value: Value<'gc>,
 }
 
 impl<'gc> std::fmt::Debug for CellContents<'gc> {
@@ -585,30 +576,18 @@ impl<'gc> PartialEq for CellContents<'gc> {
 impl<'gc> Eq for CellContents<'gc> {}
 
 impl<'gc> CellContents<'gc> {
-  /// Construct `CellContents` holding `value`, charging `value`'s external
-  /// bytes to `tracker`. Used by `MakeCell`, `import_value`'s `Cell` case, and
-  /// `rand.rng`.
-  pub(crate) fn new(value: SLVal<'gc>, tracker: SharedTracker) -> Self {
-    let bytes = external_bytes_of(&value);
-    CellContents {
-      value,
-      charge: MemoryCharge::new(tracker, bytes),
-    }
+  pub(crate) fn new(value: Value<'gc>) -> Self {
+    CellContents { value }
   }
 
-  /// Replace the held value, reconciling the charge: releases the old value's
-  /// external bytes and charges the new value's. Used by `SetCell` and
-  /// `rand.roll!`.
-  pub(crate) fn set(&mut self, value: SLVal<'gc>) {
-    let new_bytes = external_bytes_of(&value);
-    self.charge.set(new_bytes);
+  pub(crate) fn set(&mut self, value: Value<'gc>) {
     self.value = value;
   }
 }
 
 /// A SafeLisp value. This is the in-arena representation: anything that needs
 /// sharing or cycle-detection is held behind a `Gc` pointer.
-#[derive(Debug, PartialEq, Clone, Collect)]
+#[derive(Debug, PartialEq, Collect)]
 #[collect(no_drop)]
 pub enum SLVal<'gc> {
   Int(i64),
@@ -618,19 +597,16 @@ pub enum SLVal<'gc> {
   Void,
   FunctionRef(u32, u32),
   Partial(Partial<'gc>),
-  /// A cell holding a mutable value. The `RefLock<CellContents>` box wraps
-  /// `CellContents { value: SLVal, charge: MemoryCharge }` so the cell's
-  /// contents are individually accounted to the per-execution tracker (and
-  /// the charge is reconciled on `SetCell`).
+  /// A cell holding a mutable shared value handle.
   Cell(Gc<'gc, RefLock<CellContents<'gc>>>),
-  List(Vec<Gc<'gc, Accounted<'gc>>>),
+  List(Vec<Value<'gc>>),
 }
 
-#[derive(Debug, PartialEq, Clone, Collect)]
+#[derive(Debug, PartialEq, Collect)]
 #[collect(no_drop)]
 pub struct Partial<'gc> {
   function: (u32, u32),
-  args: Vec<Gc<'gc, Accounted<'gc>>>,
+  args: Vec<Value<'gc>>,
 }
 
 /// An owned, arena-agnostic value that can escape the arena and be fed back
@@ -704,7 +680,7 @@ impl<'gc> SLVal<'gc> {
         function: p.function,
         args: p.args.iter().map(|a| a.value.to_value()).collect(),
       },
-      SLVal::Cell(r) => SLValue::Cell(Box::new(r.borrow().value.to_value())),
+      SLVal::Cell(r) => SLValue::Cell(Box::new(r.borrow().value.value.to_value())),
       SLVal::List(items) => SLValue::List(items.iter().map(|i| i.value.to_value()).collect()),
     }
   }
@@ -1247,7 +1223,7 @@ impl<'gc> ExecRoot<'gc> {
       }
       Instruction::MakeCell => {
         let val = self.pop()?;
-        let contents = CellContents::new(val.value.clone(), self.tracker.clone());
+        let contents = CellContents::new(val);
         let cell = self.alloc_value(mc, SLVal::Cell(Gc::new(mc, RefLock::new(contents))));
         self.stack.push(cell);
       }
@@ -1255,28 +1231,19 @@ impl<'gc> ExecRoot<'gc> {
         let val = self.pop()?;
         match &val.value {
           SLVal::Cell(r) => {
-            let cloned: SLVal<'gc> = r.borrow().value.clone();
-            let gc = self.alloc_value(mc, cloned);
-            self.stack.push(gc);
+            self.stack.push(r.borrow().value);
           }
           other => return Err(format!("Not a cell: {}", other.error_description())),
         }
       }
       Instruction::SetCell => {
-        // Pop the Cell (TOS) and the new value (below it), write the value
-        // into the Cell (reconciling the cell's charge), and push the value
-        // back as the result of `set!`.
+        // Pop the Cell (TOS) and the new value (below it), point the Cell at
+        // that existing value, and push the same handle back as the result.
         let cell_gc = self.pop()?;
         let new_val = self.pop()?;
         match &cell_gc.value {
           SLVal::Cell(cell_ref) => {
-            // Mutate the Cell's contents in a GC-safe way. `CellContents::set`
-            // replaces the held `SLVal` and reconciles the `MemoryCharge` so
-            // the cell's contents stay accounted.
-            Gc::write(mc, *cell_ref)
-              .unlock()
-              .borrow_mut()
-              .set(new_val.value.clone());
+            Gc::write(mc, *cell_ref).unlock().borrow_mut().set(new_val);
           }
           other => return Err(format!("Not a cell: {}", other.error_description())),
         }
@@ -1603,8 +1570,7 @@ impl<'gc, 'call> HostCtx<'gc, 'call> {
     self.root.push_gc(value);
   }
 
-  /// The per-execution shared memory tracker. Exposed so builtins that
-  /// construct `CellContents` directly can charge the tracker.
+  /// The per-execution shared memory tracker.
   pub fn tracker(&self) -> SharedTracker {
     self.root.tracker()
   }
@@ -2788,10 +2754,9 @@ mod test {
   #[test]
   fn memory_limit_catches_large_string_in_cell() {
     // A cell holding a large string must be charged for the string's bytes.
-    // `CellContents` wraps the held `SLVal` in a `MemoryCharge` (reconciled on
-    // `SetCell`), so a cell's contents are accounted even though they're stored
-    // in a `RefLock` box (not an `Accounted` box). This was the known undercount
-    // before `CellContents` was introduced.
+    // `CellContents` retains the string's original `Gc<Accounted>` handle, so
+    // that one value object and its `MemoryCharge` remain reachable without
+    // cloning or double-counting the string buffer.
     //
     // The program builds a 2^20 = 1 MiB string, then a closure that captures it
     // (the closure transform wraps the captured variable in a `Cell`). `main`
@@ -2799,10 +2764,8 @@ mod test {
     // completion *without* a limit (so the string builds unhindered) — but use
     // `step` rather than `run_until_done` so the closure (and its captured
     // cell) stays live on the arena's value stack rather than being popped out.
-    // Then we force collection of transient garbage and check `memory_usage`:
-    // if `CellContents` is charging the cell's contents, usage includes the
-    // ~1 MiB string; if it weren't, usage would be just a handful of `Gc` box
-    // bytes.
+    // Then we force collection of transient garbage and check that the
+    // original string object remains reachable and charged through the cell.
     let source = "
       (fn grow (s n)
         (if (std.== n 0)
@@ -2835,16 +2798,13 @@ mod test {
       matches!(exec.peek_value().unwrap(), SLValue::Partial { .. }),
       "expected a closure (Partial) on the stack from main",
     );
-    // Force collection to reclaim transient garbage (the intermediate strings
-    // from `grow`, the original `Accounted` for `big` once it's captured, etc.).
-    // After this, the only live charge for the 1 MiB string should be the
-    // `CellContents` inside the captured cell.
+    // Force collection to reclaim intermediate strings from `grow`. The
+    // original `Accounted` for `big` must survive because the cell points to it.
     exec.collect_all();
     let usage_after = exec.memory_usage();
-    // The cell's `CellContents` charges the 1 MiB string. gc-arena's
-    // `total_gc_allocation` contributes only a few hundred bytes of `Gc` box
-    // headers; the rest is the tracker's `external_bytes`. If `CellContents`
-    // were not charging, usage would be < 1 KiB.
+    // gc-arena's `total_gc_allocation` contributes only a few hundred bytes of
+    // `Gc` box headers; the original string's `Accounted` charge supplies the
+    // remaining external bytes.
     assert!(
       usage_after >= 1_000_000,
       "expected the cell's 1 MiB string to be charged, but memory_usage was only {} bytes",
@@ -2857,13 +2817,81 @@ mod test {
       "expected gc-arena to report only box headers (< 1 KiB), got {} bytes",
       gc_only,
     );
-    // So the bulk of the charge is the tracker's external bytes (the cell's
-    // string contents), proving `CellContents` is doing the accounting.
+    // The bulk of the charge remains the shared string's external buffer.
     let external = exec.memory_usage() - gc_only;
     assert!(
       external >= 1_000_000,
       "expected >= 1 MiB of external (cell-contents) bytes, got {}",
       external,
+    );
+  }
+
+  #[test]
+  fn cell_operations_do_not_clone_large_string_payloads() {
+    let function = compiler::Function {
+      num_locals: 0,
+      num_params: 0,
+      instructions: vec![
+        Instruction::PushString("x".repeat(64 * 1024)),
+        Instruction::MakeCell,
+        Instruction::DerefCell,
+        Instruction::Return,
+      ],
+    };
+    let mut exec = Execution::new(Package::default(), default_builtins());
+    exec.enter_function(function, vec![]).unwrap();
+
+    exec.step().unwrap(); // PushString
+    let usage_with_string = exec.memory_usage();
+    exec.set_memory_limit(Some(usage_with_string + 4096));
+
+    // Making and dereferencing a cell should add only small GC boxes and
+    // pointers. The 64 KiB string allocation must remain shared.
+    exec.step().unwrap(); // MakeCell
+    let gc_with_cell = exec.gc_count();
+    exec.step().unwrap(); // DerefCell
+    assert!(
+      exec.gc_count() <= gc_with_cell,
+      "DerefCell allocated a duplicate value object"
+    );
+    assert_eq!(
+      exec.peek_value().unwrap(),
+      SLValue::String("x".repeat(64 * 1024))
+    );
+  }
+
+  #[test]
+  fn set_cell_reuses_the_incoming_value_object() {
+    let function = compiler::Function {
+      num_locals: 1,
+      num_params: 0,
+      instructions: vec![
+        Instruction::PushString("old".repeat(16 * 1024)),
+        Instruction::MakeCell,
+        Instruction::SetLocal(0),
+        Instruction::PushString("new".repeat(16 * 1024)),
+        Instruction::LoadLocal(0),
+        Instruction::SetCell,
+        Instruction::Return,
+      ],
+    };
+    let mut exec = Execution::new(Package::default(), default_builtins());
+    exec.enter_function(function, vec![]).unwrap();
+
+    for _ in 0..5 {
+      exec.step().unwrap();
+    }
+    exec.set_memory_limit(Some(exec.memory_usage() + 4096));
+    let gc_before = exec.gc_count();
+
+    exec.step().unwrap(); // SetCell
+    assert!(
+      exec.gc_count() <= gc_before,
+      "SetCell allocated a duplicate value object"
+    );
+    assert_eq!(
+      exec.peek_value().unwrap(),
+      SLValue::String("new".repeat(16 * 1024))
     );
   }
 
