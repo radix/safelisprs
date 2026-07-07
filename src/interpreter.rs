@@ -10,10 +10,10 @@ use crate::compiler::{Callable, Instruction, LinkedFunction as Function, Package
 /// Per-execution memory accounting. Shared between the `Execution` (which owns
 /// the canonical `Rc`) and every `Accounted` box allocated in that execution's
 /// arena (each carries a cloned `Rc`). Holds the running external-bytes count
-/// (Rust-heap storage owned by `SLVal` payloads but not seen by gc-arena's
-/// `Metrics`) and an optional cap. `Rc<Cell<_>>` is appropriate because
-/// gc-arena is single-threaded; if `Execution` ever needs to be `Send`, swap
-/// for `Arc<AtomicUsize>`.
+/// (Rust-heap storage not seen by gc-arena's `Metrics`, including `SLVal`
+/// payloads, interpreter vectors, and temporary reservations) and an optional
+/// cap. `Rc<Cell<_>>` is appropriate because gc-arena is single-threaded; if
+/// `Execution` ever needs to be `Send`, swap for `Arc<AtomicUsize>`.
 #[derive(Default)]
 pub struct MemoryTracker {
   external_bytes: Cell<usize>,
@@ -70,6 +70,23 @@ impl MemoryTracker {
     new
   }
 
+  /// Temporarily reserve `n` external bytes without adding GC pacing debt.
+  ///
+  /// Reservations protect allocations that are being built outside the GC
+  /// arena. They count toward the hard memory limit while live, but they do
+  /// not represent newly reachable memory and therefore must not make
+  /// gc-arena collect sooner. When a completed value is boxed in
+  /// [`Accounted`], its ordinary [`Self::charge`] supplies the pacing debt.
+  fn reserve(&self, n: usize) -> Result<(), String> {
+    let new = self
+      .external_bytes
+      .get()
+      .checked_add(n)
+      .ok_or_else(|| "memory accounting overflow while reserving memory".to_string())?;
+    self.external_bytes.set(new);
+    Ok(())
+  }
+
   pub fn external_bytes(&self) -> usize {
     self.external_bytes.get()
   }
@@ -101,6 +118,54 @@ impl MemoryTracker {
 /// in that execution receives a clone. The tracker stays alive until the last
 /// `Accounted` box is swept (which releases its `Rc`).
 pub type SharedTracker = Rc<MemoryTracker>;
+
+/// A per-execution reservation for temporary Rust-heap memory.
+///
+/// Reservations are created through [`HostCtx::reserve_memory`], count toward
+/// that execution's memory limit while live, and release automatically on
+/// success, error, or panic. A host function must keep the guard alive for as
+/// long as the corresponding allocation is live.
+///
+/// Reservations deliberately do not add GC pacing debt. If the allocation is
+/// returned as an [`SLVal`], [`Builtin::call`](crate::builtins::Builtin::call)
+/// immediately wraps it in [`Accounted`] after the host handler returns; that
+/// permanent charge supplies the pacing debt.
+pub struct MemoryReservation {
+  tracker: SharedTracker,
+  bytes: usize,
+}
+
+impl MemoryReservation {
+  fn new(tracker: SharedTracker, bytes: usize) -> Result<Self, String> {
+    tracker.reserve(bytes)?;
+    Ok(Self { tracker, bytes })
+  }
+
+  /// Number of bytes currently reserved by this guard.
+  pub fn bytes(&self) -> usize {
+    self.bytes
+  }
+
+  fn belongs_to(&self, tracker: &SharedTracker) -> bool {
+    Rc::ptr_eq(&self.tracker, tracker)
+  }
+
+  fn set(&mut self, bytes: usize) -> Result<(), String> {
+    if bytes > self.bytes {
+      self.tracker.reserve(bytes - self.bytes)?;
+    } else if bytes < self.bytes {
+      self.tracker.release(self.bytes - bytes);
+    }
+    self.bytes = bytes;
+    Ok(())
+  }
+}
+
+impl Drop for MemoryReservation {
+  fn drop(&mut self) {
+    self.tracker.release(self.bytes);
+  }
+}
 
 /// A RAII handle that releases a fixed byte charge to a [`MemoryTracker`] on
 /// `Drop`. Held as a `#[collect(require_static)]` field inside `Accounted` and
@@ -163,7 +228,7 @@ impl Drop for MemoryCharge {
 /// Only *directly owned* storage is counted; pointed-to `Gc` boxes are
 /// accounted by their own wrappers (`Accounted` for values, `CellContents`
 /// for cell contents), so there's no double-counting.
-fn external_bytes_of<'gc>(value: &SLVal<'gc>) -> usize {
+pub(crate) fn external_bytes_of<'gc>(value: &SLVal<'gc>) -> usize {
   match value {
     SLVal::String(s) => s.capacity(),
     SLVal::List(items) => items.capacity() * std::mem::size_of::<Gc<'gc, Accounted<'gc>>>(),
@@ -202,7 +267,9 @@ impl<'gc> std::fmt::Debug for Accounted<'gc> {
   /// Debug-format only the `SLVal` payload; the charge is accounting metadata,
   /// not part of the value's identity.
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    f.debug_struct("Accounted").field("value", &self.value).finish()
+    f.debug_struct("Accounted")
+      .field("value", &self.value)
+      .finish()
   }
 }
 
@@ -361,7 +428,11 @@ impl<'gc> ExecRoot<'gc> {
   /// external Rust-heap storage) and boxes it via `Gc::new`. Every runtime
   /// allocation must go through here so unaccounted values are hard to create
   /// by accident.
-  pub(crate) fn alloc_value(&mut self, mc: &'gc Mutation<'gc>, value: SLVal<'gc>) -> Gc<'gc, Accounted<'gc>> {
+  pub(crate) fn alloc_value(
+    &mut self,
+    mc: &'gc Mutation<'gc>,
+    value: SLVal<'gc>,
+  ) -> Gc<'gc, Accounted<'gc>> {
     Gc::new(mc, Accounted::new(value, self.tracker.clone()))
   }
 
@@ -499,7 +570,9 @@ pub struct CellContents<'gc> {
 
 impl<'gc> std::fmt::Debug for CellContents<'gc> {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    f.debug_struct("CellContents").field("value", &self.value).finish()
+    f.debug_struct("CellContents")
+      .field("value", &self.value)
+      .finish()
   }
 }
 
@@ -582,6 +655,41 @@ pub enum SLValue {
 }
 
 impl<'gc> SLVal<'gc> {
+  /// A bounded-size description suitable for runtime type errors. Default
+  /// builtins use this instead of debug-formatting guest-controlled values,
+  /// which could itself allocate an unbounded diagnostic string.
+  pub(crate) fn type_name(&self) -> &'static str {
+    match self {
+      SLVal::Int(_) => "Int",
+      SLVal::Float(_) => "Float",
+      SLVal::String(_) => "String",
+      SLVal::Bool(_) => "Bool",
+      SLVal::Void => "Void",
+      SLVal::FunctionRef(_, _) => "FunctionRef",
+      SLVal::Partial(_) => "Partial",
+      SLVal::Cell(_) => "Cell",
+      SLVal::List(_) => "List",
+    }
+  }
+
+  /// A bounded-size value description for runtime errors. Scalar payloads are
+  /// useful and fixed-size, while guest-sized strings, lists, and partial
+  /// arguments are represented only by type.
+  fn error_description(&self) -> String {
+    match self {
+      SLVal::Int(value) => format!("Int({value})"),
+      SLVal::Float(value) => format!("Float({value:?})"),
+      SLVal::Bool(value) => format!("Bool({value})"),
+      SLVal::Void => "Void".to_string(),
+      SLVal::FunctionRef(module, function) => {
+        format!("FunctionRef({module}, {function})")
+      }
+      SLVal::String(_) | SLVal::Partial(_) | SLVal::Cell(_) | SLVal::List(_) => {
+        self.type_name().to_string()
+      }
+    }
+  }
+
   /// Convert an `SLVal` into an owned `SLValue`, deep-copying any `Gc`-held
   /// sub-values out of the arena.
   fn to_value(&self) -> SLValue {
@@ -734,11 +842,9 @@ impl Execution {
   /// The current live memory in bytes: gc-arena's `total_gc_allocation` (the
   /// `GcBox` layouts) plus this execution's `external_bytes` (Rust-heap
   /// storage owned by `SLVal` payloads — String bytes, List/Partial `Vec`
-  /// backings — accounted via `Accounted`). This is the value the optional
-  /// memory limit is compared against on every `step`.
-  ///
-  /// Note (step 2): `stack`/`frames`/`locals` `Vec` overhead is not yet
-  /// included; step 3 of the memory-limit plan lands that.
+  /// backings, interpreter vectors, and temporary reservations). This is the
+  /// value the optional memory limit is compared against on every `step` and
+  /// before guest-sized host allocations.
   pub fn memory_usage(&self) -> usize {
     self.arena.metrics().total_gc_allocation() + self.tracker.external_bytes()
   }
@@ -849,12 +955,7 @@ impl Execution {
   ) -> Result<(), String> {
     let function = match self.package.get_function(mod_idx, func_idx) {
       Some(crate::compiler::Callable::Function(f)) => f.clone(),
-      _ => {
-        return Err(format!(
-          "Function not found: {}/{}",
-          mod_idx, func_idx
-        ))
-      }
+      _ => return Err(format!("Function not found: {}/{}", mod_idx, func_idx)),
     };
     let result = self.arena.mutate_root(|mc, root| {
       let pre_bound_gc: Vec<Gc<'_, Accounted<'_>>> =
@@ -879,6 +980,53 @@ impl Execution {
 }
 
 impl<'gc> ExecRoot<'gc> {
+  fn memory_usage(&self, mc: &Mutation<'gc>) -> Result<usize, String> {
+    mc.metrics()
+      .total_gc_allocation()
+      .checked_add(self.tracker.external_bytes())
+      .ok_or_else(|| "memory accounting overflow while calculating usage".to_string())
+  }
+
+  fn ensure_memory_available(
+    &self,
+    mc: &Mutation<'gc>,
+    additional_bytes: usize,
+  ) -> Result<(), String> {
+    let usage = self
+      .memory_usage(mc)?
+      .checked_add(additional_bytes)
+      .ok_or_else(|| "memory accounting overflow while reserving memory".to_string())?;
+    if let Some(limit) = self.tracker.limit() {
+      if usage > limit {
+        return Err(format!(
+          "memory limit exceeded: {} bytes live (limit {})",
+          usage, limit
+        ));
+      }
+    }
+    Ok(())
+  }
+
+  fn reserve_memory(&self, mc: &Mutation<'gc>, bytes: usize) -> Result<MemoryReservation, String> {
+    self.ensure_memory_available(mc, bytes)?;
+    MemoryReservation::new(self.tracker.clone(), bytes)
+  }
+
+  fn reconcile_reservation(
+    &self,
+    mc: &Mutation<'gc>,
+    reservation: &mut MemoryReservation,
+    bytes: usize,
+  ) -> Result<(), String> {
+    if !reservation.belongs_to(&self.tracker) {
+      return Err("memory reservation belongs to a different execution".to_string());
+    }
+    if bytes > reservation.bytes() {
+      self.ensure_memory_available(mc, bytes - reservation.bytes())?;
+    }
+    reservation.set(bytes)
+  }
+
   /// Returns true if the frame stack is empty (execution is complete).
   fn is_done(&self) -> bool {
     self.frames.is_empty()
@@ -903,7 +1051,7 @@ impl<'gc> ExecRoot<'gc> {
       mc.metrics().adjust_debt(debt as f64);
     }
     if let Some(limit) = self.tracker.limit() {
-      let usage = mc.metrics().total_gc_allocation() + self.tracker.external_bytes();
+      let usage = self.memory_usage(mc)?;
       if usage > limit {
         return Err(format!(
           "memory limit exceeded: {} bytes live (limit {})",
@@ -1049,10 +1197,22 @@ impl<'gc> ExecRoot<'gc> {
     }
 
     match inst {
-      Instruction::PushInt(i) => { let v = self.alloc_value(mc, SLVal::Int(i)); self.stack.push(v); },
-      Instruction::PushFloat(f) => { let v = self.alloc_value(mc, SLVal::Float(f)); self.stack.push(v); },
-      Instruction::PushString(s) => { let v = self.alloc_value(mc, SLVal::String(s)); self.stack.push(v); },
-      Instruction::PushBool(b) => { let v = self.alloc_value(mc, SLVal::Bool(b)); self.stack.push(v); },
+      Instruction::PushInt(i) => {
+        let v = self.alloc_value(mc, SLVal::Int(i));
+        self.stack.push(v);
+      }
+      Instruction::PushFloat(f) => {
+        let v = self.alloc_value(mc, SLVal::Float(f));
+        self.stack.push(v);
+      }
+      Instruction::PushString(s) => {
+        let v = self.alloc_value(mc, SLVal::String(s));
+        self.stack.push(v);
+      }
+      Instruction::PushBool(b) => {
+        let v = self.alloc_value(mc, SLVal::Bool(b));
+        self.stack.push(v);
+      }
       Instruction::Pop => {
         self.pop()?;
       }
@@ -1099,7 +1259,7 @@ impl<'gc> ExecRoot<'gc> {
             let gc = self.alloc_value(mc, cloned);
             self.stack.push(gc);
           }
-          other => return Err(format!("Not a cell: {:?}", other)),
+          other => return Err(format!("Not a cell: {}", other.error_description())),
         }
       }
       Instruction::SetCell => {
@@ -1118,7 +1278,7 @@ impl<'gc> ExecRoot<'gc> {
               .borrow_mut()
               .set(new_val.value.clone());
           }
-          other => return Err(format!("Not a cell: {:?}", other)),
+          other => return Err(format!("Not a cell: {}", other.error_description())),
         }
         self.stack.push(new_val);
       }
@@ -1145,7 +1305,12 @@ impl<'gc> ExecRoot<'gc> {
             frame.ip = frame.ip.wrapping_add(offset as usize);
           }
           SLVal::Bool(true) => {}
-          other => return Err(format!("`if` condition must be a bool, got {:?}", other)),
+          other => {
+            return Err(format!(
+              "`if` condition must be a bool, got {}",
+              other.error_description()
+            ))
+          }
         }
       }
     }
@@ -1157,12 +1322,28 @@ impl<'gc> ExecRoot<'gc> {
   }
 
   fn partial_apply(&mut self, mc: &'gc Mutation<'gc>, num_args: u16) -> Result<(), String> {
+    let num_args = usize::from(num_args);
+    let arg_bytes = num_args
+      .checked_mul(std::mem::size_of::<Gc<'gc, Accounted<'gc>>>())
+      .ok_or_else(|| "partial argument buffer size overflow".to_string())?;
+    let mut args_reservation = self.reserve_memory(mc, arg_bytes)?;
     let func = self.pop()?;
-    let mut args = vec![];
+    let mut args = Vec::new();
+    args
+      .try_reserve_exact(num_args)
+      .map_err(|_| format!("failed to allocate partial argument buffer for {num_args} values"))?;
+    let actual_arg_bytes = args
+      .capacity()
+      .checked_mul(std::mem::size_of::<Gc<'gc, Accounted<'gc>>>())
+      .ok_or_else(|| "partial argument buffer capacity overflow".to_string())?;
+    self.reconcile_reservation(mc, &mut args_reservation, actual_arg_bytes)?;
     for _ in 0..num_args {
       args.push(self.pop()?);
     }
     args.reverse();
+    // No guest code or limit check can run between releasing the temporary
+    // reservation and `Accounted::new` adopting the Vec's actual capacity.
+    drop(args_reservation);
     let closure = match &func.value {
       SLVal::FunctionRef(mod_index, func_index) => self.alloc_value(
         mc,
@@ -1224,8 +1405,23 @@ impl<'gc> ExecRoot<'gc> {
         // For variadic builtins (`num_params == None`) the call-site arity is
         // the only source of the arg count.
         let n = arity as usize;
+        let arg_bytes = n
+          .checked_mul(std::mem::size_of::<Gc<'gc, Accounted<'gc>>>())
+          .ok_or_else(|| "builtin argument buffer size overflow".to_string())?;
+        let mut args_reservation = self.reserve_memory(mc, arg_bytes)?;
         // Args were pushed left-to-right; popping gives reverse order.
-        let mut args = Vec::with_capacity(n);
+        let mut args = Vec::new();
+        args.try_reserve_exact(n).map_err(|_| {
+          format!(
+            "failed to allocate builtin argument buffer for {} values",
+            n
+          )
+        })?;
+        let actual_arg_bytes = args
+          .capacity()
+          .checked_mul(std::mem::size_of::<Gc<'gc, Accounted<'gc>>>())
+          .ok_or_else(|| "builtin argument buffer capacity overflow".to_string())?;
+        self.reconcile_reservation(mc, &mut args_reservation, actual_arg_bytes)?;
         for _ in 0..n {
           args.push(self.pop()?);
         }
@@ -1285,7 +1481,10 @@ impl<'gc> ExecRoot<'gc> {
           Callable::Builtin => Err("Can't invoke a builtin as a closure".to_string()),
         }
       }
-      x => Err(format!("Can't call a non-callable! {:?}", x)),
+      x => Err(format!(
+        "Can't call a non-callable! {}",
+        x.error_description()
+      )),
     }
   }
 
@@ -1371,6 +1570,15 @@ impl<'gc> ExecRoot<'gc> {
 ///   `&'gc mut ExecRoot<'gc>` as `&'call mut ExecRoot<'gc>` (shortening the
 ///   outer reference without affecting the inner arena brand). This is what
 ///   lets `HostCtx` hold the root directly rather than passing it separately.
+///
+/// # Trust boundary
+///
+/// Host functions are trusted runtime extensions. They may allocate, block,
+/// panic, or otherwise interact with the process outside SafeLisp's control.
+/// A host function that allocates guest-sized Rust-heap memory must use
+/// [`Self::reserve_memory`] and keep the returned guard alive with the
+/// allocation. The memory limit cannot account for allocations a host
+/// function deliberately hides from this context.
 pub struct HostCtx<'gc, 'call> {
   root: &'call mut ExecRoot<'gc>,
   mc: &'gc Mutation<'gc>,
@@ -1399,6 +1607,38 @@ impl<'gc, 'call> HostCtx<'gc, 'call> {
   /// construct `CellContents` directly can charge the tracker.
   pub fn tracker(&self) -> SharedTracker {
     self.root.tracker()
+  }
+
+  /// Reserve temporary Rust-heap memory against this execution's memory
+  /// limit before allocating it.
+  ///
+  /// The returned guard is tied to this execution's [`MemoryTracker`] and
+  /// releases automatically. Keep it alive until the corresponding temporary
+  /// allocation is dropped or returned from the host function. Returned
+  /// `SLVal` storage is immediately adopted by the normal [`Accounted`]
+  /// allocation chokepoint.
+  pub fn reserve_memory(&self, bytes: usize) -> Result<MemoryReservation, String> {
+    self.root.reserve_memory(self.mc, bytes)
+  }
+
+  /// Reconcile a reservation with the capacity the allocator actually
+  /// supplied. This is necessary because `try_reserve_exact` is permitted to
+  /// allocate more capacity than requested.
+  pub fn reconcile_reservation(
+    &self,
+    reservation: &mut MemoryReservation,
+    bytes: usize,
+  ) -> Result<(), String> {
+    self.root.reconcile_reservation(self.mc, reservation, bytes)
+  }
+
+  /// Check this execution's hard memory limit immediately.
+  ///
+  /// Builtins that perform repeated GC allocations inside one bytecode
+  /// instruction should call this during the loop rather than waiting for the
+  /// interpreter's post-instruction check.
+  pub fn check_memory_limit(&self) -> Result<(), String> {
+    self.root.check_memory_limit(self.mc)
   }
 
   /// Synchronously invoke a SafeLisp callable (`FunctionRef` or `Partial`)
@@ -1526,10 +1766,11 @@ mod test {
 
   #[test]
   fn extending_builtins() {
-    let builtins = Builtins::new().with_builtin(Builtin::unary("main", "add2", |a| match &a.value {
-      SLVal::Int(n) => Ok(SLVal::Int(n + 2)),
-      other => Err(format!("nope: {:?}", other)),
-    }));
+    let builtins =
+      Builtins::new().with_builtin(Builtin::unary("main", "add2", |a| match &a.value {
+        SLVal::Int(n) => Ok(SLVal::Int(n + 2)),
+        other => Err(format!("nope: {:?}", other)),
+      }));
     let source = "(fn main () (add2 3))".to_string();
     let package =
       compile_executable_from_source(&source, ("main", "main"), &builtins.specs()).unwrap();
@@ -2801,6 +3042,74 @@ mod test {
     // The sequence: charge(100)→100, charge(100)→200, release(100)→100,
     // charge(50)→150. Drains don't affect external_bytes.
     assert_eq!(tracker.external_bytes(), 150);
+  }
+
+  #[test]
+  fn temporary_reservation_is_scoped_to_one_execution_and_released() {
+    let mut first = Execution::new(Package::default(), default_builtins());
+    let second = Execution::new(Package::default(), default_builtins());
+    let first_before = first.memory_usage();
+    let second_before = second.memory_usage();
+
+    first.arena.mutate_root(|mc, root| {
+      let reservation = root.reserve_memory(mc, 128).unwrap();
+      assert_eq!(reservation.bytes(), 128);
+      assert_eq!(root.memory_usage(mc).unwrap(), first_before + 128);
+      assert_eq!(root.tracker.drain_pacing_debt(), 0);
+      drop(reservation);
+      assert_eq!(root.memory_usage(mc).unwrap(), first_before);
+    });
+
+    assert_eq!(first.memory_usage(), first_before);
+    assert_eq!(second.memory_usage(), second_before);
+  }
+
+  #[test]
+  fn temporary_reservation_rejects_limit_and_reconciles_capacity() {
+    let mut exec = Execution::new(Package::default(), default_builtins());
+    let baseline = exec.memory_usage();
+    exec.set_memory_limit(Some(baseline + 32));
+
+    exec.arena.mutate_root(|mc, root| {
+      let mut reservation = root.reserve_memory(mc, 16).unwrap();
+      root
+        .reconcile_reservation(mc, &mut reservation, 32)
+        .unwrap();
+      assert_eq!(root.memory_usage(mc).unwrap(), baseline + 32);
+
+      let err = root
+        .reconcile_reservation(mc, &mut reservation, 33)
+        .unwrap_err();
+      assert!(err.contains("memory limit exceeded"), "unexpected: {err}");
+      assert_eq!(reservation.bytes(), 32);
+
+      root.reconcile_reservation(mc, &mut reservation, 8).unwrap();
+      assert_eq!(root.memory_usage(mc).unwrap(), baseline + 8);
+    });
+
+    assert_eq!(exec.memory_usage(), baseline);
+  }
+
+  #[test]
+  fn reservation_cannot_be_reconciled_by_another_execution() {
+    let mut first = Execution::new(Package::default(), default_builtins());
+    let mut second = Execution::new(Package::default(), default_builtins());
+    let first_before = first.memory_usage();
+
+    let mut reservation = first
+      .arena
+      .mutate_root(|mc, root| root.reserve_memory(mc, 24).unwrap());
+    let err = second.arena.mutate_root(|mc, root| {
+      root
+        .reconcile_reservation(mc, &mut reservation, 48)
+        .unwrap_err()
+    });
+    assert!(
+      err.contains("different execution"),
+      "unexpected error: {err}"
+    );
+    drop(reservation);
+    assert_eq!(first.memory_usage(), first_before);
   }
 
   #[test]
