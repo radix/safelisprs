@@ -5,9 +5,7 @@ use gc_arena::{Gc, Mutation, RefLock};
 use rand_chacha::rand_core::{RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
-use crate::interpreter::{
-  external_bytes_of, Accounted, CellContents, HostCtx, MemoryReservation, SLVal,
-};
+use crate::interpreter::{Accounted, CellContents, HostCtx, MemoryReservation, SLVal, Value};
 
 /// A compile-time description of a builtin: which module/name it lives in and
 /// how many arguments it takes. `num_params` is `None` for variadic builtins.
@@ -32,7 +30,7 @@ pub(crate) type HostFn = Arc<
   dyn for<'gc, 'call> Fn(
     &mut HostCtx<'gc, 'call>,
     &[Gc<'gc, Accounted<'gc>>],
-  ) -> Result<SLVal<'gc>, String>,
+  ) -> Result<Value<'gc>, String>,
 >;
 
 /// A builtin: metadata ([`BuiltinSpec`]) plus its handler ([`HostFn`]).
@@ -47,17 +45,14 @@ impl Builtin {
     self.spec
   }
 
-  /// Invoke this builtin's handler with the given arguments. The handler's
-  /// return value is wrapped in `Accounted` (charging the execution's tracker)
-  /// and pushed onto the execution's value stack by this method.
+  /// Invoke this builtin's handler and push the returned shared value handle.
   pub(crate) fn call<'gc, 'call>(
     &self,
     ctx: &mut HostCtx<'gc, 'call>,
     args: &[Gc<'gc, Accounted<'gc>>],
   ) -> Result<(), String> {
     let result = (self.func)(ctx, args)?;
-    let gc = ctx.alloc_value(result);
-    ctx.push_gc(gc);
+    ctx.push_gc(result);
     Ok(())
   }
 
@@ -84,6 +79,32 @@ impl Builtin {
         name,
         num_params,
       },
+      func: Arc::new(move |ctx, args| {
+        let value = func(ctx, args)?;
+        Ok(ctx.alloc_value(value))
+      }),
+    }
+  }
+
+  /// Construct a contextual builtin that returns an existing or explicitly
+  /// allocated in-arena value handle. Use this when an operation should
+  /// preserve object identity, such as list indexing.
+  pub fn contextual_value(
+    module: &'static str,
+    name: &'static str,
+    num_params: Option<u16>,
+    func: impl for<'gc, 'call> Fn(
+        &mut HostCtx<'gc, 'call>,
+        &[Gc<'gc, Accounted<'gc>>],
+      ) -> Result<Value<'gc>, String>
+      + 'static,
+  ) -> Self {
+    Builtin {
+      spec: BuiltinSpec {
+        module,
+        name,
+        num_params,
+      },
       func: Arc::new(func),
     }
   }
@@ -100,7 +121,10 @@ impl Builtin {
         name,
         num_params: Some(1),
       },
-      func: Arc::new(move |_ctx, args| func(args[0])),
+      func: Arc::new(move |ctx, args| {
+        let value = func(args[0])?;
+        Ok(ctx.alloc_value(value))
+      }),
     }
   }
 
@@ -117,7 +141,10 @@ impl Builtin {
         name,
         num_params: Some(2),
       },
-      func: Arc::new(move |_ctx, args| func(args[0], args[1])),
+      func: Arc::new(move |ctx, args| {
+        let value = func(args[0], args[1])?;
+        Ok(ctx.alloc_value(value))
+      }),
     }
   }
 
@@ -139,7 +166,10 @@ impl Builtin {
         name,
         num_params: Some(2),
       },
-      func: Arc::new(move |ctx, args| func(ctx.mc(), args[0], args[1])),
+      func: Arc::new(move |ctx, args| {
+        let value = func(ctx.mc(), args[0], args[1])?;
+        Ok(ctx.alloc_value(value))
+      }),
     }
   }
 
@@ -160,7 +190,10 @@ impl Builtin {
         name,
         num_params: Some(3),
       },
-      func: Arc::new(move |_ctx, args| func(args[0], args[1], args[2])),
+      func: Arc::new(move |ctx, args| {
+        let value = func(args[0], args[1], args[2])?;
+        Ok(ctx.alloc_value(value))
+      }),
     }
   }
 
@@ -179,7 +212,10 @@ impl Builtin {
         name,
         num_params: None,
       },
-      func: Arc::new(move |_ctx, args| func(args)),
+      func: Arc::new(move |ctx, args| {
+        let value = func(args)?;
+        Ok(ctx.alloc_value(value))
+      }),
     }
   }
 }
@@ -338,46 +374,47 @@ pub fn default_builtins() -> Builtins {
       SLVal::List(items) => Ok(SLVal::Int(items.len() as i64)),
       _ => Err(format!("len: expected a List, got {}", a.value.type_name())),
     }))
-    .with_builtin(Builtin::contextual("std", "idx", Some(2), |ctx, args| {
-      let (a, b) = (args[0], args[1]);
-      match (&a.value, &b.value) {
-        (SLVal::List(items), SLVal::Int(i)) => {
-          let len = items.len() as i64;
-          let idx = if *i < 0 { *i + len } else { *i };
-          if idx < 0 || idx >= len {
-            Err(format!(
-              "idx: index {} out of range for list of length {}",
-              i, len
-            ))
-          } else {
-            let selected = &items[idx as usize].value;
-            let mut reservation = ctx.reserve_memory(external_bytes_of(selected))?;
-            let cloned = selected.clone();
-            ctx.reconcile_reservation(&mut reservation, external_bytes_of(&cloned))?;
-            Ok(cloned)
+    .with_builtin(Builtin::contextual_value(
+      "std",
+      "idx",
+      Some(2),
+      |ctx, args| {
+        let (a, b) = (args[0], args[1]);
+        match (&a.value, &b.value) {
+          (SLVal::List(items), SLVal::Int(i)) => {
+            let len = items.len() as i64;
+            let idx = if *i < 0 { *i + len } else { *i };
+            if idx < 0 || idx >= len {
+              Err(format!(
+                "idx: index {} out of range for list of length {}",
+                i, len
+              ))
+            } else {
+              Ok(items[idx as usize])
+            }
           }
-        }
-        (SLVal::String(s), SLVal::Int(i)) => {
-          let len = s.chars().count() as i64;
-          let idx = if *i < 0 { *i + len } else { *i };
-          if idx < 0 || idx >= len {
-            Err(format!(
-              "idx: index {} out of range for string of length {}",
-              i, len
-            ))
-          } else {
-            let start = char_boundary(s, idx as usize);
-            let end = char_boundary(s, idx as usize + 1);
-            Ok(SLVal::String(s[start..end].to_string()))
+          (SLVal::String(s), SLVal::Int(i)) => {
+            let len = s.chars().count() as i64;
+            let idx = if *i < 0 { *i + len } else { *i };
+            if idx < 0 || idx >= len {
+              Err(format!(
+                "idx: index {} out of range for string of length {}",
+                i, len
+              ))
+            } else {
+              let start = char_boundary(s, idx as usize);
+              let end = char_boundary(s, idx as usize + 1);
+              Ok(ctx.alloc_value(SLVal::String(s[start..end].to_string())))
+            }
           }
+          _ => Err(format!(
+            "idx: expected (List, Int) or (String, Int), got ({}, {})",
+            a.value.type_name(),
+            b.value.type_name()
+          )),
         }
-        _ => Err(format!(
-          "idx: expected (List, Int) or (String, Int), got ({}, {})",
-          a.value.type_name(),
-          b.value.type_name()
-        )),
-      }
-    }))
+      },
+    ))
     .with_builtin(Builtin::contextual("std", "push", Some(2), |ctx, args| {
       let (a, b) = (args[0], args[1]);
       match &a.value {
@@ -517,7 +554,8 @@ pub fn default_builtins() -> Builtins {
           ))
         }
       };
-      let contents = CellContents::new(SLVal::Int(rand_rng(parent, ns)), ctx.tracker());
+      let state = ctx.alloc_value(SLVal::Int(rand_rng(parent, ns)));
+      let contents = CellContents::new(state);
       Ok(SLVal::Cell(Gc::new(ctx.mc(), RefLock::new(contents))))
     }))
     // (rand.roll! rng sides) -> Int
@@ -525,50 +563,48 @@ pub fn default_builtins() -> Builtins {
     //   and returns the roll (in `1..=sides`). The Cell is both the RNG state
     //   and (after the call) the advanced state, so callers don't need to
     //   thread a new seed through.
-    .with_builtin(Builtin::binary_alloc("rand", "roll!", |mc, rng, sides| {
-      let cell = match &rng.value {
-        SLVal::Cell(c) => *c,
-        other => {
-          return Err(format!(
-            "rand.roll!: expected Cell rng, got {}",
-            other.type_name()
-          ))
+    .with_builtin(Builtin::contextual(
+      "rand",
+      "roll!",
+      Some(2),
+      |ctx, args| {
+        let (rng, sides) = (args[0], args[1]);
+        let cell = match &rng.value {
+          SLVal::Cell(c) => *c,
+          other => {
+            return Err(format!(
+              "rand.roll!: expected Cell rng, got {}",
+              other.type_name()
+            ))
+          }
+        };
+        let n = match &sides.value {
+          SLVal::Int(i) => *i,
+          other => {
+            return Err(format!(
+              "rand.roll!: expected Int sides, got {}",
+              other.type_name()
+            ))
+          }
+        };
+        if n <= 0 {
+          return Err(format!("rand.roll!: sides must be positive, got {}", n));
         }
-      };
-      let n = match &sides.value {
-        SLVal::Int(i) => *i,
-        other => {
-          return Err(format!(
-            "rand.roll!: expected Int sides, got {}",
-            other.type_name()
-          ))
-        }
-      };
-      if n <= 0 {
-        return Err(format!("rand.roll!: sides must be positive, got {}", n));
-      }
-      let s = match &*cell.borrow() {
-        CellContents {
-          value: SLVal::Int(i),
-          ..
-        } => *i,
-        other => {
-          return Err(format!(
-            "rand.roll!: expected Cell to hold an Int, got {}",
-            other.value.type_name()
-          ))
-        }
-      };
-      let (roll, next) = rand_roll(s, n);
-      // `CellContents::set` replaces the held value and reconciles the charge.
-      // For an Int→Int swap the external bytes are 0 on both sides, so the
-      // charge is a no-op, but going through `set` keeps the discipline uniform.
-      Gc::write(mc, cell)
-        .unlock()
-        .borrow_mut()
-        .set(SLVal::Int(next));
-      Ok(SLVal::Int(roll))
-    }))
+        let s = match &cell.borrow().value.value {
+          SLVal::Int(i) => *i,
+          other => {
+            return Err(format!(
+              "rand.roll!: expected Cell to hold an Int, got {}",
+              other.type_name()
+            ))
+          }
+        };
+        let (roll, next) = rand_roll(s, n);
+        let next = ctx.alloc_value(SLVal::Int(next));
+        Gc::write(ctx.mc(), cell).unlock().borrow_mut().set(next);
+        Ok(SLVal::Int(roll))
+      },
+    ))
 }
 
 /// Derive a deterministic 64-bit seed from a parent seed and a name, using
@@ -692,11 +728,6 @@ mod test {
       ),
       ("(fn main () (std.list 1 2 3 4))".to_string(), 4, 4 * ptr),
       (
-        format!("(fn main () (std.idx (std.list \"{large}\") 0))"),
-        2,
-        large.len(),
-      ),
-      (
         "(fn main () (std.push (std.list 1 2 3) 4))".to_string(),
         2,
         4 * ptr,
@@ -726,6 +757,23 @@ mod test {
     for (source, arity, bytes) in cases {
       assert_final_builtin_reservation_fails(&source, arity, bytes);
     }
+  }
+
+  #[test]
+  fn list_idx_returns_the_existing_value_without_cloning() {
+    let large = "x".repeat(64 * 1024);
+    let source = format!("(fn main () (std.idx (std.list \"{large}\") 0))");
+    let mut exec = before_final_call(&source);
+    let scratch_bytes = 2 * std::mem::size_of::<Gc<'static, Accounted<'static>>>();
+    exec.set_memory_limit(Some(exec.memory_usage() + scratch_bytes));
+    let gc_before = exec.gc_count();
+
+    exec.step().unwrap();
+    assert!(
+      exec.gc_count() <= gc_before,
+      "idx allocated a duplicate value object"
+    );
+    assert_eq!(exec.peek_value().unwrap(), SLValue::String(large));
   }
 
   #[test]
