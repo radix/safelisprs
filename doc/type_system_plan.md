@@ -1,304 +1,312 @@
-# Plan: Type System and Type Checker for SafeLisp
+# SafeLisp Type System
 
-## Design decisions (locked in after review)
+Static, mandatory types for SafeLisp, checked after parsing and before the
+closure transform. One checker serves both backends (interpreter and WASM).
+Type errors halt compilation.
 
-| Aspect | Decision |
-|---|---|
-| Pipeline stage | **Before** the closure transform and before the backend split — one checker shared by interpreter + WASM |
-| Annotations | **Mandatory** on every `fn`'s params and return type (return type may be elided; defaults to `Void`) |
-| `let` bindings | **Inferred** — no mandatory annotation; optional annotation allowed |
-| Polymorphism | Generics for `List` and `map`; **no overloads** (see "Traits" below) |
-| Trait bounds | **Explicit** via a `where` clause on `fn` — not inferred from the body |
-| Strictness | **Strict** — type errors halt compilation |
-| Type variables | **Uppercase** identifiers (e.g. `A`, `B`, `Elem`) |
-| Surface syntax | Trailing colon form with spaces allowed around `:` and `->`. Function types written `(Fn (Int Int) -> Int)`. Type application written `(List Int)`, `(Cell T)`. **No `<>` generics syntax.** |
-| Comments | `#` line comments |
-| Module name | `typecheck` (not `typeck`) |
-| Backend scope | Both backends share one checker |
+Goals:
+
+- Mandatory annotations on function parameters and return types; inference for
+  `let` bindings.
+- Parametric polymorphism (generic functions, generic `List`/`Cell`).
+- A small trait system so `+`, `==`, `concat`, etc. are polymorphic without
+  overloading — each builtin has exactly one signature.
+- Higher-order generics work: `std.map` over a polymorphic function, closures
+  passed as values.
+
+Non-goals (for now):
+
+- Typed bytecode. The checker validates and then gets out of the way; codegen
+  is unchanged. Typed WASM signatures, tag elision, etc. are follow-ups.
+- User-defined types, associated types, trait implementations for user types.
 
 ---
 
-## 1. Custom parser
+## 1. Prerequisite language changes
 
-The `atoms` crate cannot reasonably support our type syntax:
-- `:` inside a parameter / let binding (with optional spaces around it) is not a token atoms distinguishes.
-- `->` as a standalone symbol with spaces around it is fine in atoms (it's just a symbol), but combined with the colon handling and the desire for a uniform, controlled grammar, a custom parser is cleaner than fighting atoms.
-- We want clear, explicit control over whitespace around `:` and `->` so users can write `(a : Int)`, `(a:Int)`, `(Int Int -> Int)`, `(Int Int ->Int)` etc. interchangeably.
+Two changes to the untyped language land first, independent of the checker.
+Both shrink the type system's problem space.
 
-### 1a. New parser module: `src/parser.rs` rewritten
+### 1a. First-class references to top-level functions
 
-We replace the `atoms`-based parser with a hand-written recursive-descent parser. The grammar is small enough that this is tractable and gives us full control over error messages and span tracking (which we'll want for type errors later).
+Today only a *nested* `fn` produces a callable value; a top-level function
+name in value position is a compile error (`compiler.rs` errors on any
+`Variable` that isn't a local). With mandatory types we want
+`(std.map xs double)` where `double` is a top-level function, so we add:
 
-The parser produces the existing `AST` plus a new `TypeAst` and an extended `Function` / `AST::Let`. We keep `AST` essentially as-is so downstream code (`closure.rs`, `compiler.rs`, `wasm.rs`) only needs to handle the new optional type annotation on `Let` and the new fields on `Function`.
+- **Bare identifier in value position**: resolve against locals first, then
+  the current module's functions. A module-function hit compiles to
+  `Instruction::MakeFunctionRef((module, name))`. Locals shadow module
+  functions, matching the existing `CallFixed` resolution order.
+- **Qualified identifier in value position** (`other.helper`, `std.len`):
+  parse to `AST::FunctionRef(module, name)` directly. Builtins are injected
+  into module function tables like ordinary functions, so a `FunctionRef` to a
+  builtin should be callable via `CallDynamic` — verify with a test
+  (`(std.map xs std.len)`); if builtin refs don't work through the dynamic
+  path, restrict qualified refs to user modules and fix the runtime as a
+  follow-up.
 
-The `atoms` crate dependency is removed from `Cargo.toml`.
+### 1b. Explicit cells; `set!` removed
 
-### 1b. Lexer
+Variables become **immutable bindings**. All mutation goes through explicit,
+first-class cells, via three new builtins:
 
-A small lexer producing tokens:
+| Builtin | Signature |
+|---|---|
+| `std.cell` | `(A) -> (Cell A)` |
+| `std.get` | `((Cell A)) -> A` |
+| `std.set!` | `((Cell A) A) -> Void` |
 
+The `set!` special form is removed from the parser. The shared-counter idiom
+becomes:
+
+```lisp
+(fn make-counter () ->(Fn () -> Int)
+  (let count (std.cell 0))
+  (fn tick () ->Int
+    (std.set! count (std.+ 1 (std.get count)))
+    (std.get count)))
 ```
-Token {
-  kind: TokenKind,
-  span: Span,        // byte start..end, for future error reporting
-}
 
-enum TokenKind {
-  LParen, RParen,
-  Sym(String),       // identifiers and operators: `let`, `fn`, `+`, `std.+`, `a`, `Int`, `A`, ...
-  Int(i64),
-  Float(f64),
-  Str(String),       // "..." with escapes
-  Colon,             // `:`
-  Arrow,             // `->`
-  Eof,
-}
-```
+Why this shape:
 
-Whitespace and `#` line comments (from `#` to end of line) are skipped by the lexer.
+- `set!` on a bare variable cannot be typed coherently: whether it rebinds
+  the variable or writes through a cell it happens to hold depends on whether
+  the closure transform cell-wrapped it, and the non-captured case is a
+  runtime error today ("Not a cell"). Explicit cells make mutation an
+  ordinary, fully-typed operation — a well-typed program can't hit that error.
+- The three builtins are plain generic functions; the checker needs **zero**
+  mutation-specific rules or special forms.
+- `rand.rng` returning `(Cell Int)` stops being an anomaly — it's the idiom.
+  `rand.rng : (Int String) -> (Cell Int)` and
+  `rand.roll! : ((Cell Int) Int) -> Int` keep their current types.
 
-**Lexer rule for `:` and `->`:** `:` and `->` are dedicated tokens, *not* symbols. Inside a maximal symbol-character run, encountering `:` or `->` terminates the current symbol and emits `Colon` / `Arrow` as a separate token, then lexing continues. So `a:Int` lexes as `Sym("a")`, `Colon`, `Sym("Int")` — identical to `a : Int` with spaces. Likewise `Int->Int` lexes as `Sym("Int")`, `Arrow`, `Sym("Int")`. Qualified names like `std.+` use `.` and are unaffected (they don't contain `:` or `->`).
+Implementation notes:
 
-This is a small, well-contained lexer. Total estimated ~150 LOC.
+- The runtime already has everything: `SLVal::Cell` is a first-class value,
+  and `rand.roll!` demonstrates a builtin mutating a cell argument in place
+  (`Gc::write`). `std.cell` allocates like `rand.rng` does; `std.get` returns
+  the inner value handle like `std.idx` does; `std.set!` writes like
+  `rand.roll!` does and returns `SLVal::Void`.
+- The closure transform is untouched. Its cell-wrapping of captured variables
+  becomes an invisible runtime detail (captures can no longer be reassigned,
+  so the wrapping is now unnecessary — removing it is a follow-up
+  simplification, not part of this work).
+- `AST::SetCell` / `Instruction::SetCell` are no longer produced from source.
+  Leave them in place (serialization compat); removing them is a follow-up.
+- ~15 `set!` usages in the test corpus migrate to the cell idiom.
 
-### 1c. Grammar
+---
+
+## 2. Surface syntax
+
+### 2a. Parser replacement
+
+The `atoms`-based parser is replaced with a hand-written lexer +
+recursive-descent parser (`src/parser.rs` rewritten; `atoms` dropped from
+`Cargo.toml`). Motivation: `:` and `->` tokens with optional surrounding
+whitespace, `#` line comments, and span tracking for future error locations.
+
+Tokens: `LParen`, `RParen`, `Sym(String)`, `Int(i64)`, `Float(f64)`,
+`Str(String)`, `Colon`, `Arrow`, `Eof`, each with a byte span. `:` and `->`
+terminate a symbol run and are emitted as their own tokens, so `a:Int` ≡
+`a : Int` and `->Int` ≡ `-> Int`. Qualified names (`std.+`) stay single
+symbols. Whitespace and `#`-to-end-of-line comments are skipped.
+
+### 2b. Grammar
 
 ```
 Program    := Form*
-
 Form       := "(" SpecialForm ")" | "(" Callee Expr* ")" | Atom
-SpecialForm:= "let" | "fn" | "if" | "set!" | "block"
-Callee     := Expr                       -- for Call (dynamic)
-            | Identifier                  -- for CallFixed
+SpecialForm:= let | fn | if | block
+Atom       := Int | Float | Str | Sym          -- `true`/`false` → Bool
 
-Identifier := Sym                        -- bare: `foo`
-            | Sym "." Sym                -- qualified: `std.+` (kept as one Sym by lexer)
-
-Atom       := Int | Float | Str | Sym    -- Sym `true`/`false` → Bool
-
--- Special forms:
-
-let        := "let" Sym [":" Type] Expr              -- optional annotation
-fn         := "fn" Sym "(" Param* ")" ["->" Type] ["where" "(" Bound* ")"] Body
-Param      := Sym ":" Type                            -- annotation mandatory
-Bound      := "(" Sym Trait+ ")"                      -- (TypeVar Trait...) e.g. (A Add)
+let        := "let" Sym [":" Type] Expr        -- annotation optional
+fn         := "fn" Sym "(" Param* ")" ["->" Type] ["where" "(" Bound* ")"] Expr+
+Param      := Sym ":" Type                     -- annotation mandatory
+Bound      := "(" TypeVarName TraitName+ ")"   -- e.g. (A Add), (B Add Eq)
 if         := "if" Expr Expr Expr
-set!       := "set!" Expr Expr
 block      := "block" Expr+
 
-Body       := Expr+                                   -- last expr's value is the result
-
--- Types:
-
-Type       := AtomType
-            | "(" TypeConstructor Type* ")"           -- type application: (List Int), (Cell T)
-            | "(" "Fn" "(" Type* ")" "->" Type ")"    -- function type: (Fn (Int Int) -> Int)
-
-AtomType   := Sym                                    -- Int, Float, String, Bool, Void, or a TypeVar (uppercase)
-TypeConstructor := Sym                               -- List, Cell, Fn, or a future user type
+Type       := Sym                              -- Int, Float, String, Bool, Void, or a type var
+            | "(" Sym Type* ")"                -- application: (List Int), (Cell T)
+            | "(" "Fn" "(" Type* ")" "->" Type ")"
 ```
 
-**Type application uses parenthesized lists** with the constructor as the head:
-- `(List Int)` — list of ints
-- `(Cell Int)` — cell of int
-- `(Fn (Int Int) -> Int)` — function from two ints to int
-- `(List A)` — polymorphic list of `A`
+An elided `fn` return type means `Void`. `set!` is gone (§1b). Uppercase
+symbols that aren't built-in type names (`Int`, `Float`, `String`, `Bool`,
+`Void`, `List`, `Cell`, `Fn`) are type variables. Trait names in `where`
+clauses are parsed as plain strings; the checker validates them against the
+known trait set.
 
-The arrow `->` is allowed optional spaces on either side, handled naturally by the lexer skipping whitespace between tokens.
-
-`List` / `Cell` / `Fn` are not reserved words — they're just type constructors recognized by name in the type parser. An uppercase identifier that is not one of these built-in type names is a type variable. (We could later allow user-defined types with the same syntax.)
-
-### 1d. Surface examples
+### 2c. Examples
 
 ```lisp
-# Monomorphic
-(fn id (a:Int) ->Int a)
-(fn main () (std.+ 1 2))                           # return type elided → Void
+# Monomorphic; elided return type is Void (result discarded)
+(fn main () (std.+ 1 2))
 (fn main () ->Int (std.+ 1 2))
 
-# Polymorphic
+# Polymorphic identity
 (fn id (a:A) ->A a)
-(fn main () ->Int
-  (let dbl (fn dbl (x:Int) ->Int (std.+ x x)))     # let infers (Fn (Int) -> Int)
+
+# Trait bounds are explicit
+(fn double (a:A) ->A where ((A Add)) (std.+ a a))
+
+# Higher-order: top-level fn passed by name (§1a)
+(fn sq (x:Int) ->Int (std.+ x x))
+(fn main () ->(List Int) (std.map (std.range 0 5) sq))
+
+# Nested fn as a value; let infers (Fn (Int) -> Int)
+(fn main () ->(List Int)
+  (let dbl (fn dbl (x:Int) ->Int (std.+ x x)))
   (std.map (std.range 0 5) dbl))
 
-# Annotated let (optional)
+# Annotated let
 (fn main () ->Int
-  (let xs:(List Int) (std.range 0 5))
+  (let xs:(List Int) (std.list))
   (std.len xs))
 
-# Higher-order builtin
-(fn main () ->(List Int)
-  (std.map (std.range 0 5) (fn sq (x:Int) ->Int (std.+ x x))))
-
-# Trait bounds via where clause
-(fn add2 (a:A) ->A where ((A Add)) (std.+ a a))
-(fn concat2 (a:A) ->A where ((A Concat)) (std.concat a a))
+# Mutation via explicit cells (§1b)
+(fn main () ->Int
+  (let c (std.cell 1))
+  (std.set! c (std.+ 1 (std.get c)))
+  (std.get c))
 ```
 
----
-
-## 2. Type syntax (surface and AST)
-
-### 2a. `TypeAst` (parser output)
+### 2d. AST changes
 
 ```rust
-#[derive(Debug, PartialEq, Clone)]
 pub enum TypeAst {
-  Named(String),                       // Int, Float, String, Bool, Void, List, Cell, Fn, or a type var (uppercase)
-  Apply(Box<TypeAst>, Vec<TypeAst>),   // (List Int), (Cell T)
-  Fn(Vec<TypeAst>, Box<TypeAst>),      // (Fn (Int Int) -> Int) — params, ret
+  Named(String),                        // Int, List, a type var, ...
+  Apply(String, Vec<TypeAst>),          // (List Int), (Cell T)
+  Fn(Vec<TypeAst>, Box<TypeAst>),       // (Fn (Int Int) -> Int)
 }
 
-#[derive(Debug, PartialEq, Clone)]
-pub enum TraitRef {
-  Add, Eq, Concat, Slice,               // user-writable traits (Index is internal-only — see §4d)
-  Other(String),                        // reserved for future user-defined traits; rejected in v1
-}
-
-#[derive(Debug, PartialEq, Clone)]
 pub struct Bound {
-  pub var: String,                      // the type variable name, e.g. "A"
-  pub traits: Vec<TraitRef>,             // traits it must satisfy, e.g. [Add]
+  pub var: String,                      // "A"
+  pub traits: Vec<String>,              // ["Add"] — validated by the checker
 }
-```
 
-The parser doesn't decide whether `Named("A")` is a type variable or a built-in type — that's the type checker's job (it knows the set of builtin type constructors: `Int`, `Float`, `String`, `Bool`, `Void`, `Cell`, `List`, `Fn`; anything else that is uppercase is a type variable). The parser also doesn't validate `TraitRef` names against the known set beyond parsing them into the enum — the checker does final validation.
-
-### 2b. Extended `Function` and `AST::Let`
-
-```rust
-#[derive(Debug, PartialEq, Clone)]
 pub struct Function {
   pub name: String,
-  pub params: Vec<(String, TypeAst)>,   // was Vec<String>; type annotation mandatory
-  pub return_type: Option<TypeAst>,     // None → defaults to Void at typecheck time
-  pub bounds: Vec<Bound>,               // from the `where` clause; may be empty
+  pub params: Vec<(String, Option<TypeAst>)>,  // see open question 4
+  pub return_type: Option<TypeAst>,            // None → Void
+  pub bounds: Vec<Bound>,
   pub code: Vec<AST>,
 }
 
-// AST::Let gains optional annotation:
+// AST::Let gains an optional annotation:
 Let(String, Option<TypeAst>, Box<AST>),
+// AST::SetCell is no longer produced by the parser (§1b).
 ```
 
-`Option<TypeAst>` for `return_type` lets the parser represent the elided form cleanly; the type checker fills in `Void` when resolving. (We could also fill `Void` at parse time, but keeping `None` makes error messages clearer — "you elided the return type, which defaults to Void".)
+Parameter annotations are *syntactically* mandatory (the parser rejects a
+bare param — after the migration window, see §6), but the struct keeps
+`Option<TypeAst>` so the closure transform can synthesize capture parameters
+without inventing type syntax it can't know (open question 4).
 
 ---
 
-## 3. Internal `Type` representation (in `src/typecheck.rs`)
+## 3. Types, type variables, and traits
+
+All internal to the new `src/typecheck.rs`.
+
+### 3a. Representation
 
 ```rust
 pub enum Type {
   Int, Float, String, Bool, Void,
   Cell(Box<Type>),
   List(Box<Type>),
-  Fn(FnSig),
-  Var(TypeVar),
+  Fn(Vec<Type>, Box<Type>),
+  Var(TvRef),
 }
 
-pub struct FnSig {
-  pub params: Vec<Type>,
-  pub ret: Box<Type>,
-}
+pub type TvRef = Rc<RefCell<TypeVar>>;
 
 pub enum TypeVar {
-  /// A type variable that has not yet been unified with a concrete type.
-  /// Carries a unique id, an optional name hint (for error reporting),
-  /// and the set of trait bounds declared on it (from the `where` clause).
-  Unbound { id: usize, name: Option<String>, bounds: Vec<Trait> },
-  /// A type variable that has been unified with a concrete type.
-  /// Following the `Link` recovers the type. (Union-find via indirection.)
-  Link(Box<Type>),
+  /// An inference variable: not yet known. Cloning a `Type` clones the `Rc`,
+  /// so all mentions share one state; linking is visible everywhere.
+  /// `origin` describes where the var was created (a `let` name, or a
+  /// description of the expression) so an ambiguity error (§5g) can point at
+  /// it. `None` for vars with no obvious source location.
+  Unbound { id: usize, bounds: Vec<Trait>, origin: Option<String> },
+  /// A declared type variable being checked *inside its own function's
+  /// body*. Unifies only with itself. Carries the `where`-clause bounds.
+  Rigid { name: String, bounds: Vec<Trait> },
+  /// Resolved: this variable IS the linked type (union-find by indirection).
+  Link(Type),
 }
 ```
 
-**What `Unbound` vs `Link` means (plain explanation):** A type variable starts out as `Unbound` — "we don't know what this type is yet, but it has an identity (an id)". When the unifier decides "this type variable must be `Int`", it mutates the variable in place to `Link(Box::new(Type::Int))`. Anyone who later reads the variable follows the `Link` to get `Int`. This is the standard union-find trick used in ML-style type inference (and in Rust's own type checker). There is no "Generic" variant — generalization is handled at a higher level (see §5e).
+`Rc<RefCell<_>>` gives the shared in-place mutation that union-find needs;
+an id-indexed arena would also work but the `Rc` version keeps signatures
+free of a context parameter.
 
-**Why no `Generic` variant:** A "generic" type variable is just an `Unbound` variable that lives in a function's declared signature and gets *instantiated* (replaced with a fresh `Unbound` variable) at every call site. The distinction between "this `Unbound` is a placeholder in the current expression" vs "this `Unbound` is a schema parameter" is managed by the schema/environment layer, not by the `TypeVar` enum itself. Keeping `TypeVar` to just `Unbound`/`Link` means the unifier is a single, simple function over `Type` — no special cases.
+**Rigid vs. Unbound is the soundness linchpin.** When checking the body of
+`(fn id (a:A) ->A a)`, `A` is *rigid*: the body must work for every `A`, so
+`A` unifies with nothing but itself. `(fn id (a:A) ->A 5)` is an error —
+`Int` does not unify with rigid `A`. Callers never see rigid vars: each call
+site *instantiates* the signature, replacing its rigid vars with fresh
+`Unbound` vars (carrying the same bounds), which then unify freely.
 
-**Trait bounds on `Unbound`:** When the type checker sets up a function's environment, it creates `Unbound` vars for each declared type variable (e.g. `A` from `(fn add2 (a:A) ->A where ((A Add)) ...)`), and attaches the `where`-clause bounds to those vars. When such a bounded var later unifies with a concrete type (e.g. `Int`), the unifier checks `Int` satisfies each bound (`Add` is satisfied by `Int`/`Float` — yes). When two bounded `Unbound` vars unify, their bounds are merged (union). This is how the explicit `where` clause is enforced.
+### 3b. Unification
+
+`unify(a, b)` — structural, with these variable rules:
+
+- Chase `Link`s first (and path-compress).
+- `Unbound` vs anything: **occurs check** (error on `A` ~ `(List A)`), then
+  check bounds (below), then link.
+- `Unbound` vs `Unbound`: link one to the other, merging bound sets.
+- `Unbound(bounds)` vs concrete type `T`: every bound must be satisfied by
+  `T` (§3c) or error, then link.
+- `Unbound(bounds)` vs `Rigid(declared)`: every required bound must appear in
+  `declared`, else error — this is the "you used `A` where `Add` is required
+  but didn't declare `where ((A Add))`" case. Then link the unbound var to
+  the rigid one.
+- `Rigid` vs `Rigid`: equal only if the same variable.
+- `Rigid` vs concrete: error.
+
+Enforcing bounds at link time, with the rigid-var rule above, is the entire
+"explicit bounds" mechanism — no separate bounds-inference or
+declared-vs-used pass exists.
+
+### 3c. Traits
+
+```rust
+pub enum Trait { Add, Sub, Eq, Concat, Slice }
+```
+
+| Trait | Satisfied by | Used by |
+|---|---|---|
+| `Add` | `Int`, `Float` | `std.+` |
+| `Sub` | `Int`, `Float` | `std.-` |
+| `Eq` | every type (v1 — open question 2) | `std.==` |
+| `Concat` | `String`, `(List A)` | `std.concat` |
+| `Slice` | `String`, `(List A)` | `std.slice` |
+
+There is no `Index` trait. `std.idx`'s result type depends on its argument
+type (`(List X) → X`, `String → String`), which would need associated types;
+instead the checker special-cases `std.idx` (§4b, open question 3).
+
+`Eq` being universal doesn't let you compare across types: `std.==` is
+`(A A) -> Bool` with a *single* type variable, so `(std.== 1 "x")` fails
+unification before `Eq` is ever consulted.
 
 ---
 
-## 4. Builtins: signatures and traits
+## 4. Builtin signatures
 
-### 4a. No overloads
+### 4a. Table
 
-Each builtin has *exactly one* signature. Where the runtime currently dispatches on argument tags (e.g. `+` works on `Int`+`Int` *or* `Float`+`Float`), we instead model the operation via **traits** — a builtin's signature uses trait-bounded type variables.
-
-### 4b. Traits
-
-We introduce a small trait system so that `+`, `-`, `concat`, `idx`, `slice` can express "works on any type that supports this operation" without overloads.
+`BuiltinSpec` gains a signature, expressed over `&'static` data:
 
 ```rust
-pub enum Trait {
-  Add,        // t supports (t, t) -> t            (for +, -)
-  Eq,         // t supports (t, t) -> Bool         (for ==)
-  Concat,     // t supports (t, t) -> t            (for concat: String or (List A))
-  Index,      // internal-only, not writable in `where` (see §4d)
-  Slice,      // t supports (t, Int, Int) -> t     (for slice)
-}
-```
-
-A type variable carries a set of required traits (its **bounds**), declared explicitly via the `where` clause on the function. The unifier enforces the bounds: whenever a bounded `Unbound` var unifies with a concrete `Type`, it checks the concrete type satisfies each bound. If not, a type error is raised. When two bounded `Unbound` vars unify, their bounds are merged (union).
-
-**No inference of bounds.** You decided bounds should be explicit in the source via `where`, not inferred from usage. So if a user writes `(fn add2 (a:A) ->A (std.+ a a))` *without* `where ((A Add))`, the checker errors: "type variable `A` is used in a position requiring trait `Add`, but no bound is declared — add `where ((A Add))`". This makes the checking simpler and forces the user to be explicit about their type-variable constraints.
-
-Concretely:
-
-```rust
-pub enum TypeVar {
-  Unbound { id: usize, name: Option<String>, bounds: Vec<Trait> },
-  Link(Box<Type>),
-}
-```
-
-When the unifier unifies a bounded `Unbound` var with a concrete `Type`, it immediately checks the concrete type satisfies each bound (e.g. `Add` is satisfied by `Int` and `Float` only; `Concat` by `String` and `(List A)`; etc.). If not, a type error is raised. When two bounded `Unbound` vars unify, their bounds are merged (union).
-
-### 4c. Builtin signatures
-
-Each `BuiltinSpec` gains exactly one signature, expressed in terms of `Type` and trait constraints:
-
-| Builtin | Signature |
-|---|---|
-| `std.+` | `(A A -> A)` where `A: Add` |
-| `std.-` | `(A A -> A)` where `A: Add` (renaming: `Add` covers `-` too; we could split into `Add`/`Sub` but they have the same member set, so one trait is fine) |
-| `std.==` | `(A A -> Bool)` where `A: Eq` (one type var, as you specified) |
-| `std.concat` | `(A A -> A)` where `A: Concat` |
-| `std.idx` | `(A Int -> B)` with `A: Index` (internal — see §4d) |
-| `std.push` | `((List A) A -> (List A))` |
-| `std.slice` | `(A Int Int -> A)` where `A: Slice` |
-| `std.len` | `((List A) -> Int)` |
-| `std.range` | `(Int Int -> (List Int))` |
-| `std.list` | variadic `(A... -> (List A))` — homogeneous, as you decided |
-| `std.map` | `((List A) (Fn (A) -> B) -> (List B))` |
-| `rand.rng` | `(Int String -> (Cell Int))` |
-| `rand.roll!` | `((Cell Int) Int -> Int)` |
-
-### 4d. The `Index` trait and element type
-
-`idx` is tricky because the return type depends on the input type (`(List A) -> A`, `String -> String`). With traits and no overloads, we model it as:
-
-- `idx`'s signature: `(A Int -> B)` with `A: Index`, plus a *type function* `Index::Output(A) = B` that the checker resolves during unification. When `A` unifies with `(List X)`, `B` unifies with `X`. When `A` unifies with `String`, `B` unifies with `String`.
-
-This requires associated-type-like machinery, which is more than a basic trait system. **For v1, the pragmatic choice:** special-case `idx` and `slice` in the checker (the checker knows `idx`'s typing rule directly, rather than going through a generic trait mechanism). `Index` is an **internal-only trait** — it cannot appear in a user's `where` clause (the parser rejects it with "trait `Index` cannot be declared explicitly; it is resolved automatically by `std.idx`"). We still call it a "trait" in error messages, but the implementation is a hardcoded rule. If we later generalize the trait system with associated types, we can refactor `idx`/`slice` into it.
-
-So the v1 user-facing trait system supports: `Add`, `Eq`, `Concat`, `Slice`. `Index` is special-cased internally. This keeps the implementation small while still giving us the no-overloads property you want.
-
-### 4e. `BuiltinSpec` extension
-
-```rust
-pub struct BuiltinSpec {
-  pub module: &'static str,
-  pub name: &'static str,
-  pub num_params: Option<u16>,           // kept for runtime arity check (unchanged)
-  pub signature: BuiltinSignature,       // NEW
-}
-
 pub struct BuiltinSignature {
+  pub type_vars: &'static [(&'static str, &'static [Trait])], // e.g. [("A", &[Trait::Add])]
   pub params: &'static [TypeConst],
+  pub rest: Option<&'static TypeConst>,   // variadic tail: all extra args unify with this
   pub ret: TypeConst,
-  pub bounds: &'static [(TypeVarId, &'static [Trait])],
 }
 
 pub enum TypeConst {
@@ -306,213 +314,412 @@ pub enum TypeConst {
   Cell(&'static TypeConst),
   List(&'static TypeConst),
   Fn { params: &'static [TypeConst], ret: &'static TypeConst },
-  Var(TypeVarId),                        // a type variable referenced in `bounds`
+  Var(&'static str),
 }
 ```
 
-These are `&'static` so they live in compiled-in tables. The type checker converts `TypeConst` → `Type` (instantiating fresh `Unbound` vars — with the corresponding bounds — for each `Var`) at each call site.
+At each call site the checker converts the signature to `Type`, creating one
+fresh `Unbound` var per entry in `type_vars` (with its bounds).
 
-### 4f. Trait membership
-
-| Trait | Members |
+| Builtin | Signature |
 |---|---|
-| `Add` | `Int`, `Float` |
-| `Eq` | `Int`, `Float`, `String`, `Bool`, `Void`, `(Cell A)`, `(List A)`, function types (all function values are `Eq` by structural identity) |
-| `Concat` | `String`, `(List A)` |
-| `Slice` | `String`, `(List A)` |
+| `std.+` | `(A A) -> A` where `A: Add` |
+| `std.-` | `(A A) -> A` where `A: Sub` |
+| `std.==` | `(A A) -> Bool` where `A: Eq` |
+| `std.concat` | `(A A) -> A` where `A: Concat` |
+| `std.slice` | `(A Int Int) -> A` where `A: Slice` |
+| `std.idx` | special-cased (§4b) |
+| `std.len` | `((List A)) -> Int` |
+| `std.push` | `((List A) A) -> (List A)` |
+| `std.range` | `(Int Int) -> (List Int)` |
+| `std.list` | variadic: `rest = A`, returns `(List A)` (homogeneous) |
+| `std.map` | `((List A) (Fn (A) -> B)) -> (List B)` |
+| `std.cell` | `(A) -> (Cell A)` |
+| `std.get` | `((Cell A)) -> A` |
+| `std.set!` | `((Cell A) A) -> Void` |
+| `rand.rng` | `(Int String) -> (Cell Int)` |
+| `rand.roll!` | `((Cell Int) Int) -> Int` |
 
-`Eq` membership is broad because runtime `==` works structurally on everything. (You confirmed: `==` has one type var, and `(std.== 1 "x")` should type-error because the two args must be the *same* type var `A` — so even though `Eq` is broad, the single-type-var rule prevents comparing different types.) For v1 we say all `(Cell A)`/`(List A)` are `Eq` regardless of element type, and let the runtime's potential infinite-loop on cyclic cells be a separate runtime concern. Simpler is better for v1.
+`num_params` stays for the runtime arity check; the checker uses
+`params.len()` / `rest` for its own arity errors.
+
+### 4b. `std.idx`
+
+The checker matches on the callee name and applies the rule directly: infer
+the first argument's type, resolve it —
+
+- `(List X)` → result `X`
+- `String` → result `String`
+- an `Unbound` or `Rigid` var → error: "cannot index a value of type `A`;
+  `std.idx` requires a concrete `List` or `String`". Functions polymorphic
+  over "indexable things" are not expressible in v1 (open question 3).
+
+The second argument unifies with `Int`.
 
 ---
 
-## 5. Type checker architecture (`src/typecheck.rs`)
+## 5. The checker
 
-You should re-review from this section onward.
-
-<<continue reviewing here>>
-
-### 5a. Public entry point
+New module `src/typecheck.rs`, entry point:
 
 ```rust
-pub fn typecheck(
-  asts: &[AST],
-  builtins: &[BuiltinSpec],
-) -> Result<TypecheckOutput, TypeError>;
+pub fn typecheck(asts: &[AST], builtins: &[BuiltinSpec]) -> Result<(), TypeError>;
 ```
 
-Called by:
-- `compiler::_compile_from_source` (after the new parser runs, before `compile_modules` → before the closure transform). One-line insertion at `compiler.rs:444`.
-- `wasm.rs` at the equivalent spot (after parsing, before `compile_modules` / `link`). One line at `wasm.rs:~205`.
+Called from `compiler::_compile_from_source` and the WASM entry point, after
+parsing, **before** `transform_closures_in_module`. (Modules are currently
+single-`"main"`; when real multi-module input arrives, the entry point takes
+`(module_name, asts)` pairs and the signature map keys on
+`(module, function)` — the design below already assumes that keying.)
 
-`TypecheckOutput` carries:
-- Per-function resolved `FnSig` keyed by `(module, function)`. This can be threaded into `compiler::Function` as new `param_types: Vec<Type>` and `return_type: Type` fields (used later for WASM signature generation and as documentation; not required for runtime today). For v1 we keep these fields optional / out of the serialized `Function` to avoid breaking existing `.slc` files.
-- Diagnostics (empty on success).
+### 5a. Two passes
 
-### 5b. The checking algorithm — two passes per module
+**Pass 1 — signatures.** Collect every top-level `DefineFn` into
+`HashMap<(module, name), Scheme>` without looking at bodies; add builtin
+signatures. Duplicate names are an error. Because all signatures exist before
+any body is checked, top-level mutual recursion needs no special handling.
 
-**Pass 1 — collect signatures.** Walk all top-level `AST::DefineFn`. Convert each `Function::params` (now `(String, TypeAst)` pairs), `Function::return_type` (or `Void` if elided), and `Function::bounds` (the `where` clause) into a `FnSig`, recording type variables and their trait bounds. Insert into a `HashMap<(String /*module*/, String /*fn*/), FnSig>`. Also insert builtin sigs from `BuiltinSpec`. Detect duplicate definitions.
+A `Scheme` is the declared signature with one `Rigid` var per declared type
+variable (bounds from the `where` clause). A `where` bound naming a variable
+that doesn't appear in the signature, or a trait name outside the known set,
+is an error.
 
-**Pass 2 — check bodies.** For each function, build an environment `Env` (a `HashMap<String, Type>` plus a parent pointer for lexical scopes) mapping param names → `Type` (from the sig, with bounds attached to the type vars). Walk each body expression under an *expected type* `Option<Type>` (bidirectional: synthesis + checking modes). Statements (non-final body expressions) are checked with `expected = None` and their type is discarded. The final body expression must unify with the function's declared return type.
+**Pass 2 — bodies.** For each function: bind params to their declared types
+(mentioning the rigid vars directly), then infer each body expression in
+order. Non-final expressions are statements — inferred, result discarded.
+The final expression unifies with the declared return type, **except** when
+the declared return type is `Void`: then the final expression is treated
+like a statement and its type is discarded. (This makes the elided-return
+form `(fn main () (std.+ 1 2))` legal; the runtime still leaves the value on
+the stack, but the type system won't let a caller use it.)
 
-**Bounds enforcement during body checking:** when a builtin call requires a trait on one of its type variables (e.g. `std.+` requires `A: Add`), the checker attaches the required trait as a bound to the fresh `Unbound` var instantiated for that call. If that var is *also* a function-level type variable (declared in the `where` clause), the checker verifies the required trait is among the declared bounds — if not, it errors with "type variable `A` is used in a position requiring trait `Add`, but only bounds `[Eq]` are declared". This is the explicit-bounds check: usage in the body cannot add bounds that the user didn't declare.
+### 5b. Inference is synthesis-only
 
-### 5c. Per-AST-node checking rules
+There is no bidirectional checking mode. Since every parameter and return
+type is annotated, a single `infer(env, expr) -> Result<Type, TypeError>`
+walker plus `unify` at the constraint points (let annotations, argument
+positions, `if` branches, return position) expresses everything. 
 
-| AST node | Synthesis (no expected) | Checking (with expected) |
-|---|---|---|
-| `Int(_)` | `Int` | unify expected with `Int` |
-| `Float(_)` | `Float` | likewise |
-| `String(_)` | `String` | likewise |
-| `Bool(_)` | `Bool` | likewise |
-| `Variable(name)` | lookup in `Env`; if a function name, lookup in sigs and produce `Fn(...)` (instantiate fresh vars if polymorphic) | unify |
-| `Let(name, ty, expr)` | synth `expr` → `T`; if `ty` given, unify `T` with parsed `ty`; bind `name: T` in env; result type = `T`. (Inference: if `ty` is `None`, bind with `T` directly.) | same; the `let` expression's value is the init expr's value |
-| `DefineFn(f)` | only valid at top level (Pass 1 records it) | n/a in expression position |
-| `Call(callable_expr, args)` | synth each arg; synth `callable_expr` → must unify with `(Fn (params) -> ret)`; unify arg types with params; result = `ret` | bidirectional: if expected given, push expected-ret into the callable's ret during synthesis |
-| `CallFixed(ident, args)` | resolve `ident` → sig; unify arg count and arg types with sig params (instantiate fresh vars if polymorphic); result = sig ret. For builtins with trait bounds, attach bounds to the fresh vars and check them at concrete-type unification time; verify any bounds on function-level type vars are declared in the `where` clause. | bidirectional: push expected-ret down |
-| `If(cond, then, els)` | synth `cond` → unify with `Bool`; synth `then` and `els` → unify them together; result = that type | unify `then`/`els` with expected |
-| `Block(body)` | synth each; result = last's synth | check each statement with `None`, check last with expected |
-| `Cell(expr)` | synth `expr` → `T`; result = `(Cell T)` | unify `(Cell T)` with expected |
-| `DerefCell(expr)` | synth `expr` → must unify with `(Cell T)`; result = `T` | n/a (unify result with expected) |
-| `SetCell(target, value)` | synth `target` → `(Cell T)`; synth `value` → unify with `T`; result = `T` (= the new value) | n/a |
-| `PartialApply(callable, args)` | synth `callable` → `(Fn (params) -> ret)`; unify each arg with leading params; result = `(Fn (remaining_params) -> ret)` | n/a |
-| `FunctionRef(m, f)` | lookup sig → `(Fn (params) -> ret)` (instantiated if polymorphic) | n/a |
+### 5c. Environments and name resolution
 
-The transform-produced variants (`Cell`, `DerefCell`, `SetCell`, `PartialApply`, `FunctionRef`) are in the AST enum but only produced by `closure.rs`. Since the checker runs **before** the transform, the checker won't see them in user code — but it *will* see them if anyone calls `typecheck` on post-transform AST. We implement their rules anyway (cheap), and they're needed if we later add a post-transform verification pass.
+`Env` is a lexically-scoped map from name to either a monomorphic `Type` or
+a `Scheme`. Resolution must mirror the compiler exactly:
 
-### 5d. Builtin call resolution (no overloads)
+- `Variable(name)`: env lookup (instantiate if a `Scheme`); else
+  current-module function (§1a — instantiate its `Scheme`); else error.
+- `CallFixed(Bare(name), args)`: env lookup **first** (a local closure —
+  its type must unify with a fresh `(Fn (argtypes...) -> ret)`), then
+  module function / builtin signature. Locals shadow module functions, same
+  as `compiler.rs`.
+- `CallFixed(Qualified(m, f), args)` / `FunctionRef(m, f)`: signature map.
 
-Each builtin has exactly one signature (with type vars and possibly trait bounds). At a `CallFixed` to a builtin:
-1. Instantiate the signature: replace each `Var(id)` in the signature with a fresh `Unbound` type variable, carrying the bounds from the builtin's `bounds` table.
-2. Unify each argument's synthesized type with the corresponding instantiated param type.
-3. The result is the instantiated `ret`.
-4. During unification, whenever a bounded `Unbound` var becomes concrete (via `Link`), immediately check the concrete type satisfies the bounds. If two bounded `Unbound` vars unify, merge bounds.
-5. **Bounds-vs-`where` check:** if a builtin-call's fresh var corresponds (via unification) to a function-level type variable declared in the `where` clause, verify that every bound the builtin requires is among the declared bounds. If the builtin requires `Add` but the `where` clause only declares `Eq`, error: "type variable `A` requires trait `Add` for `std.+` but only `[Eq]` is declared in `where`".
+### 5d. Inference rules
 
-For `idx` (special-cased, no general associated-type machinery):
-- Signature is `(A Int -> B)` with `A: Index` (internal). The checker implements the rule directly: when `A` unifies with `(List X)`, unify `B` with `X`; when `A` unifies with `String`, unify `B` with `String`. Since `Index` is internal-only, a user's `where` clause cannot reference it; instead, a function that uses `std.idx` on a type variable must declare no `Index` bound (the checker resolves it automatically). If the user *wants* to constrain `A` to "indexable types", they'd need a user-facing way to express that — deferred to a follow-up (see §9). For v1, a function like `(fn first (xs:A) ->B (std.idx xs 0))` would have `A` and `B` as free type vars with the `idx`-implied constraint resolved at each call site — meaning the function is only callable with concrete indexable types, and the `where` clause is silent on `Index`.
+| Node | Rule |
+|---|---|
+| `Int`/`Float`/`String`/`Bool` | the corresponding type |
+| `Variable`, `FunctionRef` | §5c |
+| `Let(name, ann, expr)` | `T = infer(expr)`; if `ann` present, `unify(T, resolve(ann))`; bind `name` (see §5f for when it's a `Scheme`); result `T` |
+| `DefineFn(f)` (expression position) | check the nested function (§5e); bind `f.name` to its `Scheme`; result: an instantiation of the scheme (matches the transform, which rewrites this node to `Let(name, closure)`) |
+| `Call(callee, args)` | `Tc = infer(callee)`; `unify(Tc, Fn(map(infer, args), fresh))`; result `fresh` |
+| `CallFixed(id, args)` | resolve per §5c; instantiate; arity check (respecting `rest` for variadics); unify each arg with its param (extra args unify with the instantiated `rest` type); result: instantiated return type. `std.idx` per §4b |
+| `If(c, t, e)` | `unify(infer(c), Bool)` — conditions are strictly `Bool` now, no truthiness; `unify(infer(t), infer(e))`; result: that type |
+| `Block(body)` | statements + last, same as a function body (but no `Void`-discard: a block's type is its last expression's type) |
+| `Cell`/`DerefCell`/`SetCell`/`PartialApply` | unreachable — these are produced only by the closure transform, which runs after checking. Internal error if encountered |
 
-### 5e. Type variables, instantiation, and generalization (plain explanation)
+### 5e. Nested functions
 
-- **Type variables in a `fn` signature** (e.g. `(fn id (a:A) ->A a)`): `A` is a *schema parameter* of `id`. The signature is `forall A. (Fn (A) -> A)`. Every *call* to `id` gets a *fresh copy* of `A` — so `(id 5)` instantiates `A := fresh1`, unifies `fresh1` with `Int`, and the result is `Int`. This is "instantiation": copy the schema, replacing each schema-level type var with a fresh unbound var (carrying its declared bounds).
+Nested `fn` is how closures are written, so the checker handles `DefineFn`
+in expression position fully:
 
-- **Type variables in `let` bindings** (e.g. `(let id (fn id (a:A) ->A a))`): the inferred type of the init expr may contain unbound type vars. Should `id` be polymorphic at each use site after the `let`? In ML this is "let-polymorphism" / "let-generalization": yes, `id` becomes `forall A. (Fn (A) -> A)` and each use instantiates fresh.
+- **Type-variable scoping is lexical.** A type name in the nested signature
+  that matches an in-scope type variable refers to that (rigid) variable —
+  so a nested fn can capture an outer `a:A` and mention `A` itself. Names
+  not already in scope become the nested fn's own rigid vars. A `where`
+  clause may only bound the fn's *own* vars; bounding an enclosing one is an
+  error.
+- The body is checked in a child scope of the *enclosing* environment
+  (captures are just env lookups), with params bound as usual.
+- The nested fn's **own name is not bound inside its own body**: nested
+  self-recursion doesn't survive the closure transform today (the function
+  is lifted under a mangled name, so a self-call would resolve to an
+  unrelated top-level name). The checker rejects what the runtime can't run;
+  supporting it is a follow-up. Recursion works via top-level functions.
+- The resulting `Scheme` generalizes over the fn's own rigid vars only —
+  enclosing rigid vars stay fixed inside it.
 
-  The **value restriction** is a rule that says: only generalize a `let`-bound variable if the init expression is a *syntactic value* (a literal, a function definition, a variable lookup, a `Cell` wrapping — basically anything that doesn't *call* a function or otherwise produce a mutable result that could observe the type variable in a problematic way). The reason this matters in SafeLisp: we have `Cell`, which is mutable. If you write `(let x (some_cell_of_A))` and then use `x` as both `(Cell Int)` and `(Cell String)`, you'd be unsound (the same cell can't hold both). The value restriction prevents generalizing `let`-bound variables whose init expr involves mutation or calls.
+### 5f. Generalization: `DefineFn` only
 
-  **What this means concretely for our checker:** When checking `(let name init)`:
-  1. Synth `init` → type `T`.
-  2. If `init` is a syntactic value (we define a small `is_value` predicate: `AST::Int/Float/String/Bool`, `AST::DefineFn`, `AST::Variable`, `AST::FunctionRef`, `AST::Cell(...)` of a value — *not* `Call`, `CallFixed`, `If`, `Block`, `DerefCell`, `SetCell`, `PartialApply`), then generalize `T`: collect the unbound type vars in `T` that are *not* free in the enclosing environment, and wrap them as schema parameters. Each use of `name` instantiates them fresh.
-  3. If `init` is not a syntactic value, do *not* generalize — `name` gets the monomorphic `T` and uses of `name` all share the same type vars (so the first use that unifies them with a concrete type fixes them for all subsequent uses).
+A `let` binding is polymorphic **only when its initializer is syntactically
+a `DefineFn`** — then the bound name gets the function's declared `Scheme`,
+and each use instantiates fresh (so `(let id (fn id (a:A) ->A a))` used at
+`Int` and `String` both work). Every other initializer binds a monomorphic
+type; its inference variables are shared across uses and fixed by the first
+unification.
 
-  This is the standard ML value restriction, lightly adapted. It's a modest amount of code (~30 LOC for the generalization + instantiation helpers) and gives us proper higher-order code like `(let id (fn id (a:A) ->A a)) (pair (id 5) (id true))` typing as `(Int, Bool)` rather than erroring.
+This replaces ML-style let-generalization and the value restriction
+wholesale. It's sound by construction — the only schemas that exist are
+declared ones; nothing inferred is ever generalized. In particular
+`(let c (std.cell (std.list)))` is monomorphic, so the classic
+polymorphic-mutable-cell unsoundness cannot arise. And nothing of value is
+lost: with mandatory annotations, function definitions are the only
+polymorphic values in the language.
 
-- **No cross-function generalization.** Functions don't infer their signatures (you mandated annotations), so generalization only happens at `let` bindings. This keeps the inference engine small: instantiation + unification + the `let`-generalization rule, no full HM.
+### 5g. No unresolved inference variables
 
-### 5f. `Void` vs uninitialized
+At the end of checking each function body (nested functions included), **no
+`Unbound` inference variable may remain** — every one must have been `Link`ed
+to a fully concrete type. If any survives, it's an error: the program left a
+type genuinely undetermined.
 
-Since the checker runs before the closure transform, the "uninitialized local" concern (interpreter fills locals with `Void`) is invisible at the source level — every local is bound by `let` before use, and the checker enforces "use after bind" naturally via `Env`. The `Void` type is just a normal type that a function may declare it returns (or implicitly, by eliding `-> Type`) or that a `let` may bind (rare but legal). No definite-assignment pass is needed at this layer.
+```lisp
+(fn main () ->Int
+  (let empty (std.list))   # empty : (List ?A) — ?A never determined → error
+  (std.len empty))
+```
+
+The fix is an annotation: `(let empty:(List Int) (std.list))`.
+
+This is deliberately conservative (like Rust's "type annotations needed" and
+Haskell's ambiguity error), on the theory that an undetermined type may come
+to mean something once codegen consumes types. Two things make it cheap here
+that make it painful elsewhere:
+
+- **No defaulting needed.** The literal-driven numeric ambiguity that forces
+  Haskell/Rust to have a defaulting layer doesn't exist — the lexer types `1`
+  as `Int` and `1.0` as `Float` from the start. The only vars that can go
+  unresolved are things like the element type of a never-populated `std.list`
+  or an unused alias of a polymorphic function.
+- **The rule is strict, and therefore simple.** It applies everywhere,
+  including expressions in statement position whose value is discarded — a
+  discarded expression with an ambiguous type is dead code. This is *one*
+  scan for remaining `Unbound` vars, rather than tracking which positions are
+  "observed." The check runs per function; because inferred types never
+  escape a function (§5c) and generalized schemes quantify over `Rigid` vars,
+  not `Unbound` ones (§5f), every leftover `Unbound` is genuinely a
+  monomorphic type the body failed to pin down.
+
+The error uses each surviving var's `origin` hint (§3a) to name what to
+annotate. One current limitation: annotations exist only on `let`, so an
+ambiguous expression in a non-`let` position (always dead code under this
+rule) can't be annotated in place — you delete it. An expression-level
+ascription form is a follow-up if that ever becomes a real need.
 
 ---
 
-## 6. Error reporting
+## 6. Errors
 
-`TypeError { message: String, context: Vec<String> }` where `context` is a stack of "while checking function `main`", "while checking parameter `x` of `id`", "while checking call to `std.+`". No byte offsets in v1 (the new lexer captures spans, so we can add span-based locations in a follow-up). Errors look like:
+```rust
+pub struct TypeError { pub message: String, pub context: Vec<String> }
+```
+
+`context` is a stack pushed while walking: "in function `main`", "while
+checking call to `std.+`", "while checking argument 1". Rendered:
 
 ```
 TypeError: expected `Int`, got `String`
-  while checking call to `std.+`
-  while checking argument 1
+  while checking argument 1 of call to `std.+`
   in function `main`
-```
 
-Trait-bound failures look like:
-
-```
-TypeError: type `String` does not implement trait `Add`
+TypeError: type `String` does not satisfy trait `Add`
   while checking call to `std.+`
   in function `main`
-```
 
-Missing-bounds failures look like:
-
-```
-TypeError: type variable `A` is used in a position requiring trait `Add`, but only `[Eq]` is declared in `where`
+TypeError: type variable `A` requires trait `Add` here, but its bounds are only `[Eq]`
+  add `Add` to the `where` clause of `double`
   while checking call to `std.+`
-  in function `add2`
+  in function `double`
 ```
+
+The lexer records spans; threading them into `AST`/`TypeAst`/`TypeError` is
+a follow-up, not v1.
 
 ---
 
-## 7. Pipeline integration
+## 7. Pipeline and files touched
 
 ```
 source
-  ↓ parser (custom, new)              (extended for type syntax; replaces atoms)
-  ↓ typecheck::typecheck   ←── NEW    (errors halt)
-  ↓ closure::transform_closures_in_module   (unchanged, trusted)
-  ↓ compiler::compile_module  → Package   (interpreter backend)
-  ↓ wasm::compile           → wasm::Module  (WASM backend, runs same checker)
+  ↓ parser (new: hand-written, typed syntax, # comments)
+  ↓ typecheck::typecheck            ← NEW; errors halt
+  ↓ closure::transform_closures_in_module   (unchanged)
+  ↓ compiler::compile_module / wasm::compile (unchanged codegen)
 ```
 
-Files touched:
-- `src/parser.rs` — **rewritten** as a hand-written recursive-descent parser with lexer; produces `AST` + `TypeAst` + `Bound` + `TraitRef`; extends `Function` (params now `(String, TypeAst)`, return type `Option<TypeAst>`, bounds `Vec<Bound>`) and `AST::Let` (optional `TypeAst`).
-- `Cargo.toml` — remove `atoms` dependency.
-- `src/typecheck.rs` — NEW module: `Type`, `FnSig`, `TypeVar`, `Trait`, `Bound`, unification, instantiation, `let`-generalization, the bidirectional walker, builtin signature table, bounds-vs-`where` enforcement.
-- `src/builtins.rs` — extend `BuiltinSpec` with `signature: BuiltinSignature`; populate the table for all existing builtins (`default_builtins()`).
-- `src/compiler.rs` — update `compile_function` to read `params: Vec<(String, TypeAst)>` (just take the `.0` of each pair for the local-name mapping); call `typecheck::typecheck` in `_compile_from_source`.
-- `src/wasm.rs` — update similarly for the new `Function`/`AST::Let` shape; call `typecheck::typecheck` after parsing.
-- `src/closure.rs` — update for new `Function`/`AST::Let` shape (mechanical: thread the type annotations and bounds through the transform — when lifting a function, copy its param types, return type, and bounds onto the lifted `Function`; when cell-wrapping a captured param, the captured param's type becomes `(Cell T)`).
+- `src/parser.rs` — rewritten (lexer + recursive descent); `TypeAst`,
+  `Bound`; `Function`/`AST::Let` extended; `set!` form removed.
+- `src/typecheck.rs` — new: types, unification, traits, schemes, walker,
+  builtin-signature conversion.
+- `src/builtins.rs` — `std.cell`/`std.get`/`std.set!`; `signature` field on
+  `BuiltinSpec` populated for everything.
+- `src/compiler.rs` — first-class function refs (§1a); read the new
+  `Function` shape (use `.0` of each param pair); call `typecheck` in
+  `_compile_from_source`.
+- `src/wasm.rs` — new `Function` shape; call `typecheck` after parsing.
+- `src/closure.rs` — thread the new `Function` fields through lifting
+  (capture params get `None` annotations); otherwise unchanged.
 - `src/lib.rs` — `pub mod typecheck;`.
-- `tests/test_eval.rs` and existing interpreter/builtins/closure tests — add type annotations and `where` clauses to every existing test source so they still compile under the mandatory-annotation rule. (Bulk of the migration work; see step 8.)
-- `TODO.md` — record the design + follow-ups (post-transform type verification, WASM typed signatures, span-based error locations, user-facing `Index` bound syntax).
-
-### Closure-transform interaction
-
-The closure transform (`closure.rs`) lifts nested functions and cell-wraps captured variables. It must be updated to preserve type annotations:
-- A lifted function's `params` becomes `[captures..., original_params...]`. Each capture is a `(Cell T)` (because captured vars are cell-wrapped), so the lifted function's param types are `[(Cell T_cap)..., T_orig...]`. The lifted function's return type is the same as the original. The lifted function's bounds are the same as the original (captures don't introduce new bounds — they're concrete `(Cell T)` types).
-- `patch_cell_access` rewrites uses of captured names to `DerefCell(Variable(name))` — this is transparent to types: `DerefCell((Cell T)) = T`.
-- The closure expression (`PartialApply(FunctionRef(...), captures)`) produces a `(Fn (remaining_params) -> ret)` type, which is what the source-level let-binding of the closure should have inferred anyway.
-
-Because the type checker runs *before* the transform, the transform's correctness w.r.t. types is a separate (mild) proof obligation. For v1 we trust it. A follow-up task can run the checker again post-transform to verify, if desired.
+- Tests — migrate `set!` uses (§1b), then annotate the whole corpus (§8
+  step 8).
 
 ---
 
-## 8. Implementation order (each step independently committable)
+## 8. Implementation order
 
-1. **Custom lexer + parser.** Replace `atoms`-based parsing. Produces existing `AST` (without type annotations yet, to keep this step reviewable) + new `TypeAst`/`Bound`/`TraitRef` enums (unused initially). `#` line comments supported. All existing call sites and tests pass unchanged. Unit tests for the new parser matching the old `atoms` behavior on the existing corpus.
-2. **Type-syntax parsing.** Extend the parser to handle `:` in params/let, `->` in fn return types, `(List Int)` / `(Cell T)` / `(Fn (...) -> ...)` type applications, and `where` clauses. Extend `Function` (params, return type, bounds) and `AST::Let`. Update `closure.rs`, `compiler.rs`, `wasm.rs` for the new field shapes (mechanical; ignore the type info for now). Existing tests still pass (no annotations yet, so return types are `None` → default `Void`, params have... wait, params are now *mandatory* annotated, so existing tests will fail to parse. We have two options: (a) make annotations mandatory only after step 6, gating with a flag; (b) allow unannotated params during migration and treat them as fresh unbound type vars. Option (b) is cleaner: an unannotated param gets a fresh type var, inferred from the body. This effectively makes annotations optional *during migration* and we tighten to mandatory at step 6.) Go with (b): unannotated params infer fresh vars; step 6 flips the parser to reject unannotated params.
-3. **`typecheck` skeleton: `Type`, `FnSig`, `TypeVar`, `Bound`, `Trait`, unification, instantiation.** Pure data structures + unifier + instantiation. No integration yet. Unit tests on the unifier (unify `Int` with `Int`, `A` with `Int`, `(List A)` with `(List Int)`, `(Fn (A) -> A)` with `(Fn (Int) -> Int)`, failures). Bounds merging on var-var unification.
-4. **Traits + trait membership table.** `Trait` enum, `satisfies(Type, Trait) -> bool`, bounds-checking at concrete-type unification. Unit tests.
-5. **Builtin signature table.** Extend `BuiltinSpec` with `signature`; populate `default_builtins()` with sigs for every existing builtin. Existing code ignores the new field (it only reads `num_params`).
-6. **The checker core: bidirectional walker + bounds enforcement.** Implement the walker for the un-transformed AST. Implement the bounds-vs-`where` check (§5b, §5d). Unit tests on small snippets (`(fn id (a:A) ->A a)` checks; `(fn main () ->Int (std.+ 1 "x"))` fails with trait error; `(fn add2 (a:A) ->A where ((A Add)) (std.+ a a))` checks; `(fn add2 (a:A) ->A (std.+ a a))` fails with missing-bounds error; `(fn main () ->Int (std.map (std.range 0 5) (fn sq (x:Int) ->Int (std.+ x x))))` checks). Includes `let`-generalization and instantiation.
-7. **Wire into compiler + wasm entry points.** One-line calls in `_compile_from_source` and the WASM entry. Existing test corpus will now fail because nothing has annotations yet — gate the checker behind a `typecheck: bool` flag temporarily (env var or compile-time feature) so we can land the wiring without breaking everything.
-8. **Migrate the test corpus.** Add annotations and `where` clauses to every test source in `interpreter.rs::test`, `tests/test_eval.rs`, `builtins.rs::test`, `closure.rs::test`. Flip the parser to reject unannotated params (make annotations truly mandatory). Flip the `typecheck` flag to "on". This is the largest mechanical step.
-9. **Polish: span-based error messages, error-message quality.** Optional follow-up; can land after step 8.
-10. **Docs + TODO update.**
+Each step lands green on its own.
 
-### Estimated effort per step (rough)
-
-| Step | Files | LOC-ish | Risk |
-|---|---|---|---|
-| 1 | parser.rs (rewrite), Cargo.toml | ~400 | medium (matching old parser behavior) |
-| 2 | parser.rs, closure.rs, compiler.rs, wasm.rs | ~120 | low |
-| 3 | new typecheck.rs | ~300 | medium (unifier correctness) |
-| 4 | typecheck.rs | ~100 | low |
-| 5 | builtins.rs | ~80 | low |
-| 6 | typecheck.rs | ~500 | medium (bidirectional walker + bounds + let-gen) |
-| 7 | compiler.rs, wasm.rs | ~20 | low |
-| 8 | all test files | large, mechanical | low but tedious |
-| 9 | typecheck.rs, parser.rs | ~150 | low |
-| 10 | TODO.md | small | none |
+1. **First-class function references** (§1a). Compiler + parser + tests.
+   Pure untyped-language feature.
+2. **Cell builtins; remove `set!`** (§1b). Add the three builtins with
+   tests, migrate the ~15 `set!` call sites, delete the special form.
+3. **Parser rewrite.** Hand-written lexer + parser replacing `atoms`,
+   behavior-compatible on the existing corpus (plus `#` comments and spans).
+   No type syntax yet. Differential-test against the old parser's output on
+   the existing test sources before deleting the `atoms` dependency.
+4. **Type syntax.** `:` annotations (optional at this stage — unannotated
+   params allowed and simply unchecked until step 7), `->` return types,
+   type applications, `where` clauses. New `Function`/`Let` shapes threaded
+   through `closure.rs`/`compiler.rs`/`wasm.rs` mechanically.
+5. **Checker core.** `Type`, `TypeVar`, `unify` (occurs check, bounds,
+   rigid rules), traits, instantiation. Pure functions, heavy unit tests:
+   `A ~ Int`, `(List A) ~ (List Int)`, occurs-check failure, rigid-vs-Int
+   failure, bounds merge, missing-bound-on-rigid failure.
+6. **Builtin signature table** (§4). Inert until the walker exists.
+7. **The walker** (§5) + wiring into both entry points behind a temporary
+   flag (env var), since the corpus isn't annotated yet. Unit tests per §5d
+   rule, plus: polymorphic id at two types, missing `where` bound, nested fn
+   capturing an outer type var, `std.map` with a top-level fn ref, `Void`
+   discard, `if` with non-Bool condition rejected.
+8. **Migrate the corpus.** Annotate every test source; flip params to
+   mandatory in the parser; remove the flag — checker always on. Any test
+   relying on truthy non-`Bool` `if` conditions gets fixed here.
+9. **Docs, TODO, cleanup.**
 
 ---
 
-## 9. Open questions / follow-ups (not blocking v1)
+## Open questions
 
-1. **User-facing `Index` bound syntax.** v1 makes `Index` internal-only (resolved automatically by `std.idx`, not writable in `where`). If users want to write functions that are polymorphic over "any indexable type", they need a way to declare an `Index` bound. Defer until v1 lands; the fix is to promote `Index` to a user-facing trait with an associated type (`Output`), which requires associated-type machinery in the checker.
-2. **Closure-transform type verification.** v1 trusts the transform. A follow-up can run the checker on post-transform AST to verify it preserves types.
-3. **WASM typed signatures.** The WASM backend currently emits uniform `(i64, i32)×n → (i64, i32)` signatures. With type info available post-checker, we could emit proper typed signatures (and eventually drop the tag for known-typed values). Defer.
-4. **Span-based error locations.** The new lexer captures spans; threading them through `AST` and `TypeAst` to `TypeError` is a clean follow-up.
-5. **User-defined types.** The type syntax already supports `Named(String)` for arbitrary type names; extending the checker with user-defined algebraic types / records is a larger follow-up.
-6. **`Eq` trait membership for `Cell`/`List`.** v1 says all `(Cell A)`/`(List A)` are `Eq` (matches runtime). Tightening to "element must be `Eq`" is a small follow-up if desired.
-7. **Associated types for `Index`/`Slice`.** v1 special-cases `idx`. Generalizing to associated-type traits is a follow-up if more associated-type-like builtins appear.
+1. **`Eq` breadth.** v1: every type satisfies `Eq`, including `(Cell A)`,
+   `(List A)` with any element, and function values (matches the runtime's
+   structural `==`). Tightening to "elements must be `Eq`" is a small change
+   later.
+2. **Indexing polymorphism.** `std.idx` is special-cased and functions can't
+   be generic over "indexable" types. Promoting `Index` to a real trait
+   needs associated-type machinery (`Index::Output`); do this only if more
+   output-type-depends-on-input builtins appear.
+3. **`Function.params` representation.** The plan keeps
+   `Vec<(String, Option<TypeAst>)>` permanently, with the parser enforcing
+   mandatoriness for surface code and the closure transform filling `None`
+   for synthesized capture params. The alternative — a required `TypeAst`
+   with the transform synthesizing placeholder syntax — was rejected as the
+   transform can't know capture types, but revisit if the `Option` proves
+   annoying downstream.
+
+## Follow-ups (recorded, not scheduled)
+
+- Span-based error locations (lexer already captures spans).
+- Post-transform verification pass (re-run the checker over transformed AST;
+  requires rules for `Cell`/`DerefCell`/`PartialApply`).
+- Typed WASM signatures; eventually tag elision for known-typed values.
+- Closure transform simplification: captures no longer need cell-wrapping
+  (bindings are immutable), so captures could be passed as plain values.
+- Remove the now-unreachable `AST::SetCell` / `Instruction::SetCell`.
+- Nested self-recursion (fix the transform's name resolution, then bind the
+  fn's own name in its body env).
+- Expression-level type ascription (e.g. `(the (List Int) expr)`) so an
+  ambiguous type (§5g) can be resolved outside a `let`. Only needed if a
+  non-dead ambiguous expression ever arises.
+- Opaque nominal types for host handles (e.g. `Rng` instead of `(Cell Int)`)
+  if letting users `std.set!` an RNG's state proves to be a footgun.
+- User-defined types; trait implementations for them.
+- Preludes / import-into-namespace (so `+` can be used unqualified).
+
+---
+
+## Appendix A: Extending toward user-defined traits and types
+
+Notes on how the v1 design scales if SafeLisp code is later allowed to define
+its own traits and types. Not scheduled; recorded so v1 choices stay
+compatible with it. The load-bearing fact is *why* v1 traits are cheap:
+**they are erased constraints.** The checker only ever asks "may `A` be `Int`
+here?" — it never decides *which code runs*. The polymorphic behavior of `+`
+et al. lives in the builtins' runtime tag-dispatch, which predates the type
+system. Everything below is a question of whether that erasure property
+survives.
+
+### A1. User-defined types come first
+
+Marker/constraint traits (below) are nearly useless without user-defined
+types, because the set of types is otherwise closed (`Int`, `Float`,
+`String`, `Bool`, `List`, `Cell`, `Fn`) and there's nothing to classify.
+User-defined algebraic/record types are the larger, prerequisite feature and
+create the actual demand for user traits. Sequencing: types first, then
+traits.
+
+### A2. Tier 1 — constraint traits (no methods): cheap, erased
+
+`(trait Ord)` + `(impl Ord Int)`, usable in `where` clauses. Implementation
+against the v1 plan is mechanical:
+
+- `Trait` stops being a closed Rust enum and becomes an interned name.
+- The hardcoded `satisfies` table becomes a map populated by a pass-0 walk
+  over `trait`/`impl` forms.
+- Coherence check: no duplicate `impl` for the same `(trait, type)`.
+
+Nothing downstream of the checker changes — still fully erased. Roughly a day
+or two on top of v1. Keeping all `Trait` handling funneled through a single
+`satisfies` function in v1 (rather than matching the enum throughout the
+checker) keeps this a one-file change.
+
+### A3. Tier 2 — traits with methods: the cliff (breaks erasure)
+
+`(trait Show (fn show (a:Self) ->String))` with per-type impls. Checker-side
+additions are moderate and reuse v1 machinery: `Self` is a distinguished
+rigid var, method signatures are `Scheme`s, calling `(show x)` is
+instantiation + unification, plus coherence checks (impl signature matches
+declaration; no overlapping impls). Call it a doubling of `typecheck.rs`,
+conceptually nothing new.
+
+The real cost is that `(show a)` in a generic body where `a:A` is rigid
+**cannot be resolved at compile time** — the checker must now influence which
+code runs, which breaks erasure and forces a dispatch strategy (A4). This is
+codegen work and belongs with the deferred bytecode phase.
+
+### A4. Dispatch strategy for method-bearing traits
+
+Three options, in increasing SafeLisp-fit and decreasing precision:
+
+- **Monomorphization** (Rust): specialize each generic function per concrete
+  instantiation. Whole-program transform, heavy codegen. Recommend ruling
+  out for SafeLisp.
+- **Dictionary passing** (Haskell): generic functions gain hidden leading
+  parameters carrying the impl's function refs; `(show a)` calls through the
+  dictionary. This is structurally *the same trick as the closure transform*
+  — an AST→AST pass adding hidden leading params and threading values via
+  `PartialApply`/`FunctionRef`; a dictionary can be a list of function refs.
+  No new bytecode instructions, but it changes generated code. Likely the
+  right path precisely because its twin already exists in `closure.rs`.
+- **Runtime tag dispatch**: a package-level table keyed on
+  `(trait, method, value-tag)`, consulted at call time — the smallest change
+  and how existing builtins already behave, but coarse: tags can't
+  distinguish `(List Int)` from `(List String)`, so impls are per-tag and
+  dispatch keys only on the receiver.
+
+### A5. Two smaller cliffs to avoid stumbling into
+
+- **Conditional impls** — `(impl Eq (List A) where ((A Eq)))`. Recursive
+  membership ("is `(List (List Int))` Eq?") turns `satisfies` into a small
+  constraint solver with termination concerns. Open question 2 (tightening
+  `Eq`) is secretly this feature; if pursued, do it as one hardcoded
+  recursive case, not a general mechanism.
+- **Associated types** — open question 3 (`Index::Output`). Adds type-level
+  functions and projection normalization to the unifier; the single biggest
+  jump in checker complexity here.
+
+### A6. Does v1 constrain any of this?
+
+No. Rigid vars carrying bound sets, instantiation-time bound checking, and
+schemes are exactly the pieces a method-bearing trait system reuses; v1
+paints no corners. The only forward-looking hygiene worth observing now is
+routing trait membership through one `satisfies` function so the
+enum→interned-name swap (A2) stays local.
