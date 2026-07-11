@@ -1,9 +1,11 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use wasm_encoder::{
-  BlockType, CodeSection, EntityType, ExportKind, ExportSection, Function, FunctionSection, Ieee64,
-  ImportSection, Module, TypeSection, ValType,
+  BlockType, CodeSection, ConstExpr, ElementSection, Elements, EntityType, ExportKind,
+  ExportSection, Function, FunctionSection, Ieee64, ImportSection, Module, RefType, TableSection,
+  TableType, TypeSection, ValType,
 };
 
 use crate::parser::{self, Identifier, AST};
@@ -15,6 +17,7 @@ pub const TAG_INT: i32 = 0;
 pub const TAG_FLOAT: i32 = 1;
 pub const TAG_BOOL: i32 = 2;
 pub const TAG_VOID: i32 = 3;
+pub const TAG_FUNCTION_REF: i32 = 4;
 
 /// A SafeLisp value as seen on the Rust side (for host functions). The host
 /// receives `&[SLValue]` and returns `SlValue`. The WASM-side representation
@@ -26,6 +29,7 @@ pub enum SLValue {
   Float(f64),
   Bool(bool),
   Void,
+  FunctionRef(u32),
 }
 
 impl SLValue {
@@ -36,6 +40,7 @@ impl SLValue {
       SLValue::Float(_) => TAG_FLOAT,
       SLValue::Bool(_) => TAG_BOOL,
       SLValue::Void => TAG_VOID,
+      SLValue::FunctionRef(_) => TAG_FUNCTION_REF,
     }
   }
 
@@ -46,6 +51,7 @@ impl SLValue {
       SLValue::Float(f) => f.to_bits() as i64,
       SLValue::Bool(b) => i64::from(*b),
       SLValue::Void => 0,
+      SLValue::FunctionRef(index) => i64::from(*index),
     }
   }
 
@@ -56,6 +62,7 @@ impl SLValue {
       TAG_FLOAT => SLValue::Float(f64::from_bits(payload as u64)),
       TAG_BOOL => SLValue::Bool(payload != 0),
       TAG_VOID => SLValue::Void,
+      TAG_FUNCTION_REF => SLValue::FunctionRef(payload as u32),
       other => panic!("unknown SafeLisp value tag: {}", other),
     }
   }
@@ -274,7 +281,9 @@ impl<'b> ModuleCompiler<'b> {
     self.emit_type_section(&mut module);
     self.emit_import_section(&mut module);
     self.emit_function_section(&mut module, num_imports);
+    self.emit_table_section(&mut module, num_imports);
     self.emit_export_section(&mut module, num_imports);
+    self.emit_element_section(&mut module, num_imports);
     self.emit_code_section(&mut module, asts, num_imports)?;
     Ok(module.finish())
   }
@@ -324,6 +333,31 @@ impl<'b> ModuleCompiler<'b> {
       funcs.function(ty);
     }
     module.section(&funcs);
+  }
+
+  fn emit_table_section(&self, module: &mut Module, num_imports: u32) {
+    let function_count = num_imports + self.functions.len() as u32;
+    let mut tables = TableSection::new();
+    tables.table(TableType {
+      element_type: RefType::FUNCREF,
+      table64: false,
+      minimum: u64::from(function_count),
+      maximum: Some(u64::from(function_count)),
+      shared: false,
+    });
+    module.section(&tables);
+  }
+
+  fn emit_element_section(&self, module: &mut Module, num_imports: u32) {
+    let function_count = num_imports + self.functions.len() as u32;
+    let indices: Vec<u32> = (0..function_count).collect();
+    let mut elements = ElementSection::new();
+    elements.active(
+      None,
+      &ConstExpr::i32_const(0),
+      Elements::Functions(Cow::Owned(indices)),
+    );
+    module.section(&elements);
   }
 
   /// Emit the export section: export each defined function by name.
@@ -381,6 +415,9 @@ impl<'b> ModuleCompiler<'b> {
   fn discover_expr(&mut self, ast: &AST) -> Result<(), String> {
     match ast {
       AST::Int(_) | AST::Float(_) | AST::Bool(_) | AST::Variable(_) => {}
+      AST::FunctionRef(module, name) => {
+        self.resolve_builtin_for_discovery(&Identifier::Qualified(module.clone(), name.clone()))?;
+      }
       AST::Let(_, expr) => self.discover_expr(expr)?,
       AST::If(cond, then, els) => {
         self.discover_expr(cond)?;
@@ -394,6 +431,20 @@ impl<'b> ModuleCompiler<'b> {
       }
       AST::CallFixed(ident, args) => {
         self.resolve_builtin_for_discovery(ident)?;
+        self.type_index(Signature {
+          params: slval_param_types(args.len() as u32),
+          results: SLVAL.to_vec(),
+        });
+        for arg in args {
+          self.discover_expr(arg)?;
+        }
+      }
+      AST::Call(callable, args) => {
+        self.type_index(Signature {
+          params: slval_param_types(args.len() as u32),
+          results: SLVAL.to_vec(),
+        });
+        self.discover_expr(callable)?;
         for arg in args {
           self.discover_expr(arg)?;
         }
@@ -553,7 +604,7 @@ impl<'b> ModuleCompiler<'b> {
     next_pair: &mut u32,
   ) -> Result<(), String> {
     match ast {
-      AST::Int(_) | AST::Float(_) | AST::Bool(_) | AST::Variable(_) => {}
+      AST::Int(_) | AST::Float(_) | AST::Bool(_) | AST::Variable(_) | AST::FunctionRef(_, _) => {}
       AST::Let(name, expr) => {
         self.count_let_locals(expr, locals, next_pair)?;
         locals.push((name.clone(), *next_pair));
@@ -570,6 +621,12 @@ impl<'b> ModuleCompiler<'b> {
         }
       }
       AST::CallFixed(_, args) => {
+        for arg in args {
+          self.count_let_locals(arg, locals, next_pair)?;
+        }
+      }
+      AST::Call(callable, args) => {
+        self.count_let_locals(callable, locals, next_pair)?;
         for arg in args {
           self.count_let_locals(arg, locals, next_pair)?;
         }
@@ -613,13 +670,24 @@ impl<'b> ModuleCompiler<'b> {
         func.instructions().i32_const(TAG_BOOL);
       }
       AST::Variable(name) => {
-        let pair_idx = self
-          .resolve_local(locals, name)
-          .ok_or_else(|| format!("unbound variable: {}", name))?;
-        let pl = Self::payload_local(pair_idx, num_params);
-        let tl = Self::tag_local(pair_idx, num_params, num_lets);
-        func.instructions().local_get(pl);
-        func.instructions().local_get(tl);
+        if let Some(pair_idx) = self.resolve_local(locals, name) {
+          let pl = Self::payload_local(pair_idx, num_params);
+          let tl = Self::tag_local(pair_idx, num_params, num_lets);
+          func.instructions().local_get(pl);
+          func.instructions().local_get(tl);
+        } else if let Some(target_def) = self.function_names.get(name) {
+          func
+            .instructions()
+            .i64_const(i64::from(num_imports + target_def));
+          func.instructions().i32_const(TAG_FUNCTION_REF);
+        } else {
+          return Err(format!("unbound variable: {}", name));
+        }
+      }
+      AST::FunctionRef(module, name) => {
+        let index = self.resolve_function_ref(module, name, num_imports)?;
+        func.instructions().i64_const(i64::from(index));
+        func.instructions().i32_const(TAG_FUNCTION_REF);
       }
       AST::Let(name, expr) => {
         self.compile_expr(
@@ -721,6 +789,17 @@ impl<'b> ModuleCompiler<'b> {
         num_imports,
         func,
       )?,
+      AST::Call(callable, args) => self.compile_call_dynamic(
+        callable,
+        args,
+        locals,
+        next_pair,
+        num_params,
+        num_lets,
+        def_index,
+        num_imports,
+        func,
+      )?,
       x => {
         return Err(format!(
           "WASM backend does not yet support this form: {:?}",
@@ -745,6 +824,21 @@ impl<'b> ModuleCompiler<'b> {
     num_imports: u32,
     func: &mut Function,
   ) -> Result<(), String> {
+    if let Identifier::Bare(name) = ident {
+      if self.resolve_local(locals, name).is_some() {
+        return self.compile_call_dynamic(
+          &AST::Variable(name.clone()),
+          args,
+          locals,
+          next_pair,
+          num_params,
+          num_lets,
+          def_index,
+          num_imports,
+          func,
+        );
+      }
+    }
     let (module_name, func_name) = match ident {
       Identifier::Bare(n) => (None, n.clone()),
       Identifier::Qualified(m, n) => (Some(m.clone()), n.clone()),
@@ -789,6 +883,72 @@ impl<'b> ModuleCompiler<'b> {
     }
     func.instructions().call(callee_index);
     Ok(())
+  }
+
+  #[allow(clippy::too_many_arguments)]
+  fn compile_call_dynamic(
+    &mut self,
+    callable: &AST,
+    args: &[AST],
+    locals: &mut Vec<(String, u32)>,
+    next_pair: &mut u32,
+    num_params: u32,
+    num_lets: u32,
+    def_index: u32,
+    num_imports: u32,
+    func: &mut Function,
+  ) -> Result<(), String> {
+    for arg in args {
+      self.compile_expr(
+        arg,
+        locals,
+        next_pair,
+        num_params,
+        num_lets,
+        def_index,
+        num_imports,
+        func,
+      )?;
+    }
+    self.compile_expr(
+      callable,
+      locals,
+      next_pair,
+      num_params,
+      num_lets,
+      def_index,
+      num_imports,
+      func,
+    )?;
+    func.instructions().drop();
+    func.instructions().i32_wrap_i64();
+    let signature = Signature {
+      params: slval_param_types(args.len() as u32),
+      results: SLVAL.to_vec(),
+    };
+    let type_index = self.type_indices[&signature];
+    func.instructions().call_indirect(0, type_index);
+    Ok(())
+  }
+
+  fn resolve_function_ref(
+    &self,
+    module: &str,
+    name: &str,
+    num_imports: u32,
+  ) -> Result<u32, String> {
+    if module == "main" {
+      return self
+        .function_names
+        .get(name)
+        .map(|index| num_imports + index)
+        .ok_or_else(|| format!("unknown function: {module}.{name}"));
+    }
+    self
+      .used_imports
+      .get(&(module.to_string(), name.to_string()))
+      .map(|import| import.func_index)
+      .ok_or_else(|| format!("unknown function: {module}.{name}"))
   }
 
   /// Resolve a variable name to its local pair index (most recent binding wins).
@@ -939,6 +1099,37 @@ mod test {
     assert_main_eq(
       "(fn main () (let a 1) (let b 2) (std.+ a b))",
       SLValue::Int(3),
+    );
+  }
+
+  #[test]
+  fn top_level_function_can_be_called_through_local() {
+    assert_main_eq(
+      "(fn double (x) (std.+ x x)) (fn main () (let f double) (f 4))",
+      SLValue::Int(8),
+    );
+  }
+
+  #[test]
+  fn qualified_function_can_be_called_dynamically() {
+    assert_main_eq(
+      "(fn double (x) (std.+ x x)) (fn main () (let f main.double) (f 4))",
+      SLValue::Int(8),
+    );
+  }
+
+  #[test]
+  fn builtin_function_can_be_called_through_local() {
+    assert_main_eq("(fn main () (let add std.+) (add 2 3))", SLValue::Int(5));
+  }
+
+  #[test]
+  fn local_shadows_top_level_function_as_value() {
+    assert_main_eq(
+      "(fn transform (x) (std.+ x x))
+       (fn identity (x) x)
+       (fn main () (let transform identity) (transform 7))",
+      SLValue::Int(7),
     );
   }
 

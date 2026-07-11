@@ -71,6 +71,7 @@ fn eval_wasm(source: &str) -> Val {
     WasmVal::Float(f) => Val::Float(f),
     WasmVal::Bool(b) => Val::Bool(b),
     WasmVal::Void => Val::Void,
+    WasmVal::FunctionRef(index) => panic!("expected scalar from WASM, got function {index}"),
   }
 }
 

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::builtins::BuiltinSpec;
 use crate::closure::transform_closures_in_module;
@@ -257,10 +257,19 @@ pub fn find_function(
 
 pub fn compile_module(module_name: &str, asts: &[AST]) -> Result<CompiledModule, String> {
   let asts = transform_closures_in_module(module_name, asts)?;
+  let module_functions: HashSet<String> = asts
+    .iter()
+    .filter_map(|ast| match ast {
+      AST::DefineFn(func) => Some(func.name.clone()),
+      _ => None,
+    })
+    .collect();
   let mut functions = vec![];
   for ast in &asts {
     match ast {
-      AST::DefineFn(func) => functions.extend(compile_function(module_name, func)?),
+      AST::DefineFn(func) => {
+        functions.extend(compile_function(module_name, &module_functions, func)?)
+      }
       x => return Err(format!("Unexpected form at top-level: {:?}", x)),
     };
   }
@@ -269,7 +278,11 @@ pub fn compile_module(module_name: &str, asts: &[AST]) -> Result<CompiledModule,
 
 /// Compile a function.
 /// Returns a vec of functions in case any of them contain nested functions.
-fn compile_function(module_name: &str, f: &parser::Function) -> Result<CompiledModule, String> {
+fn compile_function(
+  module_name: &str,
+  module_functions: &HashSet<String>,
+  f: &parser::Function,
+) -> Result<CompiledModule, String> {
   // Map of local-name to local-index
   let mut locals = HashMap::new();
   for (idx, param) in f.params.iter().enumerate() {
@@ -278,7 +291,12 @@ fn compile_function(module_name: &str, f: &parser::Function) -> Result<CompiledM
   let mut instructions = vec![];
   let last_idx = f.code.len().saturating_sub(1);
   for (i, ast) in f.code.iter().enumerate() {
-    instructions.extend(compile_expr(module_name, ast, &mut locals)?);
+    instructions.extend(compile_expr(
+      module_name,
+      module_functions,
+      ast,
+      &mut locals,
+    )?);
     // Non-final body expressions are in statement position: their value is
     // discarded, so pop it off the stack to keep the stack clean. It would be
     // really nice to avoid pushing things to the stack entirely if we know they
@@ -302,6 +320,7 @@ fn compile_function(module_name: &str, f: &parser::Function) -> Result<CompiledM
 /// Compile `ast` into instructions.
 fn compile_expr(
   module_name: &str,
+  module_functions: &HashSet<String>,
   ast: &AST,
   locals: &mut HashMap<String, u16>,
 ) -> Result<Vec<CompiledInstruction>, String> {
@@ -309,14 +328,19 @@ fn compile_expr(
   match ast {
     AST::Call(callable_expr, arg_exprs) => {
       for expr in arg_exprs {
-        instructions.extend(compile_expr(module_name, expr, locals)?);
+        instructions.extend(compile_expr(module_name, module_functions, expr, locals)?);
       }
-      instructions.extend(compile_expr(module_name, callable_expr, locals)?);
+      instructions.extend(compile_expr(
+        module_name,
+        module_functions,
+        callable_expr,
+        locals,
+      )?);
       instructions.push(Instruction::CallDynamic(arg_exprs.len() as u16))
     }
     AST::CallFixed(identifier, arg_exprs) => {
       for expr in arg_exprs {
-        instructions.extend(compile_expr(module_name, expr, locals)?);
+        instructions.extend(compile_expr(module_name, module_functions, expr, locals)?);
       }
       if let Identifier::Bare(fname) = identifier {
         if let Some(local_index) = locals.get(fname) {
@@ -335,18 +359,18 @@ fn compile_expr(
       ))
     }
     AST::Cell(expr) => {
-      instructions.extend(compile_expr(module_name, expr, locals)?);
+      instructions.extend(compile_expr(module_name, module_functions, expr, locals)?);
       instructions.push(Instruction::MakeCell);
     }
     AST::DerefCell(expr) => {
-      instructions.extend(compile_expr(module_name, expr, locals)?);
+      instructions.extend(compile_expr(module_name, module_functions, expr, locals)?);
       instructions.push(Instruction::DerefCell);
     }
     AST::SetCell(target, value) => {
       // Evaluate the value, then the target (which must resolve to a Cell).
       // Stack order at SetCell time: [value, cell] (cell on TOS).
-      instructions.extend(compile_expr(module_name, value, locals)?);
-      instructions.extend(compile_expr(module_name, target, locals)?);
+      instructions.extend(compile_expr(module_name, module_functions, value, locals)?);
+      instructions.extend(compile_expr(module_name, module_functions, target, locals)?);
       instructions.push(Instruction::SetCell);
     }
     AST::FunctionRef(mname, fname) => {
@@ -359,16 +383,16 @@ fn compile_expr(
       if !locals.contains_key(name) {
         locals.insert(name.clone(), locals.len() as u16);
       }
-      instructions.extend(compile_expr(module_name, expr, locals)?);
+      instructions.extend(compile_expr(module_name, module_functions, expr, locals)?);
       let local_index = locals[name];
       instructions.push(Instruction::SetLocal(local_index));
       instructions.push(Instruction::LoadLocal(local_index));
     }
     AST::PartialApply(expr, args) => {
       for expr in args {
-        instructions.extend(compile_expr(module_name, expr, locals)?);
+        instructions.extend(compile_expr(module_name, module_functions, expr, locals)?);
       }
-      instructions.extend(compile_expr(module_name, expr, locals)?);
+      instructions.extend(compile_expr(module_name, module_functions, expr, locals)?);
       instructions.push(Instruction::PartialApply(args.len() as u16));
     }
     AST::If(cond, then, els) => {
@@ -379,15 +403,15 @@ fn compile_expr(
       // relative to the instruction *following* each jump, they depend only on
       // the lengths of the `then` and `else` sub-vectors, not on where this
       // `if` sits in the enclosing function.
-      instructions.extend(compile_expr(module_name, cond, locals)?);
+      instructions.extend(compile_expr(module_name, module_functions, cond, locals)?);
       let jmp_else = instructions.len();
       instructions.push(Instruction::JumpIfFalse(0));
-      instructions.extend(compile_expr(module_name, then, locals)?);
+      instructions.extend(compile_expr(module_name, module_functions, then, locals)?);
       let jmp_end = instructions.len();
       instructions.push(Instruction::Jump(0));
       // L_else:
       let else_start = instructions.len();
-      instructions.extend(compile_expr(module_name, els, locals)?);
+      instructions.extend(compile_expr(module_name, module_functions, els, locals)?);
       // L_end:
       let end_start = instructions.len();
       // The JumpIfFalse at `jmp_else` must skip over the `then` branch and the
@@ -407,17 +431,23 @@ fn compile_expr(
       // and leave the last on the stack as the block's value.
       let last_idx = body.len().saturating_sub(1);
       for (i, expr) in body.iter().enumerate() {
-        instructions.extend(compile_expr(module_name, expr, locals)?);
+        instructions.extend(compile_expr(module_name, module_functions, expr, locals)?);
         if i != last_idx {
           instructions.push(Instruction::Pop);
         }
       }
     }
     AST::Variable(name) => {
-      if !locals.contains_key(name) {
+      if let Some(local) = locals.get(name) {
+        instructions.push(Instruction::LoadLocal(*local));
+      } else if module_functions.contains(name) {
+        instructions.push(Instruction::MakeFunctionRef((
+          module_name.to_string(),
+          name.clone(),
+        )));
+      } else {
         return Err(format!("Function accesses unbound variable {}", name));
       }
-      instructions.push(Instruction::LoadLocal(locals[name]));
     }
 
     AST::Int(i) => instructions.push(Instruction::PushInt(*i)),
@@ -495,7 +525,7 @@ mod test {
       params: vec!["a".to_string()],
       code: vec![AST::Variable("a".to_string())],
     };
-    let code = compile_function("main", &func).unwrap();
+    let code = compile_function("main", &HashSet::new(), &func).unwrap();
     assert_eq!(
       code,
       vec![(
@@ -522,7 +552,7 @@ mod test {
         AST::CallFixed(Identifier::Bare("alias".to_string()), vec![]),
       ],
     };
-    let code = compile_function("main", &func).unwrap();
+    let code = compile_function("main", &HashSet::new(), &func).unwrap();
     assert_eq!(
       code,
       vec![(
@@ -551,7 +581,7 @@ mod test {
       params: vec![],
       code: vec![AST::Let("a".to_string(), Box::new(AST::Int(1)))],
     };
-    let code = compile_function("main", &func).unwrap();
+    let code = compile_function("main", &HashSet::new(), &func).unwrap();
     assert_eq!(
       code,
       vec![(
@@ -568,5 +598,16 @@ mod test {
         }),
       )]
     );
+  }
+
+  #[test]
+  fn compile_unbound_variable_still_errors() {
+    let func = parser::Function {
+      name: "main".to_string(),
+      params: vec![],
+      code: vec![AST::Variable("missing".to_string())],
+    };
+    let err = compile_function("main", &HashSet::new(), &func).unwrap_err();
+    assert_eq!(err, "Function accesses unbound variable missing");
   }
 }
