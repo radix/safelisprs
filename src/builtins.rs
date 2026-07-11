@@ -370,6 +370,40 @@ pub fn default_builtins() -> Builtins {
       items.extend_from_slice(args);
       Ok(SLVal::List(items))
     }))
+    .with_builtin(Builtin::contextual("std", "cell", Some(1), |ctx, args| {
+      let contents = CellContents::new(args[0]);
+      Ok(SLVal::Cell(Gc::new(ctx.mc(), RefLock::new(contents))))
+    }))
+    .with_builtin(Builtin::contextual_value(
+      "std",
+      "get",
+      Some(1),
+      |_ctx, args| match &args[0].value {
+        SLVal::Cell(cell) => Ok(cell.borrow().value),
+        other => Err(format!(
+          "std.get: expected a Cell, got {}",
+          other.type_name()
+        )),
+      },
+    ))
+    .with_builtin(Builtin::contextual(
+      "std",
+      "set!",
+      Some(2),
+      |ctx, args| match &args[0].value {
+        SLVal::Cell(cell) => {
+          Gc::write(ctx.mc(), *cell)
+            .unlock()
+            .borrow_mut()
+            .set(args[1]);
+          Ok(SLVal::Void)
+        }
+        other => Err(format!(
+          "std.set!: expected a Cell, got {}",
+          other.type_name()
+        )),
+      },
+    ))
     .with_builtin(Builtin::unary("std", "len", |a| match &a.value {
       SLVal::List(items) => Ok(SLVal::Int(items.len() as i64)),
       _ => Err(format!("len: expected a List, got {}", a.value.type_name())),
@@ -378,7 +412,7 @@ pub fn default_builtins() -> Builtins {
       "std",
       "idx",
       Some(2),
-      |ctx, args| {
+      |_ctx, args| {
         let (a, b) = (args[0], args[1]);
         match (&a.value, &b.value) {
           (SLVal::List(items), SLVal::Int(i)) => {
@@ -393,22 +427,8 @@ pub fn default_builtins() -> Builtins {
               Ok(items[idx as usize])
             }
           }
-          (SLVal::String(s), SLVal::Int(i)) => {
-            let len = s.chars().count() as i64;
-            let idx = if *i < 0 { *i + len } else { *i };
-            if idx < 0 || idx >= len {
-              Err(format!(
-                "idx: index {} out of range for string of length {}",
-                i, len
-              ))
-            } else {
-              let start = char_boundary(s, idx as usize);
-              let end = char_boundary(s, idx as usize + 1);
-              Ok(ctx.alloc_value(SLVal::String(s[start..end].to_string())))
-            }
-          }
           _ => Err(format!(
-            "idx: expected (List, Int) or (String, Int), got ({}, {})",
+            "idx: expected (List, Int), got ({}, {})",
             a.value.type_name(),
             b.value.type_name()
           )),
@@ -816,7 +836,7 @@ mod test {
   }
 
   #[test]
-  fn string_indexing_and_slicing_use_character_indices() {
+  fn string_slicing_uses_character_indices() {
     assert_eq!(
       eval_builtin_main("(fn main () (std.slice \"aé🦀z\" 1 3))").unwrap(),
       SLValue::String("é🦀".to_string())
@@ -826,7 +846,7 @@ mod test {
       SLValue::String("é🦀".to_string())
     );
     assert_eq!(
-      eval_builtin_main("(fn main () (std.idx \"aé🦀z\" -2))").unwrap(),
+      eval_builtin_main("(fn main () (std.slice \"aé🦀z\" -2 -1))").unwrap(),
       SLValue::String("🦀".to_string())
     );
   }

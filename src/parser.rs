@@ -73,7 +73,10 @@ impl AST {
       AValue::Symbol(s) => match s.as_ref() {
         "true" => Ok(AST::Bool(true)),
         "false" => Ok(AST::Bool(false)),
-        _ => Ok(AST::Variable(s.clone())),
+        _ => match parse_identifier(s) {
+          Identifier::Bare(name) => Ok(AST::Variable(name)),
+          Identifier::Qualified(module, name) => Ok(AST::FunctionRef(module, name)),
+        },
       },
       AValue::Cons(left, right) => {
         if let AValue::Symbol(ref s) = **left {
@@ -81,7 +84,6 @@ impl AST {
             "let" => return parse_let(right),
             "fn" => return parse_fn(right),
             "if" => return parse_if(right),
-            "set!" => return parse_set(right),
             "block" => return parse_block(right),
             _ => {}
           }
@@ -103,16 +105,6 @@ fn parse_if(right: &Expr) -> Result<AST, String> {
     Box::new(AST::from_atoms(&forms[1])?),
     Box::new(AST::from_atoms(&forms[2])?),
   ))
-}
-
-fn parse_set(right: &Expr) -> Result<AST, String> {
-  let forms = flatten_list(right)?;
-  if forms.len() != 2 {
-    return Err("`set!` must have exactly two arguments: a variable and a value".to_string());
-  }
-  let target = AST::from_atoms(&forms[0])?;
-  let value = AST::from_atoms(&forms[1])?;
-  Ok(AST::SetCell(Box::new(target), Box::new(value)))
 }
 
 fn parse_block(right: &Expr) -> Result<AST, String> {
@@ -217,5 +209,26 @@ mod test {
   fn test_read_multiple() {
     let result = read_multiple("5 3").unwrap();
     assert_eq!(result, vec![AST::Int(5), AST::Int(3)]);
+  }
+
+  #[test]
+  fn dotted_symbol_in_value_position_is_a_function_ref() {
+    let result = read_multiple("std.len").unwrap();
+    assert_eq!(
+      result,
+      vec![AST::FunctionRef("std".to_string(), "len".to_string())]
+    );
+  }
+
+  #[test]
+  fn set_is_parsed_as_an_ordinary_call() {
+    let result = read_multiple("(set! x 2)").unwrap();
+    assert_eq!(
+      result,
+      vec![AST::CallFixed(
+        Identifier::Bare("set!".to_string()),
+        vec![AST::Variable("x".to_string()), AST::Int(2)],
+      )]
+    );
   }
 }

@@ -2896,17 +2896,13 @@ mod test {
   }
 
   #[test]
-  fn set_cell_mutates_captured_variable() {
-    // The classic counter: `counter` returns an `inc` closure that mutates
-    // and returns a captured `count` variable. Each call to `inc` should
-    // increment the shared counter, proving that `set!` writes through the
-    // Cell that the closure and its parent share.
+  fn explicit_cell_is_shared_across_closures() {
     let source = "
       (fn counter ()
-        (let count 0)
+        (let count (std.cell 0))
         (fn inc ()
-          (set! count (std.+ 1 count))
-          count)
+          (std.set! count (std.+ 1 (std.get count)))
+          (std.get count))
         inc)
       (fn main ()
         (let c (counter))
@@ -2918,29 +2914,16 @@ mod test {
   }
 
   #[test]
-  fn set_cell_returns_new_value() {
-    // `set!` should evaluate to the new value, not the old one. We use a
-    // closure to get a Cell (captured variables are wrapped in Cells by the
-    // closure transform).
-    let source = "
-      (fn make ()
-        (let x 1)
-        (fn inc ()
-          (set! x (std.+ x 10))))
-      (fn main () ((make)))
-    ";
-    assert_eq!(eval_main(source), SLValue::Int(11));
+  fn explicit_set_returns_void() {
+    assert_eq!(
+      eval_main("(fn main () (let x (std.cell 1)) (std.set! x 11))"),
+      SLValue::Void
+    );
   }
 
   #[test]
-  fn set_cell_on_non_cell_errors() {
-    // `set!` on a local that isn't a Cell (not captured by any closure, so
-    // the closure transform doesn't wrap it in a Cell) should error at runtime.
-    let source = "
-      (fn main ()
-        (let x 1)
-        (set! x 2))
-    ";
+  fn explicit_set_on_non_cell_errors() {
+    let source = "(fn main () (std.set! 1 2))";
     let pkg = compile_executable_from_source(
       &source.to_string(),
       ("main", "main"),
@@ -2950,29 +2933,27 @@ mod test {
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
     let err = exec.run_until_done().unwrap_err();
-    assert!(err.contains("Not a cell"), "unexpected error: {}", err);
+    assert!(err.contains("expected a Cell"), "unexpected error: {}", err);
   }
 
   #[test]
   fn cycle_is_collected() {
-    // Build a cycle using only source-level constructs: a closure that
-    // captures a variable, then `set!` that variable to the closure itself.
-    // After the closure transform, `c` is a Cell holding the Partial, and the
-    // Partial holds the Cell → Cell↔Partial cycle. Once the result is
+    // Build a cycle using only source-level constructs: an explicit Cell that
+    // holds a closure which captures that same Cell. Once the result is
     // discarded, the cycle is unreachable and must be collected. This is the
     // key advantage of gc-arena over `Rc` (which would leak cycles).
     //
     // (fn make-cycle ()
-    //   (let c 0)          ; c becomes a Cell (captured by self)
-    //   (fn self () c)     ; self captures c's Cell
-    //   (set! c self)      ; write self into c's Cell → cycle
+    //   (let c (std.cell 0))
+    //   (fn self () (std.get c))
+    //   (std.set! c self)  ; Cell↔Partial cycle
     //   self)              ; return the cyclic closure
     // (fn main () (make-cycle) 99)  ; discard the cycle, return 99
     let source = "
       (fn make-cycle ()
-        (let c 0)
-        (fn self () c)
-        (set! c self)
+        (let c (std.cell 0))
+        (fn self () (std.get c))
+        (std.set! c self)
         self)
       (fn main () (make-cycle) 99)
     ";
@@ -3008,10 +2989,12 @@ mod test {
     // `cycle_is_collected` (which builds a Partial↔Cell cycle via closures).
     let source = "
       (fn make-cycle ()
-        (let l (std.list))
-        (fn mkcycle () (set! l (std.list l)))
+        (let l (std.cell (std.list)))
+        (fn mkcycle ()
+          (std.set! l (std.list l))
+          (std.get l))
         mkcycle)
-      (fn main () ((make-cycle)))
+      (fn main () ((make-cycle)) 99)
     ";
     let pkg = compile_executable_from_source(
       &source.to_string(),
@@ -3023,11 +3006,7 @@ mod test {
     let mut exec = interp.call_main().unwrap();
 
     let result = exec.run_until_done().unwrap();
-    // `main` returns the cyclic list (a 1-element list containing itself),
-    // which `run_until_done` pops and hands back to us. The cycle is now only
-    // reachable through this returned `SLValue`-side copy — but the in-arena
-    // cycle was held alive by `make-cycle`'s frame, which is gone.
-    assert!(matches!(result, SLValue::List(_)));
+    assert_eq!(result, SLValue::Int(99));
 
     // Forcing a full collection must reclaim the in-arena cycle, leaving zero
     // live allocations (the popped result is an owned `SLValue`, not a `Gc`).
@@ -3150,6 +3129,98 @@ mod test {
     assert_eq!(
       eval_main("(fn main () (std.list 1 2 3))"),
       SLValue::List(vec![SLValue::Int(1), SLValue::Int(2), SLValue::Int(3)])
+    );
+  }
+
+  #[test]
+  fn top_level_function_is_a_first_class_value() {
+    let source = "
+      (fn double (x) (std.+ x x))
+      (fn main () (std.map (std.list 1 2 3) double))
+    ";
+    assert_eq!(
+      eval_main(source),
+      SLValue::List(vec![SLValue::Int(2), SLValue::Int(4), SLValue::Int(6)])
+    );
+  }
+
+  #[test]
+  fn top_level_function_can_be_called_through_a_local() {
+    let source = "
+      (fn double (x) (std.+ x x))
+      (fn main () (let f double) (f 4))
+    ";
+    assert_eq!(eval_main(source), SLValue::Int(8));
+  }
+
+  #[test]
+  fn local_shadows_top_level_function_in_value_position() {
+    let source = "
+      (fn transform (x) (std.+ x x))
+      (fn identity (x) x)
+      (fn main ()
+        (let transform identity)
+        (std.map (std.list 1 2 3) transform))
+    ";
+    assert_eq!(
+      eval_main(source),
+      SLValue::List(vec![SLValue::Int(1), SLValue::Int(2), SLValue::Int(3)])
+    );
+  }
+
+  #[test]
+  fn qualified_function_is_a_first_class_value() {
+    let source = "
+      (fn double (x) (std.+ x x))
+      (fn main () (std.map (std.list 2 3) main.double))
+    ";
+    assert_eq!(
+      eval_main(source),
+      SLValue::List(vec![SLValue::Int(4), SLValue::Int(6)])
+    );
+  }
+
+  #[test]
+  fn builtin_is_a_first_class_value() {
+    let source = "
+      (fn main ()
+        (std.map (std.list (std.list 1) (std.list 1 2)) std.len))
+    ";
+    assert_eq!(
+      eval_main(source),
+      SLValue::List(vec![SLValue::Int(1), SLValue::Int(2)])
+    );
+  }
+
+  #[test]
+  fn explicit_cell_get_set_and_nesting() {
+    let source = "
+      (fn main ()
+        (let inner (std.cell 1))
+        (let outer (std.cell inner))
+        (std.set! (std.get outer) 7)
+        (std.get (std.get outer)))
+    ";
+    assert_eq!(eval_main(source), SLValue::Int(7));
+  }
+
+  #[test]
+  fn explicit_get_on_non_cell_errors() {
+    let err = eval_main_err("(fn main () (std.get 1))");
+    assert!(err.contains("expected a Cell"), "unexpected error: {err}");
+  }
+
+  #[test]
+  fn source_set_is_no_longer_a_special_form() {
+    let err = compile_executable_from_source(
+      "(fn main () (let x 1) (set! x 2))",
+      ("main", "main"),
+      &default_builtins().specs(),
+    )
+    .unwrap_err();
+    assert!(
+      err.contains("undefined function main.set!"),
+      "unexpected: {err}"
     );
   }
 
@@ -3278,25 +3349,28 @@ mod test {
   }
 
   #[test]
-  fn idx_string() {
+  fn slice_string_replaces_character_indexing() {
     assert_eq!(
-      eval_main("(fn main () (std.idx \"hello\" 0))"),
+      eval_main("(fn main () (std.slice \"hello\" 0 1))"),
       SLValue::String("h".to_string())
     );
     assert_eq!(
-      eval_main("(fn main () (std.idx \"hello\" 4))"),
+      eval_main("(fn main () (std.slice \"hello\" 4 5))"),
       SLValue::String("o".to_string())
     );
     assert_eq!(
-      eval_main("(fn main () (std.idx \"hello\" -1))"),
+      eval_main("(fn main () (std.slice \"hello\" -1 5))"),
       SLValue::String("o".to_string())
     );
   }
 
   #[test]
-  fn idx_string_out_of_range_errors() {
-    let err = eval_main_err("(fn main () (std.idx \"hi\" 5))");
-    assert!(err.contains("out of range"), "unexpected error: {}", err);
+  fn idx_string_errors() {
+    let err = eval_main_err("(fn main () (std.idx \"hi\" 0))");
+    assert!(
+      err.contains("expected (List, Int)"),
+      "unexpected error: {err}"
+    );
   }
 
   #[test]
