@@ -8,7 +8,7 @@ use wasm_encoder::{
   TableType, TypeSection, ValType,
 };
 
-use crate::parser::{self, Identifier, AST};
+use crate::parser::{self, ASTKind, Identifier, AST};
 
 /// Tag values for the SafeLisp tagged-value representation. Every SafeLisp
 /// value on the WASM stack is a `(payload: i64, tag: i32)` pair — payload
@@ -257,7 +257,7 @@ impl<'b> ModuleCompiler<'b> {
 
   fn compile(mut self, asts: &[AST]) -> Result<Vec<u8>, String> {
     for ast in asts {
-      if let AST::DefineFn(f) = ast {
+      if let ASTKind::DefineFn(f) = &ast.kind {
         self
           .function_names
           .insert(f.name.clone(), self.functions.len() as u32);
@@ -270,7 +270,7 @@ impl<'b> ModuleCompiler<'b> {
     }
 
     for ast in asts {
-      if let AST::DefineFn(f) = ast {
+      if let ASTKind::DefineFn(f) = &ast.kind {
         self.discover(f)?;
       }
     }
@@ -379,7 +379,7 @@ impl<'b> ModuleCompiler<'b> {
   ) -> Result<(), String> {
     let mut codes = CodeSection::new();
     for ast in asts {
-      if let AST::DefineFn(f) = ast {
+      if let ASTKind::DefineFn(f) = &ast.kind {
         let def_index = self.function_names[&f.name];
         let body = self.compile_function(f, def_index, num_imports)?;
         codes.function(&body);
@@ -413,23 +413,23 @@ impl<'b> ModuleCompiler<'b> {
 
   /// Recursively discover imports and unsupported forms in an expression.
   fn discover_expr(&mut self, ast: &AST) -> Result<(), String> {
-    match ast {
-      AST::Int(_) | AST::Float(_) | AST::Bool(_) | AST::Variable(_) => {}
-      AST::FunctionRef(module, name) => {
+    match &ast.kind {
+      ASTKind::Int(_) | ASTKind::Float(_) | ASTKind::Bool(_) | ASTKind::Variable(_) => {}
+      ASTKind::FunctionRef(module, name) => {
         self.resolve_builtin_for_discovery(&Identifier::Qualified(module.clone(), name.clone()))?;
       }
-      AST::Let(_, expr) => self.discover_expr(expr)?,
-      AST::If(cond, then, els) => {
+      ASTKind::Let(_, expr) => self.discover_expr(expr)?,
+      ASTKind::If(cond, then, els) => {
         self.discover_expr(cond)?;
         self.discover_expr(then)?;
         self.discover_expr(els)?;
       }
-      AST::Block(body) => {
+      ASTKind::Block(body) => {
         for expr in body {
           self.discover_expr(expr)?;
         }
       }
-      AST::CallFixed(ident, args) => {
+      ASTKind::CallFixed(ident, args) => {
         self.resolve_builtin_for_discovery(ident)?;
         self.type_index(Signature {
           params: slval_param_types(args.len() as u32),
@@ -439,7 +439,7 @@ impl<'b> ModuleCompiler<'b> {
           self.discover_expr(arg)?;
         }
       }
-      AST::Call(callable, args) => {
+      ASTKind::Call(callable, args) => {
         self.type_index(Signature {
           params: slval_param_types(args.len() as u32),
           results: SLVAL.to_vec(),
@@ -603,29 +603,33 @@ impl<'b> ModuleCompiler<'b> {
     locals: &mut Vec<(String, u32)>,
     next_pair: &mut u32,
   ) -> Result<(), String> {
-    match ast {
-      AST::Int(_) | AST::Float(_) | AST::Bool(_) | AST::Variable(_) | AST::FunctionRef(_, _) => {}
-      AST::Let(name, expr) => {
+    match &ast.kind {
+      ASTKind::Int(_)
+      | ASTKind::Float(_)
+      | ASTKind::Bool(_)
+      | ASTKind::Variable(_)
+      | ASTKind::FunctionRef(_, _) => {}
+      ASTKind::Let(name, expr) => {
         self.count_let_locals(expr, locals, next_pair)?;
         locals.push((name.clone(), *next_pair));
         *next_pair += 1;
       }
-      AST::If(cond, then, els) => {
+      ASTKind::If(cond, then, els) => {
         self.count_let_locals(cond, locals, next_pair)?;
         self.count_let_locals(then, locals, next_pair)?;
         self.count_let_locals(els, locals, next_pair)?;
       }
-      AST::Block(body) => {
+      ASTKind::Block(body) => {
         for expr in body {
           self.count_let_locals(expr, locals, next_pair)?;
         }
       }
-      AST::CallFixed(_, args) => {
+      ASTKind::CallFixed(_, args) => {
         for arg in args {
           self.count_let_locals(arg, locals, next_pair)?;
         }
       }
-      AST::Call(callable, args) => {
+      ASTKind::Call(callable, args) => {
         self.count_let_locals(callable, locals, next_pair)?;
         for arg in args {
           self.count_let_locals(arg, locals, next_pair)?;
@@ -655,21 +659,21 @@ impl<'b> ModuleCompiler<'b> {
     num_imports: u32,
     func: &mut Function,
   ) -> Result<(), String> {
-    match ast {
-      AST::Int(n) => {
+    match &ast.kind {
+      ASTKind::Int(n) => {
         func.instructions().i64_const(*n);
         func.instructions().i32_const(TAG_INT);
       }
-      AST::Float(f) => {
+      ASTKind::Float(f) => {
         func.instructions().f64_const(Ieee64::from(*f));
         func.instructions().i64_reinterpret_f64();
         func.instructions().i32_const(TAG_FLOAT);
       }
-      AST::Bool(b) => {
+      ASTKind::Bool(b) => {
         func.instructions().i64_const(if *b { 1 } else { 0 });
         func.instructions().i32_const(TAG_BOOL);
       }
-      AST::Variable(name) => {
+      ASTKind::Variable(name) => {
         if let Some(pair_idx) = self.resolve_local(locals, name) {
           let pl = Self::payload_local(pair_idx, num_params);
           let tl = Self::tag_local(pair_idx, num_params, num_lets);
@@ -684,12 +688,12 @@ impl<'b> ModuleCompiler<'b> {
           return Err(format!("unbound variable: {}", name));
         }
       }
-      AST::FunctionRef(module, name) => {
+      ASTKind::FunctionRef(module, name) => {
         let index = self.resolve_function_ref(module, name, num_imports)?;
         func.instructions().i64_const(i64::from(index));
         func.instructions().i32_const(TAG_FUNCTION_REF);
       }
-      AST::Let(name, expr) => {
+      ASTKind::Let(name, expr) => {
         self.compile_expr(
           expr,
           locals,
@@ -714,7 +718,7 @@ impl<'b> ModuleCompiler<'b> {
         func.instructions().local_tee(pl);
         func.instructions().local_get(tl);
       }
-      AST::If(cond, then, els) => {
+      ASTKind::If(cond, then, els) => {
         self.compile_expr(
           cond,
           locals,
@@ -758,7 +762,7 @@ impl<'b> ModuleCompiler<'b> {
         )?;
         func.instructions().end();
       }
-      AST::Block(body) => {
+      ASTKind::Block(body) => {
         let last_idx = body.len().saturating_sub(1);
         for (i, expr) in body.iter().enumerate() {
           self.compile_expr(
@@ -778,7 +782,7 @@ impl<'b> ModuleCompiler<'b> {
           }
         }
       }
-      AST::CallFixed(ident, args) => self.compile_call_fixed(
+      ASTKind::CallFixed(ident, args) => self.compile_call_fixed(
         ident,
         args,
         locals,
@@ -789,7 +793,7 @@ impl<'b> ModuleCompiler<'b> {
         num_imports,
         func,
       )?,
-      AST::Call(callable, args) => self.compile_call_dynamic(
+      ASTKind::Call(callable, args) => self.compile_call_dynamic(
         callable,
         args,
         locals,
@@ -827,7 +831,7 @@ impl<'b> ModuleCompiler<'b> {
     if let Identifier::Bare(name) = ident {
       if self.resolve_local(locals, name).is_some() {
         return self.compile_call_dynamic(
-          &AST::Variable(name.clone()),
+          &AST::synthetic(ASTKind::Variable(name.clone())),
           args,
           locals,
           next_pair,

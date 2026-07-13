@@ -2,12 +2,12 @@
 
 Rewrite `src/parser.rs` as a hand-written lexer and recursive-descent parser,
 drop the `atoms` dependency, and add two capabilities the current parser
-lacks: `#` line comments and source spans at every AST-construction site.
+lacks: `#` line comments and source spans on every AST node.
 This is intentionally **not behavior-compatible** with every lexical edge case
 accepted by `atoms`; the language is not yet in production, so this migration
-also tightens and simplifies the language. The public API
-(`read_multiple(&str) -> Result<Vec<AST>, String>`, the `AST` / `Function` /
-`Identifier` types) remains unchanged.
+also tightens and simplifies the language. The `read_multiple(&str) ->
+Result<Vec<AST>, String>` API remains, but `AST` intentionally changes from an
+enum into a span-bearing struct with an `ASTKind` enum.
 
 Motivation: full control of the grammar for future language evolution, precise
 positions for both syntax errors and errors detected while constructing the
@@ -19,9 +19,9 @@ Preconditions (verify before starting — this plan starts from this state):
 - `src/parser.rs` is `atoms`-based. Special forms: `let`, `fn`, `if`,
   `block`. There is **no** `set!` form.
 - A qualified (dotted) symbol in value position parses to
-  `AST::FunctionRef(module, name)`; in call-head position to
-  `CallFixed(Identifier::Qualified(..))`.
-- `true` / `false` parse to `AST::Bool`.
+  `ASTKind::FunctionRef(module, name)`; in call-head position to
+  `ASTKind::CallFixed(Identifier::Qualified(..))`.
+- `true` / `false` parse to `ASTKind::Bool`.
 
 If the tree doesn't match this (e.g. `set!` still exists), stop and flag it.
 
@@ -93,13 +93,13 @@ Atom       := Int | Float | Str | Sym
 
 Atom / call-shape rules:
 
-- `Sym` in value position: `true`/`false` → `AST::Bool`; a symbol containing
-  `.` → split on the *first* `.` into `AST::FunctionRef(module, name)`;
-  otherwise → `AST::Variable(name)`.
-- Call with a symbol head → `AST::CallFixed(identifier, args)`, where the
+- `Sym` in value position: `true`/`false` → `ASTKind::Bool`; a symbol containing
+  `.` → split on the *first* `.` into `ASTKind::FunctionRef(module, name)`;
+  otherwise → `ASTKind::Variable(name)`.
+- Call with a symbol head → `ASTKind::CallFixed(identifier, args)`, where the
   identifier is `Qualified(module, name)` if the symbol contains `.` (split
   on first `.`), else `Bare(name)`. Call with any other expression head →
-  `AST::Call(callee, args)`.
+  `ASTKind::Call(callee, args)`.
 - `fn` params must be symbols; `let` takes exactly a symbol and one
   expression; `if` exactly three expressions; `block` one or more. Special
   forms are recognized only when the symbol is the first element of a form —
@@ -113,31 +113,30 @@ and any useful expected-token information. At the public `read_multiple`
 boundary, render it to `String` with line/column and what was expected. The
 public error type remains `String` for now.
 
-### Span readiness invariant
+### Span-bearing AST
 
-Keep spans internal for now, but do not discard them before AST construction.
-Parser functions should return a concrete span-carrying AST result, for
-example:
+Every AST node carries its byte span directly:
 
 ```rust
-type Span = Range<usize>;
+pub type Span = Range<usize>;
 
-struct SpannedAst {
-  ast: AST,
-  span: Span,
+pub struct AST {
+  pub kind: ASTKind,
+  pub span: Span,
 }
 
-fn parse_expr(&mut self) -> Result<SpannedAst, ParseError>;
+pub enum ASTKind {
+  // Let, DefineFn, Call, atoms, transformation-only nodes, etc.
+}
+
+fn parse_expr(&mut self) -> Result<AST, ParseError>;
 ```
 
-Every place that constructs an `AST` node must have the full span for that
-node available. When constructing a parent node, the `SpannedAst` values for
-its children must still be in scope, so their spans are also available for
-validation errors and for a future span-carrying AST. A child's wrapper is
-discarded only at the point where its `ast` is inserted into the current
-unspanned parent; `read_multiple` similarly discards each top-level wrapper to
-preserve the current public return type. This should make adding spans to the
-AST later a mechanical data-model change rather than a parser rewrite.
+Parser-created nodes use their exact source range. Closure transformations and
+other AST rewrites preserve the originating node's span; synthetic helper
+nodes inherit the most specific enclosing source span available. AST semantic
+equality compares `kind` and ignores `span`, while tests that care about source
+locations assert spans explicitly.
 
 For compound forms, the node span runs from the opening `(` through the
 closing `)`. For atoms, it is the token span. For EOF-related errors, use an
@@ -152,7 +151,7 @@ other production file changes except replacing `atoms` with `unescape` in
 
 ## 4. Implementation and migration testing
 
-1. Implement the lexer and parser with spanned internal results, initially
+1. Implement the lexer and parser with span-bearing AST results, initially
    leaving `atoms` in the dependency list only until the new parser compiles
    and the existing SafeLisp test corpus passes.
 2. Add targeted tests for the language rules that remain important: negative
@@ -167,9 +166,9 @@ other production file changes except replacing `atoms` with `unescape` in
      produce positioned errors rather than floats.
    - malformed and non-finite decimal floats are rejected.
    - symbol escapes are not accepted as escapes.
-4. Add span-readiness tests inside the parser module that inspect internal
-   `SpannedAst` results: atoms, nested calls, and special forms have the
-   expected byte ranges before `read_multiple` strips them.
+4. Add span tests inside the parser module showing that atoms, nested calls,
+   special forms, and their children have the expected byte ranges. Add
+   transformation tests showing that closure rewriting preserves spans.
 5. Switch `read_multiple` to the new parser, run the full suite, then delete
    the old parser code and remove the `atoms` dependency.
 
@@ -178,5 +177,5 @@ other production file changes except replacing `atoms` with `unescape` in
 `cargo test` green; `atoms` absent from `Cargo.toml` and `Cargo.lock`;
 `unescape` is a direct dependency; `#` comment lines work; the intentional
 incompatibilities above are covered by tests; parse errors contain
-line/column; and parser-internal tests demonstrate that full node spans are
-available at AST-construction sites.
+line/column; every parsed AST node carries its span; and closure transformation
+tests demonstrate that rewritten nodes retain useful source locations.

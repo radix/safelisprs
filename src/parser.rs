@@ -1,9 +1,22 @@
 use std::ops::Range;
 
-type Span = Range<usize>;
+pub type Span = Range<usize>;
+
+#[derive(Debug, Clone)]
+pub struct AST {
+  pub kind: ASTKind,
+  pub span: Span,
+}
+
+impl PartialEq for AST {
+  fn eq(&self, other: &Self) -> bool {
+    // Source location is metadata, not part of the program's semantics.
+    self.kind == other.kind
+  }
+}
 
 #[derive(Debug, PartialEq, Clone)]
-pub enum AST {
+pub enum ASTKind {
   Let(String, Box<AST>),
   DefineFn(Function),
   Call(Box<AST>, Vec<AST>),
@@ -37,6 +50,68 @@ pub enum AST {
   Block(Vec<AST>),
 }
 
+impl AST {
+  pub fn new(kind: ASTKind, span: Span) -> Self {
+    Self { kind, span }
+  }
+
+  pub(crate) fn synthetic(kind: ASTKind) -> Self {
+    Self::new(kind, 0..0)
+  }
+
+  pub(crate) fn with_kind(&self, kind: ASTKind) -> Self {
+    Self::new(kind, self.span.clone())
+  }
+}
+
+#[cfg(test)]
+#[allow(non_snake_case)]
+impl AST {
+  pub(crate) fn Let(name: String, value: Box<AST>) -> Self {
+    Self::synthetic(ASTKind::Let(name, value))
+  }
+
+  pub(crate) fn DefineFn(function: Function) -> Self {
+    Self::synthetic(ASTKind::DefineFn(function))
+  }
+
+  pub(crate) fn CallFixed(identifier: Identifier, args: Vec<AST>) -> Self {
+    Self::synthetic(ASTKind::CallFixed(identifier, args))
+  }
+
+  pub(crate) fn Variable(name: String) -> Self {
+    Self::synthetic(ASTKind::Variable(name))
+  }
+
+  pub(crate) fn Int(value: i64) -> Self {
+    Self::synthetic(ASTKind::Int(value))
+  }
+
+  pub(crate) fn Float(value: f64) -> Self {
+    Self::synthetic(ASTKind::Float(value))
+  }
+
+  pub(crate) fn String(value: String) -> Self {
+    Self::synthetic(ASTKind::String(value))
+  }
+
+  pub(crate) fn Cell(value: Box<AST>) -> Self {
+    Self::synthetic(ASTKind::Cell(value))
+  }
+
+  pub(crate) fn DerefCell(value: Box<AST>) -> Self {
+    Self::synthetic(ASTKind::DerefCell(value))
+  }
+
+  pub(crate) fn PartialApply(callable: Box<AST>, args: Vec<AST>) -> Self {
+    Self::synthetic(ASTKind::PartialApply(callable, args))
+  }
+
+  pub(crate) fn FunctionRef(module: String, name: String) -> Self {
+    Self::synthetic(ASTKind::FunctionRef(module, name))
+  }
+}
+
 #[derive(Debug, PartialEq, Clone)]
 pub enum Identifier {
   Bare(String),
@@ -65,18 +140,6 @@ enum TokenKind {
 struct Token {
   kind: TokenKind,
   span: Span,
-}
-
-#[derive(Debug, PartialEq)]
-struct SpannedAst {
-  ast: AST,
-  span: Span,
-}
-
-impl SpannedAst {
-  fn new(ast: AST, span: Span) -> Self {
-    Self { ast, span }
-  }
 }
 
 #[derive(Debug, PartialEq)]
@@ -315,7 +378,7 @@ impl Parser {
     Self { tokens, current: 0 }
   }
 
-  fn parse_multiple(&mut self) -> Result<Vec<SpannedAst>, ParseError> {
+  fn parse_multiple(&mut self) -> Result<Vec<AST>, ParseError> {
     let mut result = Vec::new();
     while !matches!(self.peek().kind, TokenKind::Eof) {
       result.push(self.parse_expr()?);
@@ -323,24 +386,24 @@ impl Parser {
     Ok(result)
   }
 
-  fn parse_expr(&mut self) -> Result<SpannedAst, ParseError> {
+  fn parse_expr(&mut self) -> Result<AST, ParseError> {
     let token = self.advance();
     match token.kind {
       TokenKind::LParen => self.parse_list(token.span.start),
       TokenKind::RParen => {
         Err(ParseError::new(token.span, "unexpected `)`").expected("an expression"))
       }
-      TokenKind::Sym(name) => Ok(spanned_ast_from_symbol(name, token.span)),
-      TokenKind::Int(value) => Ok(SpannedAst::new(AST::Int(value), token.span)),
-      TokenKind::Float(value) => Ok(SpannedAst::new(AST::Float(value), token.span)),
-      TokenKind::Str(value) => Ok(SpannedAst::new(AST::String(value), token.span)),
+      TokenKind::Sym(name) => Ok(ast_from_symbol(name, token.span)),
+      TokenKind::Int(value) => Ok(AST::new(ASTKind::Int(value), token.span)),
+      TokenKind::Float(value) => Ok(AST::new(ASTKind::Float(value), token.span)),
+      TokenKind::Str(value) => Ok(AST::new(ASTKind::String(value), token.span)),
       TokenKind::Eof => {
         Err(ParseError::new(token.span, "unexpected end of input").expected("an expression"))
       }
     }
   }
 
-  fn parse_list(&mut self, start: usize) -> Result<SpannedAst, ParseError> {
+  fn parse_list(&mut self, start: usize) -> Result<AST, ParseError> {
     if matches!(self.peek().kind, TokenKind::RParen) {
       let close = self.advance();
       return Err(ParseError::new(start..close.span.end, "Empty call"));
@@ -375,22 +438,15 @@ impl Parser {
     }
   }
 
-  fn parse_let(&mut self, start: usize) -> Result<SpannedAst, ParseError> {
+  fn parse_let(&mut self, start: usize) -> Result<AST, ParseError> {
     let variable = self.expect_symbol("first argument to `let` must be a symbol")?;
     let expression = self.parse_expr()?;
     let close = self.expect_close("`let` must have exactly two arguments")?;
     let span = start..close.span.end;
-    let SpannedAst {
-      ast: expression,
-      span: _expression_span,
-    } = expression;
-    Ok(SpannedAst::new(
-      AST::Let(variable, Box::new(expression)),
-      span,
-    ))
+    Ok(AST::new(ASTKind::Let(variable, Box::new(expression)), span))
   }
 
-  fn parse_fn(&mut self, start: usize) -> Result<SpannedAst, ParseError> {
+  fn parse_fn(&mut self, start: usize) -> Result<AST, ParseError> {
     let name = self.expect_symbol("`fn` name must be a symbol")?;
     let params_open = self.advance();
     if !matches!(params_open.kind, TokenKind::LParen) {
@@ -432,36 +488,24 @@ impl Parser {
     }
     let close = self.advance();
     let span = start..close.span.end;
-    let code = body
-      .into_iter()
-      .map(|SpannedAst { ast, span: _span }| ast)
-      .collect();
-    Ok(SpannedAst::new(
-      AST::DefineFn(Function { name, params, code }),
+    Ok(AST::new(
+      ASTKind::DefineFn(Function {
+        name,
+        params,
+        code: body,
+      }),
       span,
     ))
   }
 
-  fn parse_if(&mut self, start: usize) -> Result<SpannedAst, ParseError> {
+  fn parse_if(&mut self, start: usize) -> Result<AST, ParseError> {
     let condition = self.parse_expr()?;
     let then_branch = self.parse_expr()?;
     let else_branch = self.parse_expr()?;
     let close = self.expect_close("`if` must have exactly three arguments: cond, then, else")?;
     let span = start..close.span.end;
-    let SpannedAst {
-      ast: condition,
-      span: _condition_span,
-    } = condition;
-    let SpannedAst {
-      ast: then_branch,
-      span: _then_span,
-    } = then_branch;
-    let SpannedAst {
-      ast: else_branch,
-      span: _else_span,
-    } = else_branch;
-    Ok(SpannedAst::new(
-      AST::If(
+    Ok(AST::new(
+      ASTKind::If(
         Box::new(condition),
         Box::new(then_branch),
         Box::new(else_branch),
@@ -470,7 +514,7 @@ impl Parser {
     ))
   }
 
-  fn parse_block(&mut self, start: usize) -> Result<SpannedAst, ParseError> {
+  fn parse_block(&mut self, start: usize) -> Result<AST, ParseError> {
     if matches!(self.peek().kind, TokenKind::RParen) {
       return Err(ParseError::new(
         self.peek().span.clone(),
@@ -491,14 +535,10 @@ impl Parser {
     }
     let close = self.advance();
     let span = start..close.span.end;
-    let expressions = expressions
-      .into_iter()
-      .map(|SpannedAst { ast, span: _span }| ast)
-      .collect();
-    Ok(SpannedAst::new(AST::Block(expressions), span))
+    Ok(AST::new(ASTKind::Block(expressions), span))
   }
 
-  fn parse_fixed_call(&mut self, start: usize) -> Result<SpannedAst, ParseError> {
+  fn parse_fixed_call(&mut self, start: usize) -> Result<AST, ParseError> {
     let head = self.advance();
     let TokenKind::Sym(name) = head.kind else {
       unreachable!("fixed calls have symbol heads")
@@ -506,29 +546,17 @@ impl Parser {
     let identifier = parse_identifier(&name);
     let (args, close) = self.parse_call_args()?;
     let span = start..close.span.end;
-    let args = args
-      .into_iter()
-      .map(|SpannedAst { ast, span: _span }| ast)
-      .collect();
-    Ok(SpannedAst::new(AST::CallFixed(identifier, args), span))
+    Ok(AST::new(ASTKind::CallFixed(identifier, args), span))
   }
 
-  fn parse_dynamic_call(&mut self, start: usize) -> Result<SpannedAst, ParseError> {
+  fn parse_dynamic_call(&mut self, start: usize) -> Result<AST, ParseError> {
     let callee = self.parse_expr()?;
     let (args, close) = self.parse_call_args()?;
     let span = start..close.span.end;
-    let SpannedAst {
-      ast: callee,
-      span: _callee_span,
-    } = callee;
-    let args = args
-      .into_iter()
-      .map(|SpannedAst { ast, span: _span }| ast)
-      .collect();
-    Ok(SpannedAst::new(AST::Call(Box::new(callee), args), span))
+    Ok(AST::new(ASTKind::Call(Box::new(callee), args), span))
   }
 
-  fn parse_call_args(&mut self) -> Result<(Vec<SpannedAst>, Token), ParseError> {
+  fn parse_call_args(&mut self) -> Result<(Vec<AST>, Token), ParseError> {
     let mut args = Vec::new();
     while !matches!(self.peek().kind, TokenKind::RParen) {
       if matches!(self.peek().kind, TokenKind::Eof) {
@@ -573,16 +601,16 @@ impl Parser {
   }
 }
 
-fn spanned_ast_from_symbol(name: String, span: Span) -> SpannedAst {
-  let ast = match name.as_str() {
-    "true" => AST::Bool(true),
-    "false" => AST::Bool(false),
+fn ast_from_symbol(name: String, span: Span) -> AST {
+  let kind = match name.as_str() {
+    "true" => ASTKind::Bool(true),
+    "false" => ASTKind::Bool(false),
     _ => match parse_identifier(&name) {
-      Identifier::Bare(name) => AST::Variable(name),
-      Identifier::Qualified(module, name) => AST::FunctionRef(module, name),
+      Identifier::Bare(name) => ASTKind::Variable(name),
+      Identifier::Qualified(module, name) => ASTKind::FunctionRef(module, name),
     },
   };
-  SpannedAst::new(ast, span)
+  AST::new(kind, span)
 }
 
 fn parse_identifier(name: &str) -> Identifier {
@@ -592,20 +620,13 @@ fn parse_identifier(name: &str) -> Identifier {
   }
 }
 
-fn parse_spanned_multiple(source: &str) -> Result<Vec<SpannedAst>, ParseError> {
+fn parse_internal(source: &str) -> Result<Vec<AST>, ParseError> {
   let tokens = Lexer::new(source).lex()?;
   Parser::new(tokens).parse_multiple()
 }
 
 pub fn read_multiple(source: &str) -> Result<Vec<AST>, String> {
-  parse_spanned_multiple(source)
-    .map(|forms| {
-      forms
-        .into_iter()
-        .map(|SpannedAst { ast, span: _span }| ast)
-        .collect()
-    })
-    .map_err(|error| error.render(source))
+  parse_internal(source).map_err(|error| error.render(source))
 }
 
 #[cfg(test)]
@@ -770,21 +791,37 @@ mod test {
   }
 
   #[test]
-  fn parser_keeps_full_byte_spans_until_ast_construction() {
-    let atom = parse_spanned_multiple("  42").unwrap().remove(0);
+  fn ast_nodes_keep_full_byte_spans() {
+    let atom = parse_internal("  42").unwrap().remove(0);
     assert_eq!(atom.span, 2..4);
 
-    let nested_call = parse_spanned_multiple("(f (g 1))").unwrap().remove(0);
-    assert_eq!(nested_call.span, 0..9);
+    let conditional = parse_internal("(if true (f 1) 2)").unwrap().remove(0);
+    assert_eq!(conditional.span, 0..17);
+    let ASTKind::If(condition, then_branch, else_branch) = &conditional.kind else {
+      panic!("expected if, got {conditional:?}");
+    };
+    assert_eq!(condition.span, 4..8);
+    assert_eq!(then_branch.span, 9..14);
+    assert_eq!(else_branch.span, 15..16);
 
-    let special_form = parse_spanned_multiple("(if true 1 2)").unwrap().remove(0);
-    assert_eq!(special_form.span, 0..13);
+    let ASTKind::CallFixed(_, args) = &then_branch.kind else {
+      panic!("expected fixed call, got {then_branch:?}");
+    };
+    assert_eq!(args[0].span, 12..13);
+  }
+
+  #[test]
+  fn semantic_equality_ignores_spans() {
+    assert_eq!(
+      AST::new(ASTKind::Int(1), 0..1),
+      AST::new(ASTKind::Int(1), 20..21)
+    );
   }
 
   #[test]
   fn eof_errors_use_an_empty_span_at_source_end() {
     let source = "(f 1";
-    let error = parse_spanned_multiple(source).unwrap_err();
+    let error = parse_internal(source).unwrap_err();
     assert_eq!(error.span, source.len()..source.len());
   }
 }
