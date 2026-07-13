@@ -1242,8 +1242,12 @@ mod test {
   }
 
   #[test]
-  fn empty_function_body_returns_void() {
-    assert_main_eq("(fn main () )", SLValue::Void);
+  fn empty_function_body_is_rejected() {
+    let err = run_main("(fn main () )").unwrap_err();
+    assert!(
+      err.contains("`fn` must have at least one body expression"),
+      "got: {err}"
+    );
   }
 
   #[test]
