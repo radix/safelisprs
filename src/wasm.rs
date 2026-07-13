@@ -637,8 +637,10 @@ impl<'b> ModuleCompiler<'b> {
       | ASTKind::FunctionRef(_, _) => {}
       ASTKind::Let(name, _, expr) => {
         self.count_let_locals(expr, locals, next_pair)?;
-        locals.push((name.clone(), *next_pair));
-        *next_pair += 1;
+        if self.resolve_local(locals, name).is_none() {
+          locals.push((name.clone(), *next_pair));
+          *next_pair += 1;
+        }
       }
       ASTKind::If(cond, then, els) => {
         self.count_let_locals(cond, locals, next_pair)?;
@@ -730,9 +732,15 @@ impl<'b> ModuleCompiler<'b> {
           num_imports,
           func,
         )?;
-        let pair_idx = *next_pair;
-        *next_pair += 1;
-        locals.push((name.clone(), pair_idx));
+        let pair_idx = match self.resolve_local(locals, name) {
+          Some(pair_idx) => pair_idx,
+          None => {
+            let pair_idx = *next_pair;
+            *next_pair += 1;
+            locals.push((name.clone(), pair_idx));
+            pair_idx
+          }
+        };
         let pl = Self::payload_local(pair_idx, num_params);
         let tl = Self::tag_local(pair_idx, num_params, num_lets);
         // Stack: [..., payload(i64), tag(i32)].

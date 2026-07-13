@@ -291,11 +291,14 @@ impl Checker {
         self
           .unify(condition_type, Type::Bool)
           .map_err(|error| error.at(condition.span.clone()))?;
-        let then_type = self.infer(env, type_vars, then_branch)?;
-        let else_type = self.infer(env, type_vars, else_branch)?;
+        let mut then_env = env.clone();
+        let mut else_env = env.clone();
+        let then_type = self.infer(&mut then_env, type_vars, then_branch)?;
+        let else_type = self.infer(&mut else_env, type_vars, else_branch)?;
         self
           .unify(then_type.clone(), else_type)
           .map_err(|error| error.at(else_branch.span.clone()))?;
+        *env = intersect_compatible_bindings(then_env, &else_env);
         Ok(then_type)
       }
       ASTKind::Block(body) => {
@@ -717,6 +720,70 @@ impl Checker {
   }
 }
 
+fn intersect_compatible_bindings(then_env: Env, else_env: &Env) -> Env {
+  then_env
+    .into_iter()
+    .filter(|(name, then_binding)| {
+      else_env
+        .get(name)
+        .is_some_and(|else_binding| bindings_compatible(then_binding, else_binding))
+    })
+    .collect()
+}
+
+fn bindings_compatible(left: &Binding, right: &Binding) -> bool {
+  match (left, right) {
+    (Binding::Mono(left), Binding::Mono(right)) => types_equivalent(left, right),
+    (Binding::Poly(left), Binding::Poly(right)) => schemes_equivalent(left, right),
+    (Binding::ForbiddenNestedSelf, Binding::ForbiddenNestedSelf) => true,
+    _ => false,
+  }
+}
+
+fn schemes_equivalent(left: &Scheme, right: &Scheme) -> bool {
+  left.params.len() == right.params.len()
+    && left
+      .params
+      .iter()
+      .zip(&right.params)
+      .all(|(left, right)| types_equivalent(left, right))
+    && match (&left.rest, &right.rest) {
+      (Some(left), Some(right)) => types_equivalent(left, right),
+      (None, None) => true,
+      _ => false,
+    }
+    && types_equivalent(&left.ret, &right.ret)
+    && left.quantified.len() == right.quantified.len()
+    && left
+      .quantified
+      .iter()
+      .zip(&right.quantified)
+      .all(|(left, right)| Rc::ptr_eq(left, right))
+}
+
+fn types_equivalent(left: &Type, right: &Type) -> bool {
+  match (prune(left), prune(right)) {
+    (Type::Int, Type::Int)
+    | (Type::Float, Type::Float)
+    | (Type::String, Type::String)
+    | (Type::Bool, Type::Bool)
+    | (Type::Void, Type::Void) => true,
+    (Type::Cell(left), Type::Cell(right)) | (Type::List(left), Type::List(right)) => {
+      types_equivalent(&left, &right)
+    }
+    (Type::Fn(left_params, left_ret), Type::Fn(right_params, right_ret)) => {
+      left_params.len() == right_params.len()
+        && left_params
+          .iter()
+          .zip(&right_params)
+          .all(|(left, right)| types_equivalent(left, right))
+        && types_equivalent(&left_ret, &right_ret)
+    }
+    (Type::Var(left), Type::Var(right)) => Rc::ptr_eq(&left, &right),
+    _ => false,
+  }
+}
+
 fn resolve_type(ast: &TypeAst, vars: &TypeVars) -> Result<Type, TypeError> {
   match ast {
     TypeAst::Named(name) => match name.as_str() {
@@ -1036,6 +1103,20 @@ mod tests {
     let error = check("(fn main () ->Int (if 1 2 3))").unwrap_err();
     assert!(
       error.message.contains("expected `Bool`, got `Int`"),
+      "{error}"
+    );
+  }
+
+  #[test]
+  fn binding_created_in_only_one_if_branch_is_not_available_afterward() {
+    let error = check(
+      "(fn main () ->Int
+         (if true (let x 1) (let y 2))
+         y)",
+    )
+    .unwrap_err();
+    assert!(
+      error.message.contains("unknown function `main.y`"),
       "{error}"
     );
   }
