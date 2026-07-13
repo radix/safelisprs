@@ -145,6 +145,14 @@ fn register_one(linker: &mut Linker<()>, b: &safelisp::wasm::Builtin) {
 #[case::if_selects_else_branch("(fn main () (if false 42 0))", Val::Int(0))]
 #[case::if_with_condition_from_call("(fn main () (if (std.== 1 1) 7 8))", Val::Int(7))]
 #[case::if_branches_can_use_let_variables("(fn main () (let a 10) (if true a 0))", Val::Int(10))]
+#[case::binding_created_in_both_if_branches(
+  "(fn main () ->Int (if true (let a 10) (let a 20)) a)",
+  Val::Int(10)
+)]
+#[case::binding_created_in_both_if_branches_else_path(
+  "(fn main () ->Int (if false (let a 10) (let a 20)) a)",
+  Val::Int(20)
+)]
 #[case::calls_same_module_function("(fn id (a:Int) ->Int a) (fn main () (id 99))", Val::Int(99))]
 #[case::calls_function_with_multiple_args(
   "(fn first (a:Int b:Int) ->Int a) (fn main () (first 5 6))",
