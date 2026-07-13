@@ -71,15 +71,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "atoms"
-version = "2.2.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "159f9c3fa6c8eeff49500c4c011782f14bdb96281bc41947e455653d62228213"
-dependencies = [
- "unescape",
-]
-
-[[package]]
 name = "atty"
 version = "0.2.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1050,7 +1041,6 @@ name = "safelisp"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "atoms",
  "bincode",
  "blake3",
  "clap",
@@ -1063,6 +1053,7 @@ dependencies = [
  "serde",
  "serde_derive",
  "serde_yaml",
+ "unescape",
  "wasm-encoder 0.252.0",
  "wasmtime",
 ]

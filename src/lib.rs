@@ -1,5 +1,3 @@
-extern crate atoms;
-
 #[macro_use]
 extern crate maplit;
 #[macro_use]

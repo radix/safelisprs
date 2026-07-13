@@ -5,7 +5,7 @@ edition = "2021"
 authors = ["Christopher Armstrong <radix@twistedmatrix.com>"]
 
 [dependencies]
-atoms = "2.2.3"
+unescape = "0.1"
 clap = {version = "3.1.15", features = ["derive"]}
 maplit = "1.0.1"
 serde = "1.0"
