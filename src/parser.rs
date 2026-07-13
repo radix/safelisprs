@@ -181,15 +181,7 @@ impl ParseError {
   }
 
   fn render(&self, source: &str) -> String {
-    let offset = self.span.start.min(source.len());
-    let before = &source[..offset];
-    let line = before.bytes().filter(|byte| *byte == b'\n').count() + 1;
-    let column = before
-      .rsplit_once('\n')
-      .map_or(before, |(_, current_line)| current_line)
-      .chars()
-      .count()
-      + 1;
+    let (line, column) = source_position(source, self.span.start);
 
     if self.expected.is_empty() {
       format!("line {line}, column {column}: {}", self.message)
@@ -201,6 +193,19 @@ impl ParseError {
       )
     }
   }
+}
+
+pub(crate) fn source_position(source: &str, offset: usize) -> (usize, usize) {
+  let offset = offset.min(source.len());
+  let before = &source[..offset];
+  let line = before.bytes().filter(|byte| *byte == b'\n').count() + 1;
+  let column = before
+    .rsplit_once('\n')
+    .map_or(before, |(_, current_line)| current_line)
+    .chars()
+    .count()
+    + 1;
+  (line, column)
 }
 
 struct Lexer<'a> {
@@ -1017,5 +1022,11 @@ mod test {
     let source = "(f 1";
     let error = parse_internal(source).unwrap_err();
     assert_eq!(error.span, source.len()..source.len());
+  }
+
+  #[test]
+  fn source_positions_count_characters_instead_of_utf8_bytes() {
+    assert_eq!(source_position("ééx", 4), (1, 3));
+    assert_eq!(source_position("é\n  x", 5), (2, 3));
   }
 }

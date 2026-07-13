@@ -476,7 +476,7 @@ fn _compile_from_source(
   specs: &[BuiltinSpec],
 ) -> Result<CompiledModules, String> {
   let asts = parser::read_multiple(module_source)?;
-  crate::typecheck::typecheck(&asts, specs).map_err(|error| error.to_string())?;
+  crate::typecheck::typecheck(&asts, specs).map_err(|error| error.render(module_source))?;
   let compiled_modules = compile_modules(&asts)?;
   Ok(compiled_modules)
 }
@@ -626,12 +626,10 @@ mod test {
   #[test]
   fn source_compilation_rejects_type_errors_before_codegen() {
     let builtins = crate::builtins::default_builtins();
-    let error = compile_executable_from_source(
-      "(fn main () ->Int (std.+ 1 \"not-an-int\"))",
-      ("main", "main"),
-      &builtins.specs(),
-    )
-    .unwrap_err();
+    let source = "(fn main () ->Int\n  (std.+ 1\n    \"not-an-int\"))";
+    let error =
+      compile_executable_from_source(source, ("main", "main"), &builtins.specs()).unwrap_err();
+    assert!(error.starts_with("line 3, column 5: TypeError:"), "{error}");
     assert!(
       error.contains("type `String` does not satisfy trait `Add`")
         || error.contains("expected `Int`, got `String`"),
