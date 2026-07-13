@@ -991,33 +991,38 @@ mod test {
     let ptr = std::mem::size_of::<Gc<'static, Accounted<'static>>>();
     let cases = [
       (
-        format!("(fn main () (std.concat \"{large}\" \"{large}\"))"),
+        format!("(fn main () ->String (std.concat \"{large}\" \"{large}\"))"),
         2,
         1024,
       ),
-      ("(fn main () (std.list 1 2 3 4))".to_string(), 4, 4 * ptr),
       (
-        "(fn main () (std.push (std.list 1 2 3) 4))".to_string(),
+        "(fn main () ->(List Int) (std.list 1 2 3 4))".to_string(),
+        4,
+        4 * ptr,
+      ),
+      (
+        "(fn main () ->(List Int) (std.push (std.list 1 2 3) 4))".to_string(),
         2,
         4 * ptr,
       ),
       (
-        "(fn main () (std.range 0 10000))".to_string(),
+        "(fn main () ->(List Int) (std.range 0 10000))".to_string(),
         2,
         10_000 * ptr,
       ),
       (
-        "(fn main () (fn id (x:Int) ->Int x) (std.map (std.list 1 2 3) id))".to_string(),
+        "(fn main () ->(List Int) (fn id (x:Int) ->Int x) (std.map (std.list 1 2 3) id))"
+          .to_string(),
         2,
         3 * ptr,
       ),
       (
-        "(fn main () (std.slice (std.list 1 2 3 4) 1 3))".to_string(),
+        "(fn main () ->(List Int) (std.slice (std.list 1 2 3 4) 1 3))".to_string(),
         3,
         2 * ptr,
       ),
       (
-        format!("(fn main () (std.slice \"{large}\" 0 512))"),
+        format!("(fn main () ->String (std.slice \"{large}\" 0 512))"),
         3,
         large.len(),
       ),
@@ -1031,7 +1036,7 @@ mod test {
   #[test]
   fn list_idx_returns_the_existing_value_without_cloning() {
     let large = "x".repeat(64 * 1024);
-    let source = format!("(fn main () (std.idx (std.list \"{large}\") 0))");
+    let source = format!("(fn main () ->String (std.idx (std.list \"{large}\") 0))");
     let mut exec = before_final_call(&source);
     let scratch_bytes = 2 * std::mem::size_of::<Gc<'static, Accounted<'static>>>();
     exec.set_memory_limit(Some(exec.memory_usage() + scratch_bytes));
@@ -1048,7 +1053,7 @@ mod test {
   #[test]
   fn builtin_argument_buffer_is_reserved_before_allocation() {
     let source = format!(
-      "(fn main () (std.list {}))",
+      "(fn main () ->(List Int) (std.list {}))",
       (0..128)
         .map(|i| i.to_string())
         .collect::<Vec<_>>()
@@ -1066,7 +1071,7 @@ mod test {
 
   #[test]
   fn range_checks_gc_growth_during_the_builtin_call() {
-    let mut exec = before_final_call("(fn main () (std.range 0 10000))");
+    let mut exec = before_final_call("(fn main () ->(List Int) (std.range 0 10000))");
     let ptr = std::mem::size_of::<Gc<'static, Accounted<'static>>>();
     let scratch_bytes = 2 * ptr;
     let result_vec_bytes = 10_000 * ptr;
@@ -1087,15 +1092,15 @@ mod test {
   #[test]
   fn string_slicing_uses_character_indices() {
     assert_eq!(
-      eval_builtin_main("(fn main () (std.slice \"aé🦀z\" 1 3))").unwrap(),
+      eval_builtin_main("(fn main () ->String (std.slice \"aé🦀z\" 1 3))").unwrap(),
       SLValue::String("é🦀".to_string())
     );
     assert_eq!(
-      eval_builtin_main("(fn main () (std.slice \"aé🦀z\" -3 -1))").unwrap(),
+      eval_builtin_main("(fn main () ->String (std.slice \"aé🦀z\" -3 -1))").unwrap(),
       SLValue::String("é🦀".to_string())
     );
     assert_eq!(
-      eval_builtin_main("(fn main () (std.slice \"aé🦀z\" -2 -1))").unwrap(),
+      eval_builtin_main("(fn main () ->String (std.slice \"aé🦀z\" -2 -1))").unwrap(),
       SLValue::String("🦀".to_string())
     );
   }
@@ -1114,7 +1119,7 @@ mod test {
   #[case::big(123_456_789, "big", -7499502896394584729)]
   #[case::huge(-8_589_934_592, "huge", 5640261956235639084)]
   fn rand_rng_surface(#[case] seed: i64, #[case] name: &str, #[case] expected: i64) {
-    let source = format!("(fn main () (rand.rng {} \"{}\"))", seed, name);
+    let source = format!("(fn main () ->(Cell Int) (rand.rng {} \"{}\"))", seed, name);
     let result = eval_builtin_main(&source).unwrap();
     match result {
       SLValue::Cell(inner) => {
@@ -1152,7 +1157,7 @@ mod test {
     // the shared `rng` cell via `rand.roll!`. The closure transform wraps
     // captured `rng` in a cell, so `rand.roll!` can mutate it.
     let src = format!(
-      "(fn main ()\n\
+      "(fn main () ->(List Int)\n\
         (let rng (rand.rng {seed} \"{name}\"))\n\
         (fn roll (_idx:Int) ->Int (rand.roll! rng 20))\n\
         (std.map (std.range 0 10) roll))"
@@ -1175,7 +1180,7 @@ mod test {
   #[test]
   fn range_basic() {
     assert_eq!(
-      eval_builtin_main("(fn main () (std.range 0 5))").unwrap(),
+      eval_builtin_main("(fn main () ->(List Int) (std.range 0 5))").unwrap(),
       SLValue::List(vec![
         SLValue::Int(0),
         SLValue::Int(1),
@@ -1189,11 +1194,11 @@ mod test {
   #[test]
   fn range_empty() {
     assert_eq!(
-      eval_builtin_main("(fn main () (std.range 3 3))").unwrap(),
+      eval_builtin_main("(fn main () ->(List Int) (std.range 3 3))").unwrap(),
       SLValue::List(vec![])
     );
     assert_eq!(
-      eval_builtin_main("(fn main () (std.range 5 2))").unwrap(),
+      eval_builtin_main("(fn main () ->(List Int) (std.range 5 2))").unwrap(),
       SLValue::List(vec![])
     );
   }
@@ -1201,7 +1206,7 @@ mod test {
   #[test]
   fn range_negative_start() {
     assert_eq!(
-      eval_builtin_main("(fn main () (std.range -2 2))").unwrap(),
+      eval_builtin_main("(fn main () ->(List Int) (std.range -2 2))").unwrap(),
       SLValue::List(vec![
         SLValue::Int(-2),
         SLValue::Int(-1),
@@ -1216,7 +1221,7 @@ mod test {
   fn map_doubles() {
     assert_eq!(
       eval_builtin_main(
-        "(fn main ()
+        "(fn main () ->(List Int)
            (fn dbl (x:Int) ->Int (std.+ x x))
            (std.map (std.list 1 2 3) dbl))"
       )
@@ -1229,7 +1234,7 @@ mod test {
   fn map_empty_list() {
     assert_eq!(
       eval_builtin_main(
-        "(fn main ()
+        "(fn main () ->(List Int)
            (fn id (x:Int) ->Int x)
            (std.map (std.list) id))"
       )
@@ -1242,7 +1247,7 @@ mod test {
   fn map_with_local_closure() {
     assert_eq!(
       eval_builtin_main(
-        "(fn main ()
+        "(fn main () ->(List Int)
            (fn inc (x:Int) ->Int (std.+ x 1))
            (std.map (std.range 0 5) inc))"
       )
@@ -1260,7 +1265,7 @@ mod test {
   #[test]
   fn map_non_list_errors() {
     let err = eval_builtin_main(
-      "(fn main ()
+      "(fn main () ->Int
          (fn id (x:Int) ->Int x)
          (std.map 5 id))",
     )
@@ -1271,21 +1276,22 @@ mod test {
   /// `rand.roll!` rejects non-positive sides with a runtime error.
   #[test]
   fn rand_roll_rejects_non_positive_sides() {
-    let err = eval_builtin_main("(fn main () (rand.roll! (rand.rng 0 \"x\") 0))").unwrap_err();
+    let err =
+      eval_builtin_main("(fn main () ->Int (rand.roll! (rand.rng 0 \"x\") 0))").unwrap_err();
     assert!(err.contains("sides must be positive"), "got: {}", err);
   }
 
   /// `rand.roll!` rejects a non-Cell rng.
   #[test]
   fn rand_roll_rejects_non_cell_rng() {
-    let err = eval_builtin_main("(fn main () (rand.roll! \"not-a-cell\" 6))").unwrap_err();
+    let err = eval_builtin_main("(fn main () ->Int (rand.roll! \"not-a-cell\" 6))").unwrap_err();
     assert!(err.contains("expected `(Cell Int)`"), "got: {}", err);
   }
 
   /// `rand.rng` rejects non-Int seeds.
   #[test]
   fn rand_rng_rejects_non_int_seed() {
-    let err = eval_builtin_main("(fn main () (rand.rng \"x\" \"name\"))").unwrap_err();
+    let err = eval_builtin_main("(fn main () ->Int (rand.rng \"x\" \"name\"))").unwrap_err();
     assert!(err.contains("expected `Int`"), "got: {}", err);
   }
 }
