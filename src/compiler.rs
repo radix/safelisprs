@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::builtins::BuiltinSpec;
 use crate::closure::transform_closures_in_module;
-use crate::parser::{self, Identifier, AST};
+use crate::parser::{self, ASTKind, Identifier, AST};
 
 /// A Package can either represent a "program" or a "library".
 /// If a `main` is provided, then it can be executed as a program directly.
@@ -259,15 +259,15 @@ pub fn compile_module(module_name: &str, asts: &[AST]) -> Result<CompiledModule,
   let asts = transform_closures_in_module(module_name, asts)?;
   let module_functions: HashSet<String> = asts
     .iter()
-    .filter_map(|ast| match ast {
-      AST::DefineFn(func) => Some(func.name.clone()),
+    .filter_map(|ast| match &ast.kind {
+      ASTKind::DefineFn(func) => Some(func.name.clone()),
       _ => None,
     })
     .collect();
   let mut functions = vec![];
   for ast in &asts {
-    match ast {
-      AST::DefineFn(func) => {
+    match &ast.kind {
+      ASTKind::DefineFn(func) => {
         functions.extend(compile_function(module_name, &module_functions, func)?)
       }
       x => return Err(format!("Unexpected form at top-level: {:?}", x)),
@@ -325,8 +325,8 @@ fn compile_expr(
   locals: &mut HashMap<String, u16>,
 ) -> Result<Vec<CompiledInstruction>, String> {
   let mut instructions = vec![];
-  match ast {
-    AST::Call(callable_expr, arg_exprs) => {
+  match &ast.kind {
+    ASTKind::Call(callable_expr, arg_exprs) => {
       for expr in arg_exprs {
         instructions.extend(compile_expr(module_name, module_functions, expr, locals)?);
       }
@@ -338,7 +338,7 @@ fn compile_expr(
       )?);
       instructions.push(Instruction::CallDynamic(arg_exprs.len() as u16))
     }
-    AST::CallFixed(identifier, arg_exprs) => {
+    ASTKind::CallFixed(identifier, arg_exprs) => {
       for expr in arg_exprs {
         instructions.extend(compile_expr(module_name, module_functions, expr, locals)?);
       }
@@ -358,28 +358,28 @@ fn compile_expr(
         arg_exprs.len() as u16,
       ))
     }
-    AST::Cell(expr) => {
+    ASTKind::Cell(expr) => {
       instructions.extend(compile_expr(module_name, module_functions, expr, locals)?);
       instructions.push(Instruction::MakeCell);
     }
-    AST::DerefCell(expr) => {
+    ASTKind::DerefCell(expr) => {
       instructions.extend(compile_expr(module_name, module_functions, expr, locals)?);
       instructions.push(Instruction::DerefCell);
     }
-    AST::SetCell(target, value) => {
+    ASTKind::SetCell(target, value) => {
       // Evaluate the value, then the target (which must resolve to a Cell).
       // Stack order at SetCell time: [value, cell] (cell on TOS).
       instructions.extend(compile_expr(module_name, module_functions, value, locals)?);
       instructions.extend(compile_expr(module_name, module_functions, target, locals)?);
       instructions.push(Instruction::SetCell);
     }
-    AST::FunctionRef(mname, fname) => {
+    ASTKind::FunctionRef(mname, fname) => {
       instructions.push(Instruction::MakeFunctionRef((
         mname.to_owned(),
         fname.to_owned(),
       )));
     }
-    AST::Let(name, expr) => {
+    ASTKind::Let(name, expr) => {
       if !locals.contains_key(name) {
         locals.insert(name.clone(), locals.len() as u16);
       }
@@ -388,14 +388,14 @@ fn compile_expr(
       instructions.push(Instruction::SetLocal(local_index));
       instructions.push(Instruction::LoadLocal(local_index));
     }
-    AST::PartialApply(expr, args) => {
+    ASTKind::PartialApply(expr, args) => {
       for expr in args {
         instructions.extend(compile_expr(module_name, module_functions, expr, locals)?);
       }
       instructions.extend(compile_expr(module_name, module_functions, expr, locals)?);
       instructions.push(Instruction::PartialApply(args.len() as u16));
     }
-    AST::If(cond, then, els) => {
+    ASTKind::If(cond, then, els) => {
       // <cond>; JumpIfFalse(+else); <then>; Jump(+end); <else>; L_end:
       //
       // We generate the code with placeholder jumps, remember their indices,
@@ -426,7 +426,7 @@ fn compile_expr(
       instructions[jmp_else] = Instruction::JumpIfFalse(else_offset);
       instructions[jmp_end] = Instruction::Jump(end_offset);
     }
-    AST::Block(body) => {
+    ASTKind::Block(body) => {
       // Evaluate each sub-expression; discard all but the last by popping,
       // and leave the last on the stack as the block's value.
       let last_idx = body.len().saturating_sub(1);
@@ -437,7 +437,7 @@ fn compile_expr(
         }
       }
     }
-    AST::Variable(name) => {
+    ASTKind::Variable(name) => {
       if let Some(local) = locals.get(name) {
         instructions.push(Instruction::LoadLocal(*local));
       } else if module_functions.contains(name) {
@@ -450,10 +450,10 @@ fn compile_expr(
       }
     }
 
-    AST::Int(i) => instructions.push(Instruction::PushInt(*i)),
-    AST::Float(f) => instructions.push(Instruction::PushFloat(*f)),
-    AST::String(s) => instructions.push(Instruction::PushString(s.clone())),
-    AST::Bool(b) => instructions.push(Instruction::PushBool(*b)),
+    ASTKind::Int(i) => instructions.push(Instruction::PushInt(*i)),
+    ASTKind::Float(f) => instructions.push(Instruction::PushFloat(*f)),
+    ASTKind::String(s) => instructions.push(Instruction::PushString(s.clone())),
+    ASTKind::Bool(b) => instructions.push(Instruction::PushBool(*b)),
     x => return Err(format!("Unexpected form at top-level: {:?}", x)),
   }
   Ok(instructions)

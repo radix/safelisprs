@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use crate::parser::{Function, AST};
+use crate::parser::{ASTKind, Function, Span, AST};
 
 pub fn transform_closures_in_module(module_name: &str, items: &[AST]) -> Result<Vec<AST>, String> {
   //! There isn't technically anything called a "closure" in either the runtime or compile time of
@@ -16,9 +16,9 @@ pub fn transform_closures_in_module(module_name: &str, items: &[AST]) -> Result<
 
   let mut result = vec![];
   for item in items {
-    let out = match item {
-      AST::DefineFn(func) => closurize_function(module_name, func)?,
-      x => vec![x.clone()],
+    let out = match &item.kind {
+      ASTKind::DefineFn(func) => closurize_function(module_name, func, item.span.clone())?,
+      _ => vec![item.clone()],
     };
     result.extend(out);
   }
@@ -34,7 +34,11 @@ struct TransformResult {
   captures: Vec<String>,
 }
 
-fn closurize_function(module_name: &str, outer_func: &Function) -> Result<Vec<AST>, String> {
+fn closurize_function(
+  module_name: &str,
+  outer_func: &Function,
+  source_span: Span,
+) -> Result<Vec<AST>, String> {
   //! Transform a function into a simpler form where nested functions are lifted
   //! to the top level and their captured environment is threaded in as hidden
   //! parameters.
@@ -43,6 +47,7 @@ fn closurize_function(module_name: &str, outer_func: &Function) -> Result<Vec<AS
     outer_func,
     outer_func.name.clone(),
     &HashSet::new(),
+    source_span,
   )?;
   Ok(result.lifted)
 }
@@ -52,6 +57,7 @@ fn transform_function(
   func: &Function,
   transformed_name: String,
   environment: &HashSet<String>,
+  source_span: Span,
 ) -> Result<TransformResult, String> {
   //! Rewrite a function into simpler AST that the compiler already knows how to
   //! turn into bytecode, while also returning the capture info its parent
@@ -91,9 +97,18 @@ fn transform_function(
     if cell_vars.contains(param) {
       code.splice(
         0..0,
-        [AST::Let(
-          param.clone(),
-          Box::new(AST::Cell(Box::new(AST::Variable(param.clone())))),
+        [AST::new(
+          ASTKind::Let(
+            param.clone(),
+            Box::new(AST::new(
+              ASTKind::Cell(Box::new(AST::new(
+                ASTKind::Variable(param.clone()),
+                source_span.clone(),
+              ))),
+              source_span.clone(),
+            )),
+          ),
+          source_span.clone(),
         )],
       );
     }
@@ -102,11 +117,14 @@ fn transform_function(
   let mut params = vec![];
   params.extend(captures.iter().cloned());
   params.extend(func.params.clone());
-  lifted.push(AST::DefineFn(Function {
-    name: transformed_name,
-    params,
-    code,
-  }));
+  lifted.push(AST::new(
+    ASTKind::DefineFn(Function {
+      name: transformed_name,
+      params,
+      code,
+    }),
+    source_span,
+  ));
   Ok(TransformResult { lifted, captures })
 }
 
@@ -121,8 +139,8 @@ fn transform_ast(
 ) -> Result<AST, String> {
   //! Do closure transformations on one expression inside a function body,
   //! recording captures as they are discovered.
-  match ast {
-    AST::Let(name, expr) => {
+  match &ast.kind {
+    ASTKind::Let(name, expr) => {
       let expr = transform_ast(
         module_name,
         expr,
@@ -133,9 +151,9 @@ fn transform_ast(
         lifted,
       )?;
       locals.insert(name.clone());
-      Ok(AST::Let(name.clone(), Box::new(expr)))
+      Ok(ast.with_kind(ASTKind::Let(name.clone(), Box::new(expr))))
     }
-    AST::DefineFn(inner_func) => {
+    ASTKind::DefineFn(inner_func) => {
       let mut inner_environment = environment.clone();
       inner_environment.extend(locals.iter().cloned());
       let TransformResult {
@@ -146,6 +164,7 @@ fn transform_ast(
         inner_func,
         mangle_closure_name(&inner_func.name),
         &inner_environment,
+        ast.span.clone(),
       )?;
       for capture in &transformed_captures {
         if locals.contains(capture) {
@@ -156,22 +175,23 @@ fn transform_ast(
       }
       lifted.extend(transformed_lifted);
       locals.insert(inner_func.name.clone());
-      Ok(AST::Let(
+      Ok(ast.with_kind(ASTKind::Let(
         inner_func.name.clone(),
         Box::new(closure_expr(
           module_name,
           &mangle_closure_name(&inner_func.name),
           &transformed_captures,
+          ast.span.clone(),
         )),
-      ))
+      )))
     }
-    AST::Variable(name) => {
+    ASTKind::Variable(name) => {
       if !locals.contains(name) && environment.contains(name) {
         push_unique(captures, name.clone());
       }
       Ok(ast.clone())
     }
-    AST::Call(callable, args) => {
+    ASTKind::Call(callable, args) => {
       let callable = transform_ast(
         module_name,
         callable,
@@ -193,9 +213,9 @@ fn transform_ast(
           lifted,
         )?);
       }
-      Ok(AST::Call(Box::new(callable), new_args))
+      Ok(ast.with_kind(ASTKind::Call(Box::new(callable), new_args)))
     }
-    AST::CallFixed(ident, args) => {
+    ASTKind::CallFixed(ident, args) => {
       if let crate::parser::Identifier::Bare(name) = ident {
         if !locals.contains(name) && environment.contains(name) {
           push_unique(captures, name.clone());
@@ -213,9 +233,9 @@ fn transform_ast(
           lifted,
         )?);
       }
-      Ok(AST::CallFixed(ident.clone(), new_args))
+      Ok(ast.with_kind(ASTKind::CallFixed(ident.clone(), new_args)))
     }
-    AST::Cell(expr) => Ok(AST::Cell(Box::new(transform_ast(
+    ASTKind::Cell(expr) => Ok(ast.with_kind(ASTKind::Cell(Box::new(transform_ast(
       module_name,
       expr,
       environment,
@@ -223,8 +243,8 @@ fn transform_ast(
       captures,
       cell_vars,
       lifted,
-    )?))),
-    AST::DerefCell(expr) => Ok(AST::DerefCell(Box::new(transform_ast(
+    )?)))),
+    ASTKind::DerefCell(expr) => Ok(ast.with_kind(ASTKind::DerefCell(Box::new(transform_ast(
       module_name,
       expr,
       environment,
@@ -232,11 +252,11 @@ fn transform_ast(
       captures,
       cell_vars,
       lifted,
-    )?))),
-    AST::SetCell(target, value) => {
+    )?)))),
+    ASTKind::SetCell(target, value) => {
       // If the target is a bare variable from the outer environment, it must
       // be captured (as a cell). If it's a local, it must become a cell_var.
-      if let AST::Variable(name) = target.as_ref() {
+      if let ASTKind::Variable(name) = &target.kind {
         if !locals.contains(name) && environment.contains(name) {
           push_unique(captures, name.clone());
         }
@@ -250,9 +270,9 @@ fn transform_ast(
         cell_vars,
         lifted,
       )?;
-      Ok(AST::SetCell(target.clone(), Box::new(value)))
+      Ok(ast.with_kind(ASTKind::SetCell(target.clone(), Box::new(value))))
     }
-    AST::PartialApply(callable, args) => {
+    ASTKind::PartialApply(callable, args) => {
       let callable = transform_ast(
         module_name,
         callable,
@@ -274,9 +294,9 @@ fn transform_ast(
           lifted,
         )?);
       }
-      Ok(AST::PartialApply(Box::new(callable), new_args))
+      Ok(ast.with_kind(ASTKind::PartialApply(Box::new(callable), new_args)))
     }
-    AST::If(cond, then, els) => {
+    ASTKind::If(cond, then, els) => {
       let cond = transform_ast(
         module_name,
         cond,
@@ -304,9 +324,9 @@ fn transform_ast(
         cell_vars,
         lifted,
       )?;
-      Ok(AST::If(Box::new(cond), Box::new(then), Box::new(els)))
+      Ok(ast.with_kind(ASTKind::If(Box::new(cond), Box::new(then), Box::new(els))))
     }
-    AST::Block(body) => {
+    ASTKind::Block(body) => {
       let mut new_body = vec![];
       for expr in body {
         new_body.push(transform_ast(
@@ -319,11 +339,13 @@ fn transform_ast(
           lifted,
         )?);
       }
-      Ok(AST::Block(new_body))
+      Ok(ast.with_kind(ASTKind::Block(new_body)))
     }
-    AST::Int(_) | AST::Float(_) | AST::String(_) | AST::Bool(_) | AST::FunctionRef(_, _) => {
-      Ok(ast.clone())
-    }
+    ASTKind::Int(_)
+    | ASTKind::Float(_)
+    | ASTKind::String(_)
+    | ASTKind::Bool(_)
+    | ASTKind::FunctionRef(_, _) => Ok(ast.clone()),
   }
 }
 
@@ -347,70 +369,70 @@ fn patch_cell_access(
   cell_vars: &HashSet<String>,
   locals: &mut HashSet<String>,
 ) -> Result<AST, String> {
-  match ast {
-    AST::Let(name, expr) => {
+  match &ast.kind {
+    ASTKind::Let(name, expr) => {
       let expr = patch_cell_access(expr, captures, cell_vars, locals)?;
       locals.insert(name.clone());
       if cell_vars.contains(name) {
-        Ok(AST::Let(name.clone(), Box::new(AST::Cell(Box::new(expr)))))
+        let cell = AST::new(ASTKind::Cell(Box::new(expr)), ast.span.clone());
+        Ok(ast.with_kind(ASTKind::Let(name.clone(), Box::new(cell))))
       } else {
-        Ok(AST::Let(name.clone(), Box::new(expr)))
+        Ok(ast.with_kind(ASTKind::Let(name.clone(), Box::new(expr))))
       }
     }
-    AST::Variable(name) => {
+    ASTKind::Variable(name) => {
       if must_deref(name, captures, cell_vars, locals) {
-        Ok(AST::DerefCell(Box::new(AST::Variable(name.clone()))))
+        Ok(ast.with_kind(ASTKind::DerefCell(Box::new(ast.clone()))))
       } else {
         Ok(ast.clone())
       }
     }
-    AST::Call(callable, args) => {
+    ASTKind::Call(callable, args) => {
       let callable = patch_cell_access(callable, captures, cell_vars, locals)?;
       let args = patch_cell_accesses(args, captures, cell_vars, locals)?;
-      Ok(AST::Call(Box::new(callable), args))
+      Ok(ast.with_kind(ASTKind::Call(Box::new(callable), args)))
     }
-    AST::CallFixed(ident, args) => {
+    ASTKind::CallFixed(ident, args) => {
       let args = patch_cell_accesses(args, captures, cell_vars, locals)?;
       if let crate::parser::Identifier::Bare(name) = ident {
         if must_deref(name, captures, cell_vars, locals) {
-          return Ok(AST::Call(
-            Box::new(AST::DerefCell(Box::new(AST::Variable(name.clone())))),
-            args,
-          ));
+          let variable = AST::new(ASTKind::Variable(name.clone()), ast.span.clone());
+          let callable = AST::new(ASTKind::DerefCell(Box::new(variable)), ast.span.clone());
+          return Ok(ast.with_kind(ASTKind::Call(Box::new(callable), args)));
         }
       }
-      Ok(AST::CallFixed(ident.clone(), args))
+      Ok(ast.with_kind(ASTKind::CallFixed(ident.clone(), args)))
     }
-    AST::Cell(expr) => Ok(AST::Cell(Box::new(patch_cell_access(
+    ASTKind::Cell(expr) => Ok(ast.with_kind(ASTKind::Cell(Box::new(patch_cell_access(
       expr, captures, cell_vars, locals,
-    )?))),
-    AST::DerefCell(expr) => Ok(AST::DerefCell(Box::new(patch_cell_access(
+    )?)))),
+    ASTKind::DerefCell(expr) => Ok(ast.with_kind(ASTKind::DerefCell(Box::new(patch_cell_access(
       expr, captures, cell_vars, locals,
-    )?))),
-    AST::SetCell(target, value) => {
+    )?)))),
+    ASTKind::SetCell(target, value) => {
       // The target must NOT be deref'd — we need the Cell itself to write
       // into it. Only the value expression gets normal cell-patching.
       let value = patch_cell_access(value, captures, cell_vars, locals)?;
-      Ok(AST::SetCell(target.clone(), Box::new(value)))
+      Ok(ast.with_kind(ASTKind::SetCell(target.clone(), Box::new(value))))
     }
-    AST::PartialApply(callable, args) => {
+    ASTKind::PartialApply(callable, args) => {
       let callable = patch_cell_access(callable, captures, cell_vars, locals)?;
-      Ok(AST::PartialApply(Box::new(callable), args.clone()))
+      Ok(ast.with_kind(ASTKind::PartialApply(Box::new(callable), args.clone())))
     }
-    AST::If(cond, then, els) => Ok(AST::If(
+    ASTKind::If(cond, then, els) => Ok(ast.with_kind(ASTKind::If(
       Box::new(patch_cell_access(cond, captures, cell_vars, locals)?),
       Box::new(patch_cell_access(then, captures, cell_vars, locals)?),
       Box::new(patch_cell_access(els, captures, cell_vars, locals)?),
-    )),
-    AST::Block(body) => Ok(AST::Block(patch_cell_accesses(
+    ))),
+    ASTKind::Block(body) => Ok(ast.with_kind(ASTKind::Block(patch_cell_accesses(
       body, captures, cell_vars, locals,
-    )?)),
-    AST::DefineFn(_)
-    | AST::Int(_)
-    | AST::Float(_)
-    | AST::String(_)
-    | AST::Bool(_)
-    | AST::FunctionRef(_, _) => Ok(ast.clone()),
+    )?))),
+    ASTKind::DefineFn(_)
+    | ASTKind::Int(_)
+    | ASTKind::Float(_)
+    | ASTKind::String(_)
+    | ASTKind::Bool(_)
+    | ASTKind::FunctionRef(_, _) => Ok(ast.clone()),
   }
 }
 
@@ -424,15 +446,25 @@ fn must_deref(
     || (cell_vars.contains(name) && locals.contains(name))
 }
 
-fn closure_expr(module_name: &str, lifted_name: &str, captures: &[String]) -> AST {
+fn closure_expr(module_name: &str, lifted_name: &str, captures: &[String], span: Span) -> AST {
   //! Generate a PartialApply of a closure with its captures
-  let func_ref = AST::FunctionRef(module_name.to_string(), lifted_name.to_string());
+  let func_ref = AST::new(
+    ASTKind::FunctionRef(module_name.to_string(), lifted_name.to_string()),
+    span.clone(),
+  );
   if captures.is_empty() {
     func_ref
   } else {
-    AST::PartialApply(
-      Box::new(func_ref),
-      captures.iter().cloned().map(AST::Variable).collect(),
+    AST::new(
+      ASTKind::PartialApply(
+        Box::new(func_ref),
+        captures
+          .iter()
+          .cloned()
+          .map(|name| AST::new(ASTKind::Variable(name), span.clone()))
+          .collect(),
+      ),
+      span,
     )
   }
 }
@@ -452,6 +484,46 @@ mod test {
   use super::*;
   use crate::parser::{read_multiple, Identifier};
 
+  #[allow(non_snake_case)]
+  fn Let(name: String, value: Box<AST>) -> AST {
+    AST::Let(name, value)
+  }
+
+  #[allow(non_snake_case)]
+  fn Variable(name: String) -> AST {
+    AST::Variable(name)
+  }
+
+  #[allow(non_snake_case)]
+  fn Int(value: i64) -> AST {
+    AST::Int(value)
+  }
+
+  #[allow(non_snake_case)]
+  fn Cell(value: Box<AST>) -> AST {
+    AST::Cell(value)
+  }
+
+  #[allow(non_snake_case)]
+  fn DerefCell(value: Box<AST>) -> AST {
+    AST::DerefCell(value)
+  }
+
+  #[allow(non_snake_case)]
+  fn PartialApply(callable: Box<AST>, args: Vec<AST>) -> AST {
+    AST::PartialApply(callable, args)
+  }
+
+  #[allow(non_snake_case)]
+  fn FunctionRef(module: String, name: String) -> AST {
+    AST::FunctionRef(module, name)
+  }
+
+  #[allow(non_snake_case)]
+  fn CallFixed(identifier: Identifier, args: Vec<AST>) -> AST {
+    AST::CallFixed(identifier, args)
+  }
+
   #[test]
   fn transformed_closure() -> Result<(), String> {
     let source = "
@@ -460,7 +532,6 @@ mod test {
         (fn inner () a))";
     let asts = read_multiple(source)?;
     let new_asts = transform_closures_in_module("main", &asts)?;
-    use crate::parser::AST::*;
     let expected = vec![
       AST::DefineFn(Function {
         name: "inner:(closure)".to_string(),
@@ -500,7 +571,6 @@ mod test {
         (fn inner () par))";
     let asts = read_multiple(source)?;
     let new_asts = transform_closures_in_module("main", &asts)?;
-    use crate::parser::AST::*;
     let expected = vec![
       AST::DefineFn(Function {
         name: "inner:(closure)".to_string(),
@@ -548,7 +618,6 @@ mod test {
         (fn inner () 1))";
     let asts = read_multiple(source)?;
     let new_asts = transform_closures_in_module("main", &asts)?;
-    use crate::parser::AST::*;
     let expected = vec![
       AST::DefineFn(Function {
         name: "inner:(closure)".to_string(),
@@ -584,7 +653,6 @@ mod test {
           a))";
     let asts = read_multiple(source)?;
     let new_asts = transform_closures_in_module("main", &asts)?;
-    use crate::parser::AST::*;
     let expected = vec![
       AST::DefineFn(Function {
         name: "inner:(closure)".to_string(),
@@ -626,7 +694,6 @@ mod test {
           a))";
     let asts = read_multiple(source)?;
     let new_asts = transform_closures_in_module("main", &asts)?;
-    use crate::parser::AST::*;
     let expected = vec![
       AST::DefineFn(Function {
         name: "inner:(closure)".to_string(),
@@ -718,6 +785,22 @@ mod test {
       }),
     ];
     assert_eq!(new_asts, expected);
+    Ok(())
+  }
+
+  #[test]
+  fn closure_transforms_preserve_function_spans() -> Result<(), String> {
+    let source = "(fn outer () (fn inner () 1))";
+    let asts = read_multiple(source)?;
+    let outer_span = asts[0].span.clone();
+    let ASTKind::DefineFn(outer) = &asts[0].kind else {
+      panic!("expected outer function");
+    };
+    let inner_span = outer.code[0].span.clone();
+
+    let transformed = transform_closures_in_module("main", &asts)?;
+    assert_eq!(transformed[0].span, inner_span);
+    assert_eq!(transformed[1].span, outer_span);
     Ok(())
   }
 }
