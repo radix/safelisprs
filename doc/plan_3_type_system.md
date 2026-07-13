@@ -316,9 +316,9 @@ is an error.
 order. Non-final expressions are statements — inferred, result discarded.
 The final expression unifies with the declared return type, **except** when
 the declared return type is `Void`: then the final expression is treated
-like a statement and its type is discarded. (This makes the elided-return
-form `(fn main () (std.+ 1 2))` legal; the runtime still leaves the value on
-the stack, but the type system won't let a caller use it.)
+like a statement and its type is discarded. Code generation discards the
+runtime value as well and returns an actual `Void`, so callers cannot observe
+the body's final value.
 
 ### 4b. Inference is synthesis-only
 

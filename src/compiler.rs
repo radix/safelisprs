@@ -51,6 +51,7 @@ pub enum Instruction<CallType> {
   PushFloat(f64),
   PushString(String),
   PushBool(bool),
+  PushVoid,
   /// discards topmost stack item
   Pop,
   /// Call the function at `(module, function)` in the function table.
@@ -232,6 +233,7 @@ fn link_instruction(
     Instruction::PushFloat(f) => Instruction::PushFloat(f),
     Instruction::PushString(string) => Instruction::PushString(string),
     Instruction::PushBool(b) => Instruction::PushBool(b),
+    Instruction::PushVoid => Instruction::PushVoid,
     Instruction::Pop => Instruction::Pop,
     Instruction::Return => Instruction::Return,
     Instruction::MakeCell => Instruction::MakeCell,
@@ -290,6 +292,7 @@ fn compile_function(
   }
   let mut instructions = vec![];
   let last_idx = f.code.len().saturating_sub(1);
+  let returns_void = f.returns_void();
   for (i, ast) in f.code.iter().enumerate() {
     instructions.extend(compile_expr(
       module_name,
@@ -302,9 +305,12 @@ fn compile_function(
     // really nice to avoid pushing things to the stack entirely if we know they
     // are not going to be used, but that will probably take some more
     // thought/refactoring.
-    if i != last_idx {
+    if i != last_idx || returns_void {
       instructions.push(Instruction::Pop);
     }
+  }
+  if returns_void {
+    instructions.push(Instruction::PushVoid);
   }
   instructions.push(Instruction::Return);
   Ok(vec![(
@@ -522,12 +528,16 @@ fn inject_builtin_specs(
 mod test {
   use super::*;
 
+  fn returns(name: &str) -> Option<parser::TypeAst> {
+    Some(parser::TypeAst::Named(name.to_string()))
+  }
+
   #[test]
   fn compile_id() {
     let func = parser::Function {
       name: "id".to_string(),
       params: vec![("a".to_string(), None)],
-      return_type: None,
+      return_type: returns("Int"),
       bounds: vec![],
       code: vec![AST::Variable("a".to_string())],
     };
@@ -550,7 +560,7 @@ mod test {
     let func = parser::Function {
       name: "main".to_string(),
       params: vec![],
-      return_type: None,
+      return_type: returns("Int"),
       bounds: vec![],
       code: vec![
         AST::Let(
@@ -587,7 +597,7 @@ mod test {
     let func = parser::Function {
       name: "main".to_string(),
       params: vec![],
-      return_type: None,
+      return_type: returns("Int"),
       bounds: vec![],
       code: vec![AST::Let("a".to_string(), Box::new(AST::Int(1)))],
     };
@@ -603,6 +613,34 @@ mod test {
             Instruction::PushInt(1),
             Instruction::SetLocal(0),
             Instruction::LoadLocal(0),
+            Instruction::Return,
+          ],
+        }),
+      )]
+    );
+  }
+
+  #[test]
+  fn compile_void_discards_body_value() {
+    let func = parser::Function {
+      name: "main".to_string(),
+      params: vec![],
+      return_type: None,
+      bounds: vec![],
+      code: vec![AST::Int(1)],
+    };
+    let code = compile_function("main", &HashSet::new(), &func).unwrap();
+    assert_eq!(
+      code,
+      vec![(
+        "main".to_string(),
+        Callable::Function(Function {
+          num_params: 0,
+          num_locals: 0,
+          instructions: vec![
+            Instruction::PushInt(1),
+            Instruction::Pop,
+            Instruction::PushVoid,
             Instruction::Return,
           ],
         }),

@@ -127,6 +127,16 @@ pub struct Function {
   pub code: Vec<AST>,
 }
 
+impl Function {
+  pub fn returns_void(&self) -> bool {
+    match &self.return_type {
+      None => true,
+      Some(TypeAst::Named(name)) => name == "Void",
+      Some(TypeAst::Apply(_, _) | TypeAst::Fn(_, _)) => false,
+    }
+  }
+}
+
 #[derive(Debug, PartialEq, Clone)]
 pub enum TypeAst {
   Named(String),
