@@ -3054,6 +3054,19 @@ mod test {
   }
 
   #[test]
+  fn variadic_builtin_can_be_called_through_local_binding() {
+    let source = "
+      (fn main () ->(List Int)
+        (let make std.list)
+        (make 1 2 3))
+    ";
+    assert_eq!(
+      eval_main(source),
+      SLValue::List(vec![SLValue::Int(1), SLValue::Int(2), SLValue::Int(3)])
+    );
+  }
+
+  #[test]
   fn top_level_function_is_a_first_class_value() {
     let source = "
       (fn double (x:Int) ->Int (std.+ x x))
