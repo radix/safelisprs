@@ -10,6 +10,8 @@ use std::time::Duration;
 use anyhow::{anyhow, Result};
 use clap::Parser;
 
+use safelisp::builtins::default_builtins;
+use safelisp::compiler::compile_executable_from_source;
 use safelisp::compiler::Package;
 use safelisp::interpreter::{Interpreter, Status};
 
@@ -37,33 +39,56 @@ struct Args {
   )]
   memory_limit_bytes: Option<usize>,
 
-  #[clap(help = "A .slc file to interpret")]
-  input_file: String,
+  #[clap(
+    short = 'c',
+    long = "code",
+    value_name = "SOURCE",
+    conflicts_with = "input_file",
+    required_unless_present = "input_file",
+    help = "compile and execute a SafeLisp source string"
+  )]
+  code: Option<String>,
+
+  #[clap(
+    name = "input_file",
+    conflicts_with = "code",
+    required_unless_present = "code",
+    help = "A .slc file to interpret"
+  )]
+  input_file: Option<String>,
 }
 
 fn main() -> Result<()> {
   let args = Args::parse();
 
-  let input_file = &args.input_file;
-
-  let mut f = File::open(input_file).unwrap_or_else(|_| panic!("Couldn't open {}", input_file));
-  let package: Package = match args.format.as_str() {
-    "bincode" => {
-      let mut v = vec![];
-      f.read_to_end(&mut v)
-        .unwrap_or_else(|_| panic!("Couldn't read from file {}", input_file));
-      let package: Result<Package> = bincode::deserialize(&v[..]).map_err(|e| e.into());
+  let package = match (&args.code, &args.input_file) {
+    (Some(source), None) => {
+      compile_executable_from_source(source, ("main", "main"), &default_builtins().specs())
+        .map_err(|e| anyhow!("{}", e))?
+    }
+    (None, Some(input_file)) => {
+      let mut f = File::open(input_file).unwrap_or_else(|_| panic!("Couldn't open {}", input_file));
+      let package = match args.format.as_str() {
+        "bincode" => {
+          let mut v = vec![];
+          f.read_to_end(&mut v)
+            .unwrap_or_else(|_| panic!("Couldn't read from file {}", input_file));
+          let package: Result<Package> = bincode::deserialize(&v[..]).map_err(|e| e.into());
+          package
+        }
+        "yaml" => {
+          let mut s = String::new();
+          f.read_to_string(&mut s)
+            .unwrap_or_else(|_| panic!("Couldn't read from file {}", input_file));
+          let package: Result<Package> = serde_yaml::from_str(&s).map_err(|e| e.into());
+          package
+        }
+        format => Err(anyhow!("invalid format: {:?}", format)),
+      }?;
       package
     }
-    "yaml" => {
-      let mut s = String::new();
-      f.read_to_string(&mut s)
-        .unwrap_or_else(|_| panic!("Couldn't read from file {}", input_file));
-      let package: Result<Package> = serde_yaml::from_str(&s).map_err(|e| e.into());
-      package
-    }
-    format => Err(anyhow!("invalid format: {:?}", format)),
-  }?;
+    _ => unreachable!("clap requires exactly one source input"),
+  };
 
   let interpreter = Interpreter::new(package);
   let mut exec = interpreter.call_main().expect("Error setting up main");
