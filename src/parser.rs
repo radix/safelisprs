@@ -132,7 +132,7 @@ impl Function {
     match &self.return_type {
       None => true,
       Some(TypeAst::Named(name)) => name == "Void",
-      Some(TypeAst::Apply(_, _) | TypeAst::Fn(_, _)) => false,
+      Some(TypeAst::Apply(_, _) | TypeAst::Fn(_, _, _)) => false,
     }
   }
 }
@@ -141,7 +141,7 @@ impl Function {
 pub enum TypeAst {
   Named(String),
   Apply(String, Vec<TypeAst>),
-  Fn(Vec<TypeAst>, Box<TypeAst>),
+  Fn(Vec<TypeAst>, Option<Box<TypeAst>>, Box<TypeAst>),
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -273,6 +273,15 @@ impl<'a> Lexer<'a> {
             span: start..self.offset,
           }
         }
+        '.' if self.source[self.offset..].starts_with("...") => {
+          self.bump_char();
+          self.bump_char();
+          self.bump_char();
+          Token {
+            kind: TokenKind::Sym("...".to_string()),
+            span: start..self.offset,
+          }
+        }
         '"' => self.lex_string()?,
         _ => self.lex_value()?,
       };
@@ -342,6 +351,7 @@ impl<'a> Lexer<'a> {
     let start = self.offset;
     while self.peek_char().is_some_and(|ch| !is_delimiter(ch))
       && !self.source[self.offset..].starts_with("->")
+      && !self.source[self.offset..].starts_with("...")
     {
       self.bump_char();
     }
@@ -682,10 +692,7 @@ impl Parser {
         let constructor = self.expect_symbol("type application requires a constructor name")?;
         if constructor == "Fn" {
           self.expect_open("`Fn` requires a parenthesized parameter type list")?;
-          let mut params = Vec::new();
-          while !matches!(self.peek().kind, TokenKind::RParen) {
-            params.push(self.parse_type()?);
-          }
+          let (params, rest) = self.parse_fn_type_params()?;
           self.advance();
           let arrow = self.advance();
           if !matches!(arrow.kind, TokenKind::Arrow) {
@@ -695,7 +702,7 @@ impl Parser {
           }
           let ret = self.parse_type()?;
           self.expect_close("function type must end with `)`")?;
-          Ok(TypeAst::Fn(params, Box::new(ret)))
+          Ok(TypeAst::Fn(params, rest.map(Box::new), Box::new(ret)))
         } else {
           let mut args = Vec::new();
           while !matches!(self.peek().kind, TokenKind::RParen) {
@@ -713,6 +720,44 @@ impl Parser {
       }
       _ => Err(ParseError::new(token.span, "expected a type").expected("a type name")),
     }
+  }
+
+  fn parse_fn_type_params(&mut self) -> Result<(Vec<TypeAst>, Option<TypeAst>), ParseError> {
+    let mut params = Vec::new();
+    let mut rest = None;
+    while !matches!(self.peek().kind, TokenKind::RParen) {
+      if matches!(self.peek().kind, TokenKind::Eof) {
+        return Err(
+          ParseError::new(
+            self.peek().span.clone(),
+            "unterminated function parameter type list",
+          )
+          .expected("a type")
+          .expected("`)`"),
+        );
+      }
+      if let TokenKind::Sym(name) = self.peek().kind.clone() {
+        if name == "..." {
+          let span = self.advance().span;
+          if rest.is_some() {
+            return Err(ParseError::new(
+              span,
+              "function type can only have one rest parameter",
+            ));
+          }
+          rest = Some(self.parse_type()?);
+          if !matches!(self.peek().kind, TokenKind::RParen) {
+            return Err(ParseError::new(
+              self.peek().span.clone(),
+              "function rest parameter type must be last",
+            ));
+          }
+          continue;
+        }
+      }
+      params.push(self.parse_type()?);
+    }
+    Ok((params, rest))
   }
 
   fn expect_open(&mut self, message: &'static str) -> Result<Token, ParseError> {
@@ -768,6 +813,9 @@ fn ast_from_symbol(name: String, span: Span) -> AST {
 }
 
 fn parse_identifier(name: &str) -> Identifier {
+  if name == "..." {
+    return Identifier::Bare(name.to_string());
+  }
   match name.split_once('.') {
     Some((module, name)) => Identifier::Qualified(module.to_string(), name.to_string()),
     None => Identifier::Bare(name.to_string()),
@@ -890,10 +938,41 @@ mod test {
       function.params[0].1,
       Some(TypeAst::Fn(
         vec![TypeAst::Named("Int".to_string())],
+        None,
         Box::new(TypeAst::Named("Int".to_string()))
       ))
     );
     assert!(matches!(function.code[0].kind, ASTKind::Let(_, Some(_), _)));
+  }
+
+  #[test]
+  fn parses_variadic_function_type() {
+    let asts = read_multiple("(fn use-list (make:(Fn (...Int) -> (List Int))) ->Int 1)").unwrap();
+    let ASTKind::DefineFn(function) = &asts[0].kind else {
+      panic!("expected function")
+    };
+    assert_eq!(
+      function.params[0].1,
+      Some(TypeAst::Fn(
+        vec![],
+        Some(Box::new(TypeAst::Named("Int".to_string()))),
+        Box::new(TypeAst::Apply(
+          "List".to_string(),
+          vec![TypeAst::Named("Int".to_string())]
+        ))
+      ))
+    );
+  }
+
+  #[test]
+  fn ellipsis_is_lexed_as_its_own_symbol() {
+    assert_eq!(
+      read_multiple("...Int").unwrap(),
+      vec![
+        AST::Variable("...".to_string()),
+        AST::Variable("Int".to_string())
+      ]
+    );
   }
 
   #[test]
