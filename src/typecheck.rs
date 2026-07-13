@@ -17,8 +17,30 @@ pub enum Type {
   Void,
   Cell(Box<Type>),
   List(Box<Type>),
-  Fn(Vec<Type>, Box<Type>),
+  Fn {
+    params: Vec<Type>,
+    rest: Option<Box<Type>>,
+    ret: Box<Type>,
+  },
   Var(TvRef),
+}
+
+impl Type {
+  fn fixed_fn(params: Vec<Type>, ret: Type) -> Type {
+    Type::Fn {
+      params,
+      rest: None,
+      ret: Box::new(ret),
+    }
+  }
+
+  fn fn_scheme_type(scheme: FnScheme) -> Type {
+    Type::Fn {
+      params: scheme.params,
+      rest: scheme.rest.map(Box::new),
+      ret: Box::new(scheme.ret),
+    }
+  }
 }
 
 #[derive(Clone)]
@@ -90,8 +112,14 @@ impl fmt::Debug for Type {
   }
 }
 
+/// A polymorphic function type scheme.
+///
+/// This is the generalized type assigned to callables. `quantified` contains
+/// the rigid type variables that are freshly instantiated each time the
+/// function is referenced (e.g., the `forall A.` part, though this is not
+/// actually exposed as a feature in SafeLisp yet).
 #[derive(Clone)]
-struct Scheme {
+struct FnScheme {
   params: Vec<Type>,
   rest: Option<Type>,
   ret: Type,
@@ -101,7 +129,7 @@ struct Scheme {
 #[derive(Clone)]
 enum Binding {
   Mono(Type),
-  Poly(Scheme),
+  PolyFn(FnScheme),
   ForbiddenNestedSelf,
 }
 
@@ -125,7 +153,7 @@ pub fn typecheck_named<'a>(
 }
 
 struct Checker {
-  schemes: HashMap<(String, String), Scheme>,
+  schemes: HashMap<(String, String), FnScheme>,
   next_var: usize,
   inference_vars: Vec<TvRef>,
 }
@@ -185,7 +213,7 @@ impl Checker {
   fn check_function(
     &mut self,
     function: &Function,
-    scheme: &Scheme,
+    scheme: &FnScheme,
     mut env: Env,
     type_vars: TypeVars,
     top_level: bool,
@@ -268,8 +296,8 @@ impl Checker {
         let checkpoint = self.inference_vars.len();
         let result = self.instantiate(&scheme, Some(format!("function `{}`", function.name)));
         self.inference_vars.truncate(checkpoint);
-        env.insert(function.name.clone(), Binding::Poly(scheme));
-        Ok(Type::Fn(result.params, Box::new(result.ret)))
+        env.insert(function.name.clone(), Binding::PolyFn(scheme));
+        Ok(Type::fn_scheme_type(result))
       }
       ASTKind::Call(callee, args) => {
         let callee_type = self.infer(env, type_vars, callee)?;
@@ -279,7 +307,7 @@ impl Checker {
           .collect::<Result<Vec<_>, _>>()?;
         let ret = self.fresh(Some("dynamic call result".to_string()), Vec::new());
         self
-          .unify(callee_type, Type::Fn(arg_types, Box::new(ret.clone())))
+          .unify(callee_type, Type::fixed_fn(arg_types, ret.clone()))
           .map_err(|error| error.at(callee.span.clone()))?;
         Ok(ret)
       }
@@ -346,7 +374,7 @@ impl Checker {
           .collect::<Result<Vec<_>, _>>()?;
         let ret = self.fresh(Some(format!("result of call to `{label}`")), Vec::new());
         self
-          .unify(callee, Type::Fn(arg_types, Box::new(ret.clone())))
+          .unify(callee, Type::fixed_fn(arg_types, ret.clone()))
           .map_err(|error| error.context(format!("while checking call to `{label}`")))?;
         return Ok(ret);
       }
@@ -411,7 +439,7 @@ impl Checker {
       .cloned()
       .ok_or_else(|| TypeError::new(format!("Unknown name `{name}`")))?;
     let instantiated = self.instantiate(&scheme, Some(format!("function `main.{name}`")));
-    Ok(Type::Fn(instantiated.params, Box::new(instantiated.ret)))
+    Ok(Type::fn_scheme_type(instantiated))
   }
 
   fn resolve_scheme(&mut self, module: &str, name: &str) -> Result<Type, TypeError> {
@@ -421,14 +449,14 @@ impl Checker {
       .cloned()
       .ok_or_else(|| TypeError::new(format!("unknown function `{module}.{name}`")))?;
     let instantiated = self.instantiate(&scheme, Some(format!("function `{module}.{name}`")));
-    Ok(Type::Fn(instantiated.params, Box::new(instantiated.ret)))
+    Ok(Type::fn_scheme_type(instantiated))
   }
 
   fn declared_scheme(
     &mut self,
     function: &Function,
     enclosing: &TypeVars,
-  ) -> Result<(Scheme, TypeVars), TypeError> {
+  ) -> Result<(FnScheme, TypeVars), TypeError> {
     let mut names = HashSet::new();
     for (_, annotation) in &function.params {
       let annotation = annotation.as_ref().ok_or_else(|| {
@@ -492,7 +520,7 @@ impl Checker {
       .transpose()?
       .unwrap_or(Type::Void);
     Ok((
-      Scheme {
+      FnScheme {
         params,
         rest: None,
         ret,
@@ -502,7 +530,7 @@ impl Checker {
     ))
   }
 
-  fn scheme_from_builtin(&mut self, signature: &BuiltinSignature) -> Scheme {
+  fn scheme_from_builtin(&mut self, signature: &BuiltinSignature) -> FnScheme {
     let mut vars = HashMap::new();
     let mut quantified = Vec::new();
     for (name, bounds) in &signature.type_vars {
@@ -513,7 +541,7 @@ impl Checker {
       vars.insert(name.clone(), var.clone());
       quantified.push(var);
     }
-    Scheme {
+    FnScheme {
       params: signature
         .params
         .iter()
@@ -525,7 +553,7 @@ impl Checker {
     }
   }
 
-  fn instantiate(&mut self, scheme: &Scheme, origin: Option<String>) -> Scheme {
+  fn instantiate(&mut self, scheme: &FnScheme, origin: Option<String>) -> FnScheme {
     let mut replacements = HashMap::new();
     for quantified in &scheme.quantified {
       let (name, bounds) = match &*quantified.borrow() {
@@ -537,7 +565,7 @@ impl Checker {
         self.fresh(origin.clone().or(Some(name)), bounds),
       );
     }
-    Scheme {
+    FnScheme {
       params: scheme
         .params
         .iter()
@@ -559,9 +587,9 @@ impl Checker {
   ) -> Result<Type, TypeError> {
     match binding {
       Binding::Mono(ty) => Ok(ty),
-      Binding::Poly(scheme) => {
+      Binding::PolyFn(scheme) => {
         let scheme = self.instantiate(&scheme, origin);
-        Ok(Type::Fn(scheme.params, Box::new(scheme.ret)))
+        Ok(Type::fn_scheme_type(scheme))
       }
       Binding::ForbiddenNestedSelf => Err(TypeError::new(
         "nested functions cannot refer to themselves recursively",
@@ -590,17 +618,19 @@ impl Checker {
       | (Type::Bool, Type::Bool)
       | (Type::Void, Type::Void) => Ok(()),
       (Type::Cell(a), Type::Cell(b)) | (Type::List(a), Type::List(b)) => self.unify(*a, *b),
-      (Type::Fn(a_params, a_ret), Type::Fn(b_params, b_ret)) => {
-        if a_params.len() != b_params.len() {
-          return Err(TypeError::new(format!(
-            "function arity mismatch: expected {}, got {}",
-            a_params.len(),
-            b_params.len()
-          )));
-        }
-        for (a, b) in a_params.into_iter().zip(b_params) {
-          self.unify(a, b)?;
-        }
+      (
+        Type::Fn {
+          params: a_params,
+          rest: a_rest,
+          ret: a_ret,
+        },
+        Type::Fn {
+          params: b_params,
+          rest: b_rest,
+          ret: b_ret,
+        },
+      ) => {
+        self.unify_fn_params(a_params, a_rest, b_params, b_rest)?;
         self.unify(*a_ret, *b_ret)
       }
       (Type::Var(a), Type::Var(b)) if Rc::ptr_eq(&a, &b) => Ok(()),
@@ -612,6 +642,72 @@ impl Checker {
         display_type(&actual)
       ))),
     }
+  }
+
+  fn unify_fn_params(
+    &mut self,
+    a_params: Vec<Type>,
+    a_rest: Option<Box<Type>>,
+    b_params: Vec<Type>,
+    b_rest: Option<Box<Type>>,
+  ) -> Result<(), TypeError> {
+    match (a_rest, b_rest) {
+      (None, None) => {
+        if a_params.len() != b_params.len() {
+          return Err(TypeError::new(format!(
+            "function arity mismatch: expected {}, got {}",
+            a_params.len(),
+            b_params.len()
+          )));
+        }
+        for (a, b) in a_params.into_iter().zip(b_params) {
+          self.unify(a, b)?;
+        }
+      }
+      (Some(a_rest), None) => {
+        self.unify_variadic_with_fixed(a_params, *a_rest, b_params)?;
+      }
+      (None, Some(b_rest)) => {
+        self.unify_variadic_with_fixed(b_params, *b_rest, a_params)?;
+      }
+      (Some(a_rest), Some(b_rest)) => {
+        if a_params.len() != b_params.len() {
+          return Err(TypeError::new(format!(
+            "function arity mismatch: expected at least {}, got at least {}",
+            a_params.len(),
+            b_params.len()
+          )));
+        }
+        for (a, b) in a_params.into_iter().zip(b_params) {
+          self.unify(a, b)?;
+        }
+        self.unify(*a_rest, *b_rest)?;
+      }
+    }
+    Ok(())
+  }
+
+  fn unify_variadic_with_fixed(
+    &mut self,
+    params: Vec<Type>,
+    rest: Type,
+    fixed_params: Vec<Type>,
+  ) -> Result<(), TypeError> {
+    let minimum = params.len();
+    if fixed_params.len() < minimum {
+      return Err(TypeError::new(format!(
+        "function arity mismatch: expected at least {}, got {}",
+        minimum,
+        fixed_params.len()
+      )));
+    }
+    for (declared, actual) in params.into_iter().zip(fixed_params.iter().cloned()) {
+      self.unify(declared, actual)?;
+    }
+    for actual in fixed_params.into_iter().skip(minimum) {
+      self.unify(rest.clone(), actual)?;
+    }
+    Ok(())
   }
 
   fn bind_var(&mut self, var: TvRef, ty: Type) -> Result<(), TypeError> {
@@ -731,13 +827,13 @@ fn intersect_compatible_bindings(then_env: Env, else_env: &Env) -> Env {
 fn bindings_compatible(left: &Binding, right: &Binding) -> bool {
   match (left, right) {
     (Binding::Mono(left), Binding::Mono(right)) => types_equivalent(left, right),
-    (Binding::Poly(left), Binding::Poly(right)) => schemes_equivalent(left, right),
+    (Binding::PolyFn(left), Binding::PolyFn(right)) => schemes_equivalent(left, right),
     (Binding::ForbiddenNestedSelf, Binding::ForbiddenNestedSelf) => true,
     _ => false,
   }
 }
 
-fn schemes_equivalent(left: &Scheme, right: &Scheme) -> bool {
+fn schemes_equivalent(left: &FnScheme, right: &FnScheme) -> bool {
   left.params.len() == right.params.len()
     && left
       .params
@@ -768,12 +864,28 @@ fn types_equivalent(left: &Type, right: &Type) -> bool {
     (Type::Cell(left), Type::Cell(right)) | (Type::List(left), Type::List(right)) => {
       types_equivalent(&left, &right)
     }
-    (Type::Fn(left_params, left_ret), Type::Fn(right_params, right_ret)) => {
+    (
+      Type::Fn {
+        params: left_params,
+        rest: left_rest,
+        ret: left_ret,
+      },
+      Type::Fn {
+        params: right_params,
+        rest: right_rest,
+        ret: right_ret,
+      },
+    ) => {
       left_params.len() == right_params.len()
         && left_params
           .iter()
           .zip(&right_params)
           .all(|(left, right)| types_equivalent(left, right))
+        && match (&left_rest, &right_rest) {
+          (Some(left), Some(right)) => types_equivalent(left, right),
+          (None, None) => true,
+          _ => false,
+        }
         && types_equivalent(&left_ret, &right_ret)
     }
     (Type::Var(left), Type::Var(right)) => Rc::ptr_eq(&left, &right),
@@ -807,12 +919,12 @@ fn resolve_type(ast: &TypeAst, vars: &TypeVars) -> Result<Type, TypeError> {
       ))),
       _ => Err(TypeError::new(format!("unknown type constructor `{name}`"))),
     },
-    TypeAst::Fn(params, ret) => Ok(Type::Fn(
+    TypeAst::Fn(params, ret) => Ok(Type::fixed_fn(
       params
         .iter()
         .map(|param| resolve_type(param, vars))
         .collect::<Result<Vec<_>, _>>()?,
-      Box::new(resolve_type(ret, vars)?),
+      resolve_type(ret, vars)?,
     )),
   }
 }
@@ -904,12 +1016,12 @@ fn type_from_const(ty: &TypeConst, vars: &HashMap<String, TvRef>) -> Type {
     TypeConst::Void => Type::Void,
     TypeConst::Cell(item) => Type::Cell(Box::new(type_from_const(item, vars))),
     TypeConst::List(item) => Type::List(Box::new(type_from_const(item, vars))),
-    TypeConst::Fn { params, ret } => Type::Fn(
+    TypeConst::Fn { params, ret } => Type::fixed_fn(
       params
         .iter()
         .map(|param| type_from_const(param, vars))
         .collect(),
-      Box::new(type_from_const(ret, vars)),
+      type_from_const(ret, vars),
     ),
     TypeConst::Var(name) => Type::Var(vars[name].clone()),
   }
@@ -929,13 +1041,16 @@ fn replace_quantified(ty: &Type, replacements: &HashMap<usize, Type>) -> Type {
   match prune(ty) {
     Type::Cell(item) => Type::Cell(Box::new(replace_quantified(&item, replacements))),
     Type::List(item) => Type::List(Box::new(replace_quantified(&item, replacements))),
-    Type::Fn(params, ret) => Type::Fn(
-      params
+    Type::Fn { params, rest, ret } => Type::Fn {
+      params: params
         .iter()
         .map(|param| replace_quantified(param, replacements))
         .collect(),
-      Box::new(replace_quantified(&ret, replacements)),
-    ),
+      rest: rest
+        .as_ref()
+        .map(|rest| Box::new(replace_quantified(rest, replacements))),
+      ret: Box::new(replace_quantified(&ret, replacements)),
+    },
     Type::Var(var) => replacements
       .get(&(Rc::as_ptr(&var) as usize))
       .cloned()
@@ -965,8 +1080,10 @@ fn occurs(needle: &TvRef, ty: &Type) -> bool {
   match prune(ty) {
     Type::Var(var) => Rc::ptr_eq(needle, &var),
     Type::Cell(item) | Type::List(item) => occurs(needle, &item),
-    Type::Fn(params, ret) => {
-      params.iter().any(|param| occurs(needle, param)) || occurs(needle, &ret)
+    Type::Fn { params, rest, ret } => {
+      params.iter().any(|param| occurs(needle, param))
+        || rest.as_ref().is_some_and(|rest| occurs(needle, &rest))
+        || occurs(needle, &ret)
     }
     _ => false,
   }
@@ -981,15 +1098,13 @@ fn display_type(ty: &Type) -> String {
     Type::Void => "Void".to_string(),
     Type::Cell(item) => format!("(Cell {})", display_type(&item)),
     Type::List(item) => format!("(List {})", display_type(&item)),
-    Type::Fn(params, ret) => format!(
-      "(Fn ({}) -> {})",
-      params
-        .iter()
-        .map(display_type)
-        .collect::<Vec<_>>()
-        .join(" "),
-      display_type(&ret)
-    ),
+    Type::Fn { params, rest, ret } => {
+      let mut params = params.iter().map(display_type).collect::<Vec<_>>();
+      if let Some(rest) = rest {
+        params.push(format!("...{}", display_type(&rest)));
+      }
+      format!("(Fn ({}) -> {})", params.join(" "), display_type(&ret))
+    }
     Type::Var(var) => match &*var.borrow() {
       TypeVar::Unbound { id, .. } => format!("?{id}"),
       TypeVar::Rigid { name, .. } => name.clone(),
@@ -1038,6 +1153,16 @@ mod tests {
   fn unresolved_empty_list_is_rejected() {
     let error = check("(fn main () ->Int (let xs (std.list)) (std.len xs))").unwrap_err();
     assert!(error.message.contains("type annotation needed"), "{error}");
+  }
+
+  #[test]
+  fn variadic_builtin_can_be_called_through_local_binding() {
+    check(
+      "(fn main () ->(List Int)
+         (let make std.list)
+         (make 1 2 3))",
+    )
+    .unwrap();
   }
 
   #[test]
