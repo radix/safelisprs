@@ -6,16 +6,10 @@ directions and so the reasoning doesn't have to be rediscovered.
 
 ## Small follow-ups
 
-- **Span-based error locations.** The lexer captures byte spans; threading
-  them through `AST`/`TypeAst` into `TypeError` gives real source locations
-  instead of context-stack prose.
-- **Post-transform verification pass.** v1 trusts the closure transform to
-  preserve types. A second checker run over the *transformed* AST would
-  verify it — requires inference rules for `Cell`/`DerefCell`/`PartialApply`,
-  which v1 deliberately treats as unreachable.
 - **Typed WASM signatures.** The WASM backend emits uniform tagged
   signatures; with checker output available, it could emit proper typed
-  signatures and eventually drop tags for known-typed values.
+  signatures and eventually drop tags for known-typed values, in function args,
+  locals, and the stack.
 - **Closure transform simplification.** Since bindings are immutable,
   captured variables can no longer be reassigned — the transform's
   cell-wrapping of captures is unnecessary and captures could be passed as

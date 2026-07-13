@@ -4,7 +4,7 @@ use std::fmt;
 use std::rc::Rc;
 
 use crate::builtins::{BuiltinSignature, BuiltinSpec, Trait, TypeConst};
-use crate::parser::{ASTKind, Function, Identifier, TypeAst, AST};
+use crate::parser::{source_position, ASTKind, Function, Identifier, Span, TypeAst, AST};
 
 pub type TvRef = Rc<RefCell<TypeVar>>;
 
@@ -39,6 +39,7 @@ pub enum TypeVar {
 pub struct TypeError {
   pub message: String,
   pub context: Vec<String>,
+  pub span: Option<Span>,
 }
 
 impl TypeError {
@@ -46,12 +47,30 @@ impl TypeError {
     Self {
       message: message.into(),
       context: Vec::new(),
+      span: None,
     }
   }
 
   fn context(mut self, context: impl Into<String>) -> Self {
     self.context.push(context.into());
     self
+  }
+
+  fn at(mut self, span: Span) -> Self {
+    if self.span.is_none() {
+      self.span = Some(span);
+    }
+    self
+  }
+
+  pub fn render(&self, source: &str) -> String {
+    match &self.span {
+      Some(span) => {
+        let (line, column) = source_position(source, span.start);
+        format!("line {line}, column {column}: {self}")
+      }
+      None => self.to_string(),
+    }
   }
 }
 
@@ -130,18 +149,20 @@ impl Checker {
   fn check(mut self, asts: &[AST]) -> Result<(), TypeError> {
     for ast in asts {
       let ASTKind::DefineFn(function) = &ast.kind else {
-        return Err(TypeError::new(
-          "only function definitions are allowed at top level",
-        ));
+        return Err(
+          TypeError::new("only function definitions are allowed at top level").at(ast.span.clone()),
+        );
       };
       let key = ("main".to_string(), function.name.clone());
       if self.schemes.contains_key(&key) {
-        return Err(TypeError::new(format!(
-          "duplicate function `main.{}`",
-          function.name
-        )));
+        return Err(
+          TypeError::new(format!("duplicate function `main.{}`", function.name))
+            .at(ast.span.clone()),
+        );
       }
-      let (scheme, _) = self.declared_scheme(function, &HashMap::new())?;
+      let (scheme, _) = self
+        .declared_scheme(function, &HashMap::new())
+        .map_err(|error| error.at(ast.span.clone()))?;
       self.schemes.insert(key, scheme);
     }
 
@@ -151,7 +172,11 @@ impl Checker {
         let vars = rigid_vars_by_name(&scheme.quantified);
         self
           .check_function(function, &scheme, Env::new(), vars, true)
-          .map_err(|error| error.context(format!("in function `{}`", function.name)))?;
+          .map_err(|error| {
+            error
+              .context(format!("in function `{}`", function.name))
+              .at(ast.span.clone())
+          })?;
       }
     }
     Ok(())
@@ -183,13 +208,26 @@ impl Checker {
     for (index, expression) in function.code.iter().enumerate() {
       let inferred = self.infer(&mut env, &type_vars, expression)?;
       if index == last && !matches!(prune(&scheme.ret), Type::Void) {
-        self.unify(inferred, scheme.ret.clone())?;
+        self
+          .unify(inferred, scheme.ret.clone())
+          .map_err(|error| error.at(expression.span.clone()))?;
       }
     }
     self.reject_unresolved(checkpoint)
   }
 
   fn infer(&mut self, env: &mut Env, type_vars: &TypeVars, ast: &AST) -> Result<Type, TypeError> {
+    self
+      .infer_unlocated(env, type_vars, ast)
+      .map_err(|error| error.at(ast.span.clone()))
+  }
+
+  fn infer_unlocated(
+    &mut self,
+    env: &mut Env,
+    type_vars: &TypeVars,
+    ast: &AST,
+  ) -> Result<Type, TypeError> {
     match &ast.kind {
       ASTKind::Int(_) => Ok(Type::Int),
       ASTKind::Float(_) => Ok(Type::Float),
@@ -201,7 +239,9 @@ impl Checker {
         let inferred = self.infer(env, type_vars, expression)?;
         if let Some(annotation) = annotation {
           let expected = resolve_type(annotation, type_vars)?;
-          self.unify(inferred.clone(), expected)?;
+          self
+            .unify(inferred.clone(), expected)
+            .map_err(|error| error.at(expression.span.clone()))?;
         }
         let binding = if let ASTKind::DefineFn(function) = &expression.kind {
           env
@@ -238,7 +278,9 @@ impl Checker {
           .map(|arg| self.infer(env, type_vars, arg))
           .collect::<Result<Vec<_>, _>>()?;
         let ret = self.fresh(Some("dynamic call result".to_string()), Vec::new());
-        self.unify(callee_type, Type::Fn(arg_types, Box::new(ret.clone())))?;
+        self
+          .unify(callee_type, Type::Fn(arg_types, Box::new(ret.clone())))
+          .map_err(|error| error.at(callee.span.clone()))?;
         Ok(ret)
       }
       ASTKind::CallFixed(identifier, args) => {
@@ -246,10 +288,14 @@ impl Checker {
       }
       ASTKind::If(condition, then_branch, else_branch) => {
         let condition_type = self.infer(env, type_vars, condition)?;
-        self.unify(condition_type, Type::Bool)?;
+        self
+          .unify(condition_type, Type::Bool)
+          .map_err(|error| error.at(condition.span.clone()))?;
         let then_type = self.infer(env, type_vars, then_branch)?;
         let else_type = self.infer(env, type_vars, else_branch)?;
-        self.unify(then_type.clone(), else_type)?;
+        self
+          .unify(then_type.clone(), else_type)
+          .map_err(|error| error.at(else_branch.span.clone()))?;
         Ok(then_type)
       }
       ASTKind::Block(body) => {
@@ -352,7 +398,7 @@ impl Checker {
         .or_else(|| instantiated.rest.clone())
         .expect("arity was checked");
       self.unify(actual, expected).map_err(|error| {
-        error.context(format!(
+        error.at(arg.span.clone()).context(format!(
           "while checking argument {} of call to `{label}`",
           index + 1
         ))
@@ -1003,6 +1049,30 @@ mod tests {
     .unwrap_err();
     assert!(
       error.message.contains("cannot refer to themselves"),
+      "{error}"
+    );
+  }
+
+  #[test]
+  fn type_errors_point_to_the_offending_argument() {
+    let source = "(fn main () ->Int\n  (std.+ 1\n    \"not-an-int\"))";
+    let error = check(source).unwrap_err();
+    let start = source.find("\"not-an-int\"").unwrap();
+    assert_eq!(error.span.as_ref().map(|span| span.start), Some(start));
+    assert_eq!(
+      error.render(source).lines().next(),
+      Some("line 3, column 5: TypeError: expected `Int`, got `String`")
+    );
+  }
+
+  #[test]
+  fn outer_context_does_not_replace_an_inner_error_span() {
+    let source = "(fn main () ->Int\n  (std.+ 1\n    missing))";
+    let error = check(source).unwrap_err();
+    let start = source.find("missing").unwrap();
+    assert_eq!(error.span.as_ref().map(|span| span.start), Some(start));
+    assert!(
+      error.render(source).starts_with("line 3, column 5:"),
       "{error}"
     );
   }

@@ -218,11 +218,17 @@ struct Signature {
 /// Void (3).
 pub fn compile(source: &str, builtins: &Builtins) -> Result<Vec<u8>, String> {
   let asts = parser::read_multiple(source)?;
-  compile_asts(&asts, builtins)
+  check_types(&asts, builtins).map_err(|error| error.render(source))?;
+  ModuleCompiler::new(builtins).compile(&asts)
 }
 
 /// Compile a slice of already-parsed top-level AST into a WASM binary.
 pub fn compile_asts(asts: &[AST], builtins: &Builtins) -> Result<Vec<u8>, String> {
+  check_types(asts, builtins).map_err(|error| error.to_string())?;
+  ModuleCompiler::new(builtins).compile(asts)
+}
+
+fn check_types(asts: &[AST], builtins: &Builtins) -> Result<(), crate::typecheck::TypeError> {
   crate::typecheck::typecheck_named(
     asts,
     builtins.iter().map(|builtin| {
@@ -233,8 +239,6 @@ pub fn compile_asts(asts: &[AST], builtins: &Builtins) -> Result<Vec<u8>, String
       )
     }),
   )
-  .map_err(|error| error.to_string())?;
-  ModuleCompiler::new(builtins).compile(asts)
 }
 
 /// Metadata for a top-level function definition, collected during the first
@@ -1337,7 +1341,9 @@ mod test {
 
   #[test]
   fn compile_rejects_type_errors_before_wasm_codegen() {
-    let error = compile("(fn main () ->Int (std.+ 1 true))", &std_builtins()).unwrap_err();
+    let source = "(fn main () ->Int\n  (std.+ 1\n    true))";
+    let error = compile(source, &std_builtins()).unwrap_err();
+    assert!(error.starts_with("line 3, column 5: TypeError:"), "{error}");
     assert!(error.contains("expected `Int`, got `Bool`"), "{error}");
   }
 
