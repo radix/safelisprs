@@ -14,6 +14,15 @@ directions and so the reasoning doesn't have to be rediscovered.
   captured variables can no longer be reassigned — the transform's
   cell-wrapping of captures is unnecessary and captures could be passed as
   plain values.
+- **Collision-free names for lifted functions.** `mangle_closure_name` uses
+  only the nested function's local name, so same-named nested functions in
+  different lexical scopes are both lifted as (for example)
+  `get:(closure)`. Module indexing silently keeps the last definition, causing
+  earlier closures to invoke the wrong body. Generate lifted names from a
+  unique lexical path or transform-owned ID, and reject duplicate generated
+  names as a defensive check. The regression should define two closure
+  factories with different nested `get` implementations and verify that each
+  returned closure invokes its own body.
 - **Remove `AST::SetCell` / `Instruction::SetCell`.** No longer produced
   from source since `set!` was removed; kept only for serialization compat.
 - **Nested self-recursion.** A nested `fn` can't call itself: the transform
