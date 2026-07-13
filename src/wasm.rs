@@ -187,11 +187,6 @@ impl Builtins {
       .iter()
       .find(|b| b.module == module && b.name == name)
   }
-
-  /// Look up a builtin by bare name (no module qualifier).
-  fn lookup_bare(&self, name: &str) -> Option<&Builtin> {
-    self.entries.iter().find(|b| b.name == name)
-  }
 }
 
 /// The WASM type pair for a SafeLisp value: `(i64 payload, i32 tag)`. Used
@@ -488,14 +483,9 @@ impl<'b> ModuleCompiler<'b> {
   /// During discovery, record a builtin import if the call target resolves to
   /// a registered builtin (not a same-module function).
   fn resolve_builtin_for_discovery(&mut self, ident: &Identifier) -> Result<(), String> {
-    let (module_name, func_name) = match ident {
-      Identifier::Bare(n) => (None, n.clone()),
-      Identifier::Qualified(m, n) => (Some(m.clone()), n.clone()),
-    };
-    let builtin = match (module_name.as_deref(), func_name.as_str()) {
-      (None, name) if self.function_names.contains_key(name) => return Ok(()),
-      (None, name) => self.builtins.lookup_bare(name),
-      (Some(m), name) => self.builtins.lookup(m, name),
+    let builtin = match ident {
+      Identifier::Bare(_) => return Ok(()),
+      Identifier::Qualified(module, name) => self.builtins.lookup(module, name),
     };
     if let Some(b) = builtin {
       let key = (b.module.clone(), b.name.clone());
@@ -878,28 +868,15 @@ impl<'b> ModuleCompiler<'b> {
         );
       }
     }
-    let (module_name, func_name) = match ident {
-      Identifier::Bare(n) => (None, n.clone()),
-      Identifier::Qualified(m, n) => (Some(m.clone()), n.clone()),
-    };
-
-    let callee_index = match (module_name.as_deref(), func_name.as_str()) {
-      (None, name) if self.function_names.contains_key(name) => {
+    let callee_index = match ident {
+      Identifier::Bare(name) if self.function_names.contains_key(name) => {
         let _ = def_index;
         let target_def = self.function_names[name];
         num_imports + target_def
       }
-      _ => {
-        let key = match &module_name {
-          Some(m) => (m.clone(), func_name.clone()),
-          None => {
-            let b = self
-              .builtins
-              .lookup_bare(&func_name)
-              .ok_or_else(|| format!("call to unknown function: {}", func_name))?;
-            (b.module.clone(), b.name.clone())
-          }
-        };
+      Identifier::Bare(name) => return Err(format!("call to unknown function: {name}")),
+      Identifier::Qualified(module, name) => {
+        let key = (module.clone(), name.clone());
         let imp = self
           .used_imports
           .get(&key)
@@ -1373,7 +1350,7 @@ mod test {
   }
 
   #[test]
-  fn bare_builtin_name_resolves() {
+  fn bare_builtin_name_requires_qualification() {
     let builtins = Builtins::new().with_builtin(Builtin::unary(
       "host",
       "double",
@@ -1383,8 +1360,8 @@ mod test {
         _ => SLValue::Void,
       },
     ));
-    let result = run_main_with("(fn main () ->Int (double 21))", &builtins).unwrap();
-    assert_eq!(result, SLValue::Int(42));
+    let error = run_main_with("(fn main () ->Int (double 21))", &builtins).unwrap_err();
+    assert!(error.contains("unknown function `double`"), "{error}");
   }
 
   #[test]

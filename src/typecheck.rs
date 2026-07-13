@@ -356,16 +356,7 @@ impl Checker {
       Identifier::Bare(name) => self
         .schemes
         .get(&("main".to_string(), name.clone()))
-        .cloned()
-        .or_else(|| {
-          let mut matches = self
-            .schemes
-            .iter()
-            .filter(|((_, candidate), _)| candidate == name)
-            .map(|(_, scheme)| scheme.clone());
-          let first = matches.next()?;
-          matches.next().is_none().then_some(first)
-        }),
+        .cloned(),
       Identifier::Qualified(module, name) => {
         self.schemes.get(&(module.clone(), name.clone())).cloned()
       }
@@ -1117,6 +1108,12 @@ mod tests {
   fn unknown_bare_value_name_is_reported_as_a_name_error() {
     let error = check("(fn main () y)").unwrap_err();
     assert_eq!(error.message, "Unknown name `y`");
+  }
+
+  #[test]
+  fn bare_builtin_call_requires_qualification() {
+    let error = check("(fn main () ->Int (+ 1 2))").unwrap_err();
+    assert_eq!(error.message, "unknown function `+`");
   }
 
   #[test]
