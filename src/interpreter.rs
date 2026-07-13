@@ -3139,7 +3139,7 @@ mod test {
       &default_builtins().specs(),
     )
     .unwrap_err();
-    assert!(err.contains("expected `(Cell"), "unexpected: {err}");
+    assert!(err.contains("unknown function `set!`"), "unexpected: {err}");
   }
 
   #[test]

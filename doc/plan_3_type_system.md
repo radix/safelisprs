@@ -336,8 +336,9 @@ a `Scheme`. Resolution must mirror the compiler exactly:
   current-module function (instantiate its `Scheme`); else error.
 - `CallFixed(Bare(name), args)`: env lookup **first** (a local closure —
   its type must unify with a fresh `(Fn (argtypes...) -> ret)`), then
-  module function / builtin signature. Locals shadow module functions, same
-  as the compiler.
+  current-module function. Locals shadow module functions, same as the
+  compiler. Builtins and functions in other modules require qualification;
+  there is no prelude or implicit import lookup.
 - `CallFixed(Qualified(m, f), args)` / `FunctionRef(m, f)`: signature map.
 
 ### 4d. Inference rules
