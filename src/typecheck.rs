@@ -919,13 +919,17 @@ fn resolve_type(ast: &TypeAst, vars: &TypeVars) -> Result<Type, TypeError> {
       ))),
       _ => Err(TypeError::new(format!("unknown type constructor `{name}`"))),
     },
-    TypeAst::Fn(params, ret) => Ok(Type::fixed_fn(
-      params
+    TypeAst::Fn(params, rest, ret) => Ok(Type::Fn {
+      params: params
         .iter()
         .map(|param| resolve_type(param, vars))
         .collect::<Result<Vec<_>, _>>()?,
-      resolve_type(ret, vars)?,
-    )),
+      rest: rest
+        .as_ref()
+        .map(|rest| resolve_type(rest, vars).map(Box::new))
+        .transpose()?,
+      ret: Box::new(resolve_type(ret, vars)?),
+    }),
   }
 }
 
@@ -955,9 +959,12 @@ fn collect_type_vars(ast: &TypeAst, names: &mut HashSet<String>) -> Result<(), T
       }
       collect_type_vars(&args[0], names)?;
     }
-    TypeAst::Fn(params, ret) => {
+    TypeAst::Fn(params, rest, ret) => {
       for param in params {
         collect_type_vars(param, names)?;
+      }
+      if let Some(rest) = rest {
+        collect_type_vars(rest, names)?;
       }
       collect_type_vars(ret, names)?;
     }
@@ -1161,6 +1168,17 @@ mod tests {
       "(fn main () ->(List Int)
          (let make std.list)
          (make 1 2 3))",
+    )
+    .unwrap();
+  }
+
+  #[test]
+  fn variadic_builtin_can_be_passed_to_annotated_parameter() {
+    check(
+      "(fn use-list (make:(Fn (...Int) -> (List Int))) ->(List Int)
+         (make 1 2 3))
+       (fn main () ->(List Int)
+         (use-list std.list))",
     )
     .unwrap();
   }

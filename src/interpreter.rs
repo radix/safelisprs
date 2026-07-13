@@ -3067,6 +3067,20 @@ mod test {
   }
 
   #[test]
+  fn variadic_builtin_can_be_passed_to_annotated_parameter() {
+    let source = "
+      (fn use-list (make:(Fn (...Int) -> (List Int))) ->(List Int)
+        (make 1 2 3))
+      (fn main () ->(List Int)
+        (use-list std.list))
+    ";
+    assert_eq!(
+      eval_main(source),
+      SLValue::List(vec![SLValue::Int(1), SLValue::Int(2), SLValue::Int(3)])
+    );
+  }
+
+  #[test]
   fn top_level_function_is_a_first_class_value() {
     let source = "
       (fn double (x:Int) ->Int (std.+ x x))
