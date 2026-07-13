@@ -1,5 +1,7 @@
 use std::collections::HashSet;
 
+#[cfg(test)]
+use crate::parser::TypeAst;
 use crate::parser::{ASTKind, Function, Span, AST};
 
 pub fn transform_closures_in_module(module_name: &str, items: &[AST]) -> Result<Vec<AST>, String> {
@@ -70,7 +72,7 @@ fn transform_function(
   //! - nested `fn` definitions are lifted into `lifted` as separate functions
   //! - the original nested `fn` expression becomes `let name (partial-apply func [captures...])`
   let mut locals = hashset! {};
-  locals.extend(func.params.iter().cloned());
+  locals.extend(func.params.iter().map(|(name, _)| name.clone()));
   let mut lifted = vec![];
   let mut captures = vec![];
   let mut cell_vars = hashset! {};
@@ -88,18 +90,19 @@ fn transform_function(
   }
 
   let mut patch_locals = hashset! {};
-  patch_locals.extend(func.params.iter().cloned());
+  patch_locals.extend(func.params.iter().map(|(name, _)| name.clone()));
   // We have to patch cell accesses in a successive step since we don't know
   // which locals have been wrapped in cells until after transformation.
   let mut code = patch_cell_accesses(&code, &captures, &cell_vars, &mut patch_locals)?;
 
-  for param in func.params.iter().rev() {
+  for (param, _) in func.params.iter().rev() {
     if cell_vars.contains(param) {
       code.splice(
         0..0,
         [AST::new(
           ASTKind::Let(
             param.clone(),
+            None,
             Box::new(AST::new(
               ASTKind::Cell(Box::new(AST::new(
                 ASTKind::Variable(param.clone()),
@@ -115,12 +118,14 @@ fn transform_function(
   }
 
   let mut params = vec![];
-  params.extend(captures.iter().cloned());
+  params.extend(captures.iter().cloned().map(|name| (name, None)));
   params.extend(func.params.clone());
   lifted.push(AST::new(
     ASTKind::DefineFn(Function {
       name: transformed_name,
       params,
+      return_type: func.return_type.clone(),
+      bounds: func.bounds.clone(),
       code,
     }),
     source_span,
@@ -140,7 +145,7 @@ fn transform_ast(
   //! Do closure transformations on one expression inside a function body,
   //! recording captures as they are discovered.
   match &ast.kind {
-    ASTKind::Let(name, expr) => {
+    ASTKind::Let(name, annotation, expr) => {
       let expr = transform_ast(
         module_name,
         expr,
@@ -151,7 +156,11 @@ fn transform_ast(
         lifted,
       )?;
       locals.insert(name.clone());
-      Ok(ast.with_kind(ASTKind::Let(name.clone(), Box::new(expr))))
+      Ok(ast.with_kind(ASTKind::Let(
+        name.clone(),
+        annotation.clone(),
+        Box::new(expr),
+      )))
     }
     ASTKind::DefineFn(inner_func) => {
       let mut inner_environment = environment.clone();
@@ -177,6 +186,7 @@ fn transform_ast(
       locals.insert(inner_func.name.clone());
       Ok(ast.with_kind(ASTKind::Let(
         inner_func.name.clone(),
+        None,
         Box::new(closure_expr(
           module_name,
           &mangle_closure_name(&inner_func.name),
@@ -370,14 +380,22 @@ fn patch_cell_access(
   locals: &mut HashSet<String>,
 ) -> Result<AST, String> {
   match &ast.kind {
-    ASTKind::Let(name, expr) => {
+    ASTKind::Let(name, annotation, expr) => {
       let expr = patch_cell_access(expr, captures, cell_vars, locals)?;
       locals.insert(name.clone());
       if cell_vars.contains(name) {
         let cell = AST::new(ASTKind::Cell(Box::new(expr)), ast.span.clone());
-        Ok(ast.with_kind(ASTKind::Let(name.clone(), Box::new(cell))))
+        Ok(ast.with_kind(ASTKind::Let(
+          name.clone(),
+          annotation.clone(),
+          Box::new(cell),
+        )))
       } else {
-        Ok(ast.with_kind(ASTKind::Let(name.clone(), Box::new(expr))))
+        Ok(ast.with_kind(ASTKind::Let(
+          name.clone(),
+          annotation.clone(),
+          Box::new(expr),
+        )))
       }
     }
     ASTKind::Variable(name) => {
@@ -535,12 +553,16 @@ mod test {
     let expected = vec![
       AST::DefineFn(Function {
         name: "inner:(closure)".to_string(),
-        params: vec!["a".to_string()],
+        params: vec![("a".to_string(), None)],
+        return_type: None,
+        bounds: vec![],
         code: vec![DerefCell(Box::new(Variable("a".to_string())))],
       }),
       AST::DefineFn(Function {
         name: "outer".to_string(),
         params: vec![],
+        return_type: None,
+        bounds: vec![],
         code: vec![
           Let("a".to_string(), Box::new(Cell(Box::new(Int(1))))),
           Let(
@@ -566,7 +588,7 @@ mod test {
     //! function, it is transformed such that the parameter is rebound in a
     //! Cell.
     let source = "
-      (fn outer (par)
+      (fn outer (par:Int)
         (let b (+ par 1))
         (fn inner () par))";
     let asts = read_multiple(source)?;
@@ -574,12 +596,16 @@ mod test {
     let expected = vec![
       AST::DefineFn(Function {
         name: "inner:(closure)".to_string(),
-        params: vec!["par".to_string()],
+        params: vec![("par".to_string(), None)],
+        return_type: None,
+        bounds: vec![],
         code: vec![DerefCell(Box::new(Variable("par".to_string())))],
       }),
       AST::DefineFn(Function {
         name: "outer".to_string(),
-        params: vec!["par".to_string()],
+        params: vec![("par".to_string(), Some(TypeAst::Named("Int".to_string())))],
+        return_type: None,
+        bounds: vec![],
         code: vec![
           Let(
             "par".to_string(),
@@ -622,11 +648,15 @@ mod test {
       AST::DefineFn(Function {
         name: "inner:(closure)".to_string(),
         params: vec![],
+        return_type: None,
+        bounds: vec![],
         code: vec![Int(1)],
       }),
       AST::DefineFn(Function {
         name: "outer".to_string(),
         params: vec![],
+        return_type: None,
+        bounds: vec![],
         code: vec![Let(
           "inner".to_string(),
           Box::new(FunctionRef(
@@ -657,6 +687,8 @@ mod test {
       AST::DefineFn(Function {
         name: "inner:(closure)".to_string(),
         params: vec![],
+        return_type: None,
+        bounds: vec![],
         code: vec![
           Let("a".to_string(), Box::new(Int(2))),
           Variable("a".to_string()),
@@ -665,6 +697,8 @@ mod test {
       AST::DefineFn(Function {
         name: "outer".to_string(),
         params: vec![],
+        return_type: None,
+        bounds: vec![],
         code: vec![
           Let("a".to_string(), Box::new(Int(1))),
           Let(
@@ -697,7 +731,9 @@ mod test {
     let expected = vec![
       AST::DefineFn(Function {
         name: "inner:(closure)".to_string(),
-        params: vec!["a".to_string()],
+        params: vec![("a".to_string(), None)],
+        return_type: None,
+        bounds: vec![],
         code: vec![
           Let(
             "a".to_string(),
@@ -712,6 +748,8 @@ mod test {
       AST::DefineFn(Function {
         name: "outer".to_string(),
         params: vec![],
+        return_type: None,
+        bounds: vec![],
         code: vec![
           Let("a".to_string(), Box::new(AST::Cell(Box::new(Int(1))))),
           Let(
@@ -748,12 +786,16 @@ mod test {
     let expected = vec![
       AST::DefineFn(Function {
         name: "inner:(closure)".to_string(),
-        params: vec!["a".to_string()],
+        params: vec![("a".to_string(), None)],
+        return_type: None,
+        bounds: vec![],
         code: vec![AST::DerefCell(Box::new(AST::Variable("a".to_string())))],
       }),
       AST::DefineFn(Function {
         name: "intermediate:(closure)".to_string(),
-        params: vec!["a".to_string()],
+        params: vec![("a".to_string(), None)],
+        return_type: None,
+        bounds: vec![],
         code: vec![AST::Let(
           "inner".to_string(),
           Box::new(AST::PartialApply(
@@ -768,6 +810,8 @@ mod test {
       AST::DefineFn(Function {
         name: "outer".to_string(),
         params: vec![],
+        return_type: None,
+        bounds: vec![],
         code: vec![
           AST::Let("a".to_string(), Box::new(AST::Cell(Box::new(AST::Int(1))))),
           AST::Let(

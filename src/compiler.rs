@@ -285,7 +285,7 @@ fn compile_function(
 ) -> Result<CompiledModule, String> {
   // Map of local-name to local-index
   let mut locals = HashMap::new();
-  for (idx, param) in f.params.iter().enumerate() {
+  for (idx, (param, _)) in f.params.iter().enumerate() {
     locals.insert(param.clone(), idx as u16);
   }
   let mut instructions = vec![];
@@ -379,7 +379,7 @@ fn compile_expr(
         fname.to_owned(),
       )));
     }
-    ASTKind::Let(name, expr) => {
+    ASTKind::Let(name, _, expr) => {
       if !locals.contains_key(name) {
         locals.insert(name.clone(), locals.len() as u16);
       }
@@ -464,15 +464,19 @@ pub fn compile_executable_from_source(
   main: (&str, &str),
   specs: &[BuiltinSpec],
 ) -> Result<Package, String> {
-  Package::from_modules_with_main(_compile_from_source(module_source)?, main, specs)
+  Package::from_modules_with_main(_compile_from_source(module_source, specs)?, main, specs)
 }
 
 pub fn compile_from_source(module_source: &str, specs: &[BuiltinSpec]) -> Result<Package, String> {
-  Package::from_modules(_compile_from_source(module_source)?, specs)
+  Package::from_modules(_compile_from_source(module_source, specs)?, specs)
 }
 
-fn _compile_from_source(module_source: &str) -> Result<CompiledModules, String> {
+fn _compile_from_source(
+  module_source: &str,
+  specs: &[BuiltinSpec],
+) -> Result<CompiledModules, String> {
   let asts = parser::read_multiple(module_source)?;
+  crate::typecheck::typecheck(&asts, specs).map_err(|error| error.to_string())?;
   let compiled_modules = compile_modules(&asts)?;
   Ok(compiled_modules)
 }
@@ -522,7 +526,9 @@ mod test {
   fn compile_id() {
     let func = parser::Function {
       name: "id".to_string(),
-      params: vec!["a".to_string()],
+      params: vec![("a".to_string(), None)],
+      return_type: None,
+      bounds: vec![],
       code: vec![AST::Variable("a".to_string())],
     };
     let code = compile_function("main", &HashSet::new(), &func).unwrap();
@@ -544,6 +550,8 @@ mod test {
     let func = parser::Function {
       name: "main".to_string(),
       params: vec![],
+      return_type: None,
+      bounds: vec![],
       code: vec![
         AST::Let(
           "alias".to_string(),
@@ -579,6 +587,8 @@ mod test {
     let func = parser::Function {
       name: "main".to_string(),
       params: vec![],
+      return_type: None,
+      bounds: vec![],
       code: vec![AST::Let("a".to_string(), Box::new(AST::Int(1)))],
     };
     let code = compile_function("main", &HashSet::new(), &func).unwrap();
@@ -605,9 +615,27 @@ mod test {
     let func = parser::Function {
       name: "main".to_string(),
       params: vec![],
+      return_type: None,
+      bounds: vec![],
       code: vec![AST::Variable("missing".to_string())],
     };
     let err = compile_function("main", &HashSet::new(), &func).unwrap_err();
     assert_eq!(err, "Function accesses unbound variable missing");
+  }
+
+  #[test]
+  fn source_compilation_rejects_type_errors_before_codegen() {
+    let builtins = crate::builtins::default_builtins();
+    let error = compile_executable_from_source(
+      "(fn main () ->Int (std.+ 1 \"not-an-int\"))",
+      ("main", "main"),
+      &builtins.specs(),
+    )
+    .unwrap_err();
+    assert!(
+      error.contains("type `String` does not satisfy trait `Add`")
+        || error.contains("expected `Int`, got `String`"),
+      "{error}"
+    );
   }
 }

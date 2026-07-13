@@ -145,12 +145,15 @@ fn register_one(linker: &mut Linker<()>, b: &safelisp::wasm::Builtin) {
 #[case::if_selects_else_branch("(fn main () (if false 42 0))", Val::Int(0))]
 #[case::if_with_condition_from_call("(fn main () (if (std.== 1 1) 7 8))", Val::Int(7))]
 #[case::if_branches_can_use_let_variables("(fn main () (let a 10) (if true a 0))", Val::Int(10))]
-#[case::calls_same_module_function("(fn id (a) a) (fn main () (id 99))", Val::Int(99))]
+#[case::calls_same_module_function("(fn id (a:Int) ->Int a) (fn main () (id 99))", Val::Int(99))]
 #[case::calls_function_with_multiple_args(
-  "(fn first (a b) a) (fn main () (first 5 6))",
+  "(fn first (a:Int b:Int) ->Int a) (fn main () (first 5 6))",
   Val::Int(5)
 )]
-#[case::calls_function_defined_later("(fn main () (later 7)) (fn later (x) x)", Val::Int(7))]
+#[case::calls_function_defined_later(
+  "(fn main () (later 7)) (fn later (x:Int) ->Int x)",
+  Val::Int(7)
+)]
 #[case::std_add("(fn main () (std.+ 1 2))", Val::Int(3))]
 #[case::std_sub("(fn main () (std.- 1 2))", Val::Int(-1))]
 #[case::std_add_floats("(fn main () (std.+ 1.5 2.5))", Val::Float(4.0))]
@@ -166,15 +169,15 @@ fn register_one(linker: &mut Linker<()>, b: &safelisp::wasm::Builtin) {
   Val::Int(6)
 )]
 #[case::calls_function_that_calls_another(
-  "(fn inc (n) (std.+ n 1)) (fn twice (n) (std.+ (inc n) (inc n))) (fn main () (twice 10))",
+  "(fn inc (n:Int) ->Int (std.+ n 1)) (fn twice (n:Int) ->Int (std.+ (inc n) (inc n))) (fn main () (twice 10))",
   Val::Int(22)
 )]
 #[case::recursion_with_base_case(
-  "(fn triangle (n) (if (std.== n 0) 0 (std.+ n (triangle (std.- n 1))))) (fn main () (triangle 10))",
+  "(fn triangle (n:Int) ->Int (if (std.== n 0) 0 (std.+ n (triangle (std.- n 1))))) (fn main () (triangle 10))",
   Val::Int(55),
 )]
 #[case::deep_recursion(
-  "(fn triangle (n) (if (std.== n 0) 0 (std.+ n (triangle (std.- n 1))))) (fn main () (triangle 10000))",
+  "(fn triangle (n:Int) ->Int (if (std.== n 0) 0 (std.+ n (triangle (std.- n 1))))) (fn main () (triangle 10000))",
   Val::Int(50_005_000),
 )]
 #[case::block_returns_last("(fn main () (block 1 2 3))", Val::Int(3))]
