@@ -414,7 +414,13 @@ impl Checker {
     if let Some(binding) = env.get(name).cloned() {
       return self.instantiate_binding(binding, Some(format!("variable `{name}`")));
     }
-    self.resolve_scheme("main", name)
+    let scheme = self
+      .schemes
+      .get(&("main".to_string(), name.to_string()))
+      .cloned()
+      .ok_or_else(|| TypeError::new(format!("Unknown name `{name}`")))?;
+    let instantiated = self.instantiate(&scheme, Some(format!("function `main.{name}`")));
+    Ok(Type::Fn(instantiated.params, Box::new(instantiated.ret)))
   }
 
   fn resolve_scheme(&mut self, module: &str, name: &str) -> Result<Type, TypeError> {
@@ -1108,6 +1114,12 @@ mod tests {
   }
 
   #[test]
+  fn unknown_bare_value_name_is_reported_as_a_name_error() {
+    let error = check("(fn main () y)").unwrap_err();
+    assert_eq!(error.message, "Unknown name `y`");
+  }
+
+  #[test]
   fn binding_created_in_only_one_if_branch_is_not_available_afterward() {
     let error = check(
       "(fn main () ->Int
@@ -1115,10 +1127,7 @@ mod tests {
          y)",
     )
     .unwrap_err();
-    assert!(
-      error.message.contains("unknown function `main.y`"),
-      "{error}"
-    );
+    assert_eq!(error.message, "Unknown name `y`");
   }
 
   #[test]
