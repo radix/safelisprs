@@ -8,6 +8,7 @@ use wasm_encoder::{
   TableType, TypeSection, ValType,
 };
 
+use crate::builtins::{sig, BuiltinSignature, Trait, TypeConst};
 use crate::parser::{self, ASTKind, Identifier, AST};
 
 /// Tag values for the SafeLisp tagged-value representation. Every SafeLisp
@@ -84,6 +85,8 @@ pub struct Builtin {
   /// Number of SafeLisp-value parameters (each is a tag+payload pair on the
   /// WASM side, so the actual WASM param count is `num_params * 2`).
   pub num_params: usize,
+  /// The SafeLisp-level type checked at call sites.
+  pub signature: BuiltinSignature,
   /// The host implementation.
   pub func: HostFn,
 }
@@ -93,12 +96,14 @@ impl Builtin {
   pub fn nullary(
     module: &str,
     name: &str,
+    signature: BuiltinSignature,
     func: impl Fn() -> SLValue + Send + Sync + 'static,
   ) -> Self {
     Builtin {
       module: module.to_string(),
       name: name.to_string(),
       num_params: 0,
+      signature,
       func: Arc::new(move |_| func()),
     }
   }
@@ -107,12 +112,14 @@ impl Builtin {
   pub fn unary(
     module: &str,
     name: &str,
+    signature: BuiltinSignature,
     func: impl Fn(SLValue) -> SLValue + Send + Sync + 'static,
   ) -> Self {
     Builtin {
       module: module.to_string(),
       name: name.to_string(),
       num_params: 1,
+      signature,
       func: Arc::new(move |args| func(args[0])),
     }
   }
@@ -121,12 +128,14 @@ impl Builtin {
   pub fn binary(
     module: &str,
     name: &str,
+    signature: BuiltinSignature,
     func: impl Fn(SLValue, SLValue) -> SLValue + Send + Sync + 'static,
   ) -> Self {
     Builtin {
       module: module.to_string(),
       name: name.to_string(),
       num_params: 2,
+      signature,
       func: Arc::new(move |args| func(args[0], args[1])),
     }
   }
@@ -135,12 +144,14 @@ impl Builtin {
   pub fn ternary(
     module: &str,
     name: &str,
+    signature: BuiltinSignature,
     func: impl Fn(SLValue, SLValue, SLValue) -> SLValue + Send + Sync + 'static,
   ) -> Self {
     Builtin {
       module: module.to_string(),
       name: name.to_string(),
       num_params: 3,
+      signature,
       func: Arc::new(move |args| func(args[0], args[1], args[2])),
     }
   }
@@ -212,6 +223,17 @@ pub fn compile(source: &str, builtins: &Builtins) -> Result<Vec<u8>, String> {
 
 /// Compile a slice of already-parsed top-level AST into a WASM binary.
 pub fn compile_asts(asts: &[AST], builtins: &Builtins) -> Result<Vec<u8>, String> {
+  crate::typecheck::typecheck_named(
+    asts,
+    builtins.iter().map(|builtin| {
+      (
+        builtin.module.as_str(),
+        builtin.name.as_str(),
+        &builtin.signature,
+      )
+    }),
+  )
+  .map_err(|error| error.to_string())?;
   ModuleCompiler::new(builtins).compile(asts)
 }
 
@@ -418,7 +440,7 @@ impl<'b> ModuleCompiler<'b> {
       ASTKind::FunctionRef(module, name) => {
         self.resolve_builtin_for_discovery(&Identifier::Qualified(module.clone(), name.clone()))?;
       }
-      ASTKind::Let(_, expr) => self.discover_expr(expr)?,
+      ASTKind::Let(_, _, expr) => self.discover_expr(expr)?,
       ASTKind::If(cond, then, els) => {
         self.discover_expr(cond)?;
         self.discover_expr(then)?;
@@ -520,7 +542,7 @@ impl<'b> ModuleCompiler<'b> {
       .params
       .iter()
       .enumerate()
-      .map(|(i, p)| (p.clone(), i as u32))
+      .map(|(i, (name, _))| (name.clone(), i as u32))
       .collect();
     let mut next_pair = num_params;
 
@@ -538,7 +560,7 @@ impl<'b> ModuleCompiler<'b> {
       .params
       .iter()
       .enumerate()
-      .map(|(i, p)| (p.clone(), i as u32))
+      .map(|(i, (name, _))| (name.clone(), i as u32))
       .collect();
     next_pair = num_params;
 
@@ -609,7 +631,7 @@ impl<'b> ModuleCompiler<'b> {
       | ASTKind::Bool(_)
       | ASTKind::Variable(_)
       | ASTKind::FunctionRef(_, _) => {}
-      ASTKind::Let(name, expr) => {
+      ASTKind::Let(name, _, expr) => {
         self.count_let_locals(expr, locals, next_pair)?;
         locals.push((name.clone(), *next_pair));
         *next_pair += 1;
@@ -693,7 +715,7 @@ impl<'b> ModuleCompiler<'b> {
         func.instructions().i64_const(i64::from(index));
         func.instructions().i32_const(TAG_FUNCTION_REF);
       }
-      ASTKind::Let(name, expr) => {
+      ASTKind::Let(name, _, expr) => {
         self.compile_expr(
           expr,
           locals,
@@ -968,22 +990,52 @@ impl<'b> ModuleCompiler<'b> {
 /// A convenience function returning the standard set of SafeLisp builtins.
 pub fn std_builtins() -> Builtins {
   Builtins::new()
-    .with_builtin(Builtin::binary("std", "+", |a, b| match (a, b) {
-      (SLValue::Int(x), SLValue::Int(y)) => SLValue::Int(x.wrapping_add(y)),
-      (SLValue::Float(x), SLValue::Float(y)) => SLValue::Float(x + y),
-      _ => SLValue::Void,
-    }))
-    .with_builtin(Builtin::binary("std", "-", |a, b| match (a, b) {
-      (SLValue::Int(x), SLValue::Int(y)) => SLValue::Int(x - y),
-      (SLValue::Float(x), SLValue::Float(y)) => SLValue::Float(x - y),
-      _ => SLValue::Void,
-    }))
-    .with_builtin(Builtin::binary("std", "==", |a, b| match (a, b) {
-      (SLValue::Int(x), SLValue::Int(y)) => SLValue::Bool(x == y),
-      (SLValue::Float(x), SLValue::Float(y)) => SLValue::Bool(x == y),
-      (SLValue::Bool(x), SLValue::Bool(y)) => SLValue::Bool(x == y),
-      _ => SLValue::Void,
-    }))
+    .with_builtin(Builtin::binary(
+      "std",
+      "+",
+      sig(
+        &[("A", &[Trait::Add])],
+        vec![TypeConst::var("A"), TypeConst::var("A")],
+        None,
+        TypeConst::var("A"),
+      ),
+      |a, b| match (a, b) {
+        (SLValue::Int(x), SLValue::Int(y)) => SLValue::Int(x.wrapping_add(y)),
+        (SLValue::Float(x), SLValue::Float(y)) => SLValue::Float(x + y),
+        _ => SLValue::Void,
+      },
+    ))
+    .with_builtin(Builtin::binary(
+      "std",
+      "-",
+      sig(
+        &[("A", &[Trait::Sub])],
+        vec![TypeConst::var("A"), TypeConst::var("A")],
+        None,
+        TypeConst::var("A"),
+      ),
+      |a, b| match (a, b) {
+        (SLValue::Int(x), SLValue::Int(y)) => SLValue::Int(x - y),
+        (SLValue::Float(x), SLValue::Float(y)) => SLValue::Float(x - y),
+        _ => SLValue::Void,
+      },
+    ))
+    .with_builtin(Builtin::binary(
+      "std",
+      "==",
+      sig(
+        &[("A", &[Trait::Eq])],
+        vec![TypeConst::var("A"), TypeConst::var("A")],
+        None,
+        TypeConst::Bool,
+      ),
+      |a, b| match (a, b) {
+        (SLValue::Int(x), SLValue::Int(y)) => SLValue::Bool(x == y),
+        (SLValue::Float(x), SLValue::Float(y)) => SLValue::Bool(x == y),
+        (SLValue::Bool(x), SLValue::Bool(y)) => SLValue::Bool(x == y),
+        _ => SLValue::Void,
+      },
+    ))
 }
 
 #[cfg(test)]
@@ -1109,7 +1161,7 @@ mod test {
   #[test]
   fn top_level_function_can_be_called_through_local() {
     assert_main_eq(
-      "(fn double (x) (std.+ x x)) (fn main () (let f double) (f 4))",
+      "(fn double (x:Int) ->Int (std.+ x x)) (fn main () (let f double) (f 4))",
       SLValue::Int(8),
     );
   }
@@ -1117,7 +1169,7 @@ mod test {
   #[test]
   fn qualified_function_can_be_called_dynamically() {
     assert_main_eq(
-      "(fn double (x) (std.+ x x)) (fn main () (let f main.double) (f 4))",
+      "(fn double (x:Int) ->Int (std.+ x x)) (fn main () (let f main.double) (f 4))",
       SLValue::Int(8),
     );
   }
@@ -1130,8 +1182,8 @@ mod test {
   #[test]
   fn local_shadows_top_level_function_as_value() {
     assert_main_eq(
-      "(fn transform (x) (std.+ x x))
-       (fn identity (x) x)
+      "(fn transform (x:Int) ->Int (std.+ x x))
+       (fn identity (x:Int) ->Int x)
        (fn main () (let transform identity) (transform 7))",
       SLValue::Int(7),
     );
@@ -1164,20 +1216,26 @@ mod test {
 
   #[test]
   fn calls_same_module_function() {
-    assert_main_eq("(fn id (a) a) (fn main () (id 99))", SLValue::Int(99));
+    assert_main_eq(
+      "(fn id (a:Int) ->Int a) (fn main () (id 99))",
+      SLValue::Int(99),
+    );
   }
 
   #[test]
   fn calls_function_with_multiple_args() {
     assert_main_eq(
-      "(fn first (a b) a) (fn main () (first 5 6))",
+      "(fn first (a:Int b:Int) ->Int a) (fn main () (first 5 6))",
       SLValue::Int(5),
     );
   }
 
   #[test]
   fn calls_function_defined_later() {
-    assert_main_eq("(fn main () (later 7)) (fn later (x) x)", SLValue::Int(7));
+    assert_main_eq(
+      "(fn main () (later 7)) (fn later (x:Int) ->Int x)",
+      SLValue::Int(7),
+    );
   }
 
   #[test]
@@ -1224,7 +1282,7 @@ mod test {
   #[test]
   fn calls_function_that_calls_another() {
     assert_main_eq(
-      "(fn inc (n) (std.+ n 1)) (fn twice (n) (std.+ (inc n) (inc n))) (fn main () (twice 10))",
+      "(fn inc (n:Int) ->Int (std.+ n 1)) (fn twice (n:Int) ->Int (std.+ (inc n) (inc n))) (fn main () (twice 10))",
       SLValue::Int(22),
     );
   }
@@ -1232,7 +1290,7 @@ mod test {
   #[test]
   fn recursion_with_base_case() {
     assert_main_eq(
-      "(fn triangle (n) (if (std.== n 0) 0 (std.+ n (triangle (std.- n 1))))) (fn main () (triangle 10))",
+      "(fn triangle (n:Int) ->Int (if (std.== n 0) 0 (std.+ n (triangle (std.- n 1))))) (fn main () (triangle 10))",
       SLValue::Int(55),
     );
   }
@@ -1240,7 +1298,7 @@ mod test {
   #[test]
   fn deep_recursion() {
     assert_main_eq(
-      "(fn triangle (n) (if (std.== n 0) 0 (std.+ n (triangle (std.- n 1))))) (fn main () (triangle 10000))",
+      "(fn triangle (n:Int) ->Int (if (std.== n 0) 0 (std.+ n (triangle (std.- n 1))))) (fn main () (triangle 10000))",
       SLValue::Int(50_005_000),
     );
   }
@@ -1268,27 +1326,47 @@ mod test {
 
   #[test]
   fn compiled_module_validates() {
-    let wasm = compile("(fn id (a) a) (fn main () (id 7))", &std_builtins()).unwrap();
+    let wasm = compile(
+      "(fn id (a:Int) ->Int a) (fn main () (id 7))",
+      &std_builtins(),
+    )
+    .unwrap();
     let engine = Engine::default();
     Module::from_binary(&engine, &wasm).expect("emitted wasm should validate");
   }
 
   #[test]
+  fn compile_rejects_type_errors_before_wasm_codegen() {
+    let error = compile("(fn main () ->Int (std.+ 1 true))", &std_builtins()).unwrap_err();
+    assert!(error.contains("expected `Int`, got `Bool`"), "{error}");
+  }
+
+  #[test]
   fn custom_builtin_with_different_module_name() {
-    let builtins = Builtins::new().with_builtin(Builtin::unary("math", "double", |v| match v {
-      SLValue::Int(n) => SLValue::Int(n * 2),
-      _ => SLValue::Void,
-    }));
+    let builtins = Builtins::new().with_builtin(Builtin::unary(
+      "math",
+      "double",
+      sig(&[], vec![TypeConst::Int], None, TypeConst::Int),
+      |v| match v {
+        SLValue::Int(n) => SLValue::Int(n * 2),
+        _ => SLValue::Void,
+      },
+    ));
     let result = run_main_with("(fn main () (math.double 21))", &builtins).unwrap();
     assert_eq!(result, SLValue::Int(42));
   }
 
   #[test]
   fn bare_builtin_name_resolves() {
-    let builtins = Builtins::new().with_builtin(Builtin::unary("host", "double", |v| match v {
-      SLValue::Int(n) => SLValue::Int(n * 2),
-      _ => SLValue::Void,
-    }));
+    let builtins = Builtins::new().with_builtin(Builtin::unary(
+      "host",
+      "double",
+      sig(&[], vec![TypeConst::Int], None, TypeConst::Int),
+      |v| match v {
+        SLValue::Int(n) => SLValue::Int(n * 2),
+        _ => SLValue::Void,
+      },
+    ));
     let result = run_main_with("(fn main () (double 21))", &builtins).unwrap();
     assert_eq!(result, SLValue::Int(42));
   }

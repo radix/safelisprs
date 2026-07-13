@@ -111,8 +111,8 @@ builtin (rather than a special form) is the variadic-builtins work below.
       covers it for non-cell contents; note the cycle caveat (a list
       containing a cell referring back to the list would infinite-loop).
 - [x] **`idx`**: `(idx list index)`. Negative indices work like Python
-      (`-1` is the last element). Out-of-range is a runtime error. Also works
-      on strings (index by `char`, returns a 1-char string).
+      (`-1` is the last element). Out-of-range is a runtime error. String
+      indexing is deliberately unsupported; use `slice` for strings.
 - [x] **`push`**: `(push l v)` returns a _new_ list with `v` appended to the
       end.
 - [x] **`slice`**: `(slice l start stop)` with Python `l[start:stop]`

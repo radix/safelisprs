@@ -17,7 +17,7 @@ impl PartialEq for AST {
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum ASTKind {
-  Let(String, Box<AST>),
+  Let(String, Option<TypeAst>, Box<AST>),
   DefineFn(Function),
   Call(Box<AST>, Vec<AST>),
   CallFixed(Identifier, Vec<AST>),
@@ -68,7 +68,7 @@ impl AST {
 #[allow(non_snake_case)]
 impl AST {
   pub(crate) fn Let(name: String, value: Box<AST>) -> Self {
-    Self::synthetic(ASTKind::Let(name, value))
+    Self::synthetic(ASTKind::Let(name, None, value))
   }
 
   pub(crate) fn DefineFn(function: Function) -> Self {
@@ -121,14 +121,31 @@ pub enum Identifier {
 #[derive(Debug, PartialEq, Clone)]
 pub struct Function {
   pub name: String,
-  pub params: Vec<String>,
+  pub params: Vec<(String, Option<TypeAst>)>,
+  pub return_type: Option<TypeAst>,
+  pub bounds: Vec<Bound>,
   pub code: Vec<AST>,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum TypeAst {
+  Named(String),
+  Apply(String, Vec<TypeAst>),
+  Fn(Vec<TypeAst>, Box<TypeAst>),
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct Bound {
+  pub var: String,
+  pub traits: Vec<String>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
 enum TokenKind {
   LParen,
   RParen,
+  Colon,
+  Arrow,
   Sym(String),
   Int(i64),
   Float(f64),
@@ -226,6 +243,21 @@ impl<'a> Lexer<'a> {
             span: start..self.offset,
           }
         }
+        ':' => {
+          self.bump_char();
+          Token {
+            kind: TokenKind::Colon,
+            span: start..self.offset,
+          }
+        }
+        '-' if self.source[self.offset..].starts_with("->") => {
+          self.bump_char();
+          self.bump_char();
+          Token {
+            kind: TokenKind::Arrow,
+            span: start..self.offset,
+          }
+        }
         '"' => self.lex_string()?,
         _ => self.lex_value()?,
       };
@@ -293,7 +325,9 @@ impl<'a> Lexer<'a> {
 
   fn lex_value(&mut self) -> Result<Token, ParseError> {
     let start = self.offset;
-    while self.peek_char().is_some_and(|ch| !is_delimiter(ch)) {
+    while self.peek_char().is_some_and(|ch| !is_delimiter(ch))
+      && !self.source[self.offset..].starts_with("->")
+    {
       self.bump_char();
     }
 
@@ -319,7 +353,7 @@ impl<'a> Lexer<'a> {
 }
 
 fn is_delimiter(ch: char) -> bool {
-  ch.is_whitespace() || matches!(ch, '(' | ')' | '"' | '#')
+  ch.is_whitespace() || matches!(ch, '(' | ')' | '"' | '#' | ':')
 }
 
 fn is_numeric_candidate(text: &str) -> bool {
@@ -393,6 +427,9 @@ impl Parser {
       TokenKind::RParen => {
         Err(ParseError::new(token.span, "unexpected `)`").expected("an expression"))
       }
+      TokenKind::Colon | TokenKind::Arrow => {
+        Err(ParseError::new(token.span, "unexpected type-syntax token").expected("an expression"))
+      }
       TokenKind::Sym(name) => Ok(ast_from_symbol(name, token.span)),
       TokenKind::Int(value) => Ok(AST::new(ASTKind::Int(value), token.span)),
       TokenKind::Float(value) => Ok(AST::new(ASTKind::Float(value), token.span)),
@@ -440,10 +477,19 @@ impl Parser {
 
   fn parse_let(&mut self, start: usize) -> Result<AST, ParseError> {
     let variable = self.expect_symbol("first argument to `let` must be a symbol")?;
+    let annotation = if matches!(self.peek().kind, TokenKind::Colon) {
+      self.advance();
+      Some(self.parse_type()?)
+    } else {
+      None
+    };
     let expression = self.parse_expr()?;
     let close = self.expect_close("`let` must have exactly two arguments")?;
     let span = start..close.span.end;
-    Ok(AST::new(ASTKind::Let(variable, Box::new(expression)), span))
+    Ok(AST::new(
+      ASTKind::Let(variable, annotation, Box::new(expression)),
+      span,
+    ))
   }
 
   fn parse_fn(&mut self, start: usize) -> Result<AST, ParseError> {
@@ -464,9 +510,41 @@ impl Parser {
             .expected("`)`"),
         );
       }
-      params.push(self.expect_symbol("Parameters must be symbols")?);
+      let param = self.expect_symbol("Parameters must be symbols")?;
+      self.expect_colon("function parameters require a type annotation")?;
+      params.push((param, Some(self.parse_type()?)));
     }
     self.advance();
+
+    let return_type = if matches!(self.peek().kind, TokenKind::Arrow) {
+      self.advance();
+      Some(self.parse_type()?)
+    } else {
+      None
+    };
+
+    let mut bounds = Vec::new();
+    if matches!(&self.peek().kind, TokenKind::Sym(name) if name == "where") {
+      self.advance();
+      self.expect_open("`where` requires a parenthesized bound list")?;
+      while !matches!(self.peek().kind, TokenKind::RParen) {
+        self.expect_open("each bound must be parenthesized")?;
+        let var = self.expect_symbol("a bound must name a type variable")?;
+        let mut traits = Vec::new();
+        while !matches!(self.peek().kind, TokenKind::RParen) {
+          traits.push(self.expect_symbol("trait names must be symbols")?);
+        }
+        if traits.is_empty() {
+          return Err(ParseError::new(
+            self.peek().span.clone(),
+            "a bound must name at least one trait",
+          ));
+        }
+        self.advance();
+        bounds.push(Bound { var, traits });
+      }
+      self.advance();
+    }
 
     if matches!(self.peek().kind, TokenKind::RParen) {
       return Err(ParseError::new(
@@ -492,6 +570,8 @@ impl Parser {
       ASTKind::DefineFn(Function {
         name,
         params,
+        return_type,
+        bounds,
         code: body,
       }),
       span,
@@ -576,6 +656,65 @@ impl Parser {
     match token.kind {
       TokenKind::Sym(name) => Ok(name),
       _ => Err(ParseError::new(token.span, message).expected("a symbol")),
+    }
+  }
+
+  fn parse_type(&mut self) -> Result<TypeAst, ParseError> {
+    let token = self.advance();
+    match token.kind {
+      TokenKind::Sym(name) => Ok(TypeAst::Named(name)),
+      TokenKind::LParen => {
+        let constructor = self.expect_symbol("type application requires a constructor name")?;
+        if constructor == "Fn" {
+          self.expect_open("`Fn` requires a parenthesized parameter type list")?;
+          let mut params = Vec::new();
+          while !matches!(self.peek().kind, TokenKind::RParen) {
+            params.push(self.parse_type()?);
+          }
+          self.advance();
+          let arrow = self.advance();
+          if !matches!(arrow.kind, TokenKind::Arrow) {
+            return Err(
+              ParseError::new(arrow.span, "function type requires `->`").expected("`->`"),
+            );
+          }
+          let ret = self.parse_type()?;
+          self.expect_close("function type must end with `)`")?;
+          Ok(TypeAst::Fn(params, Box::new(ret)))
+        } else {
+          let mut args = Vec::new();
+          while !matches!(self.peek().kind, TokenKind::RParen) {
+            if matches!(self.peek().kind, TokenKind::Eof) {
+              return Err(ParseError::new(
+                self.peek().span.clone(),
+                "unterminated type application",
+              ));
+            }
+            args.push(self.parse_type()?);
+          }
+          self.advance();
+          Ok(TypeAst::Apply(constructor, args))
+        }
+      }
+      _ => Err(ParseError::new(token.span, "expected a type").expected("a type name")),
+    }
+  }
+
+  fn expect_open(&mut self, message: &'static str) -> Result<Token, ParseError> {
+    let token = self.advance();
+    if matches!(token.kind, TokenKind::LParen) {
+      Ok(token)
+    } else {
+      Err(ParseError::new(token.span, message).expected("`(`"))
+    }
+  }
+
+  fn expect_colon(&mut self, message: &'static str) -> Result<Token, ParseError> {
+    let token = self.advance();
+    if matches!(token.kind, TokenKind::Colon) {
+      Ok(token)
+    } else {
+      Err(ParseError::new(token.span, message).expected("`:`"))
     }
   }
 
@@ -689,8 +828,63 @@ mod test {
 
   #[test]
   fn parses_nested_functions() {
-    let result = read_multiple("(fn outer (x) (fn inner (y) (std.+ x y)) inner)");
+    let result = read_multiple("(fn outer (x:Int) (fn inner (y:Int) ->Int (std.+ x y)) inner)");
     assert!(result.is_ok(), "got: {result:?}");
+  }
+
+  #[test]
+  fn parses_mandatory_parameter_and_return_types_without_whitespace() {
+    let asts = read_multiple("(fn id (a:A xs:(List Int))->A where ((A Eq)) a)").unwrap();
+    let ASTKind::DefineFn(function) = &asts[0].kind else {
+      panic!("expected function")
+    };
+    assert_eq!(
+      function.params,
+      vec![
+        ("a".to_string(), Some(TypeAst::Named("A".to_string()))),
+        (
+          "xs".to_string(),
+          Some(TypeAst::Apply(
+            "List".to_string(),
+            vec![TypeAst::Named("Int".to_string())]
+          ))
+        )
+      ]
+    );
+    assert_eq!(function.return_type, Some(TypeAst::Named("A".to_string())));
+    assert_eq!(
+      function.bounds,
+      vec![Bound {
+        var: "A".to_string(),
+        traits: vec!["Eq".to_string()]
+      }]
+    );
+  }
+
+  #[test]
+  fn parses_function_types_and_annotated_lets() {
+    let asts = read_multiple(
+      "(fn apply (f:(Fn (Int) -> Int) x:Int) ->Int
+         (let result:Int (f x)))",
+    )
+    .unwrap();
+    let ASTKind::DefineFn(function) = &asts[0].kind else {
+      panic!("expected function")
+    };
+    assert_eq!(
+      function.params[0].1,
+      Some(TypeAst::Fn(
+        vec![TypeAst::Named("Int".to_string())],
+        Box::new(TypeAst::Named("Int".to_string()))
+      ))
+    );
+    assert!(matches!(function.code[0].kind, ASTKind::Let(_, Some(_), _)));
+  }
+
+  #[test]
+  fn rejects_unannotated_parameters() {
+    let error = read_multiple("(fn id (a) a)").unwrap_err();
+    assert!(error.contains("require a type annotation"), "{error}");
   }
 
   #[test]
