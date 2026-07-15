@@ -5,7 +5,7 @@ use gc_arena::{Gc, Mutation, RefLock};
 use rand_chacha::rand_core::{RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
-use crate::interpreter::{Accounted, CellContents, HostCtx, MemoryReservation, SLVal, Value};
+use crate::interpreter::{CellContents, HostCtx, MemoryReservation, SLVal, Value};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum Trait {
@@ -99,10 +99,7 @@ pub fn sig(
 /// reborrow `&'gc mut ExecRoot<'gc>` as `&'call mut ExecRoot<'gc>` without
 /// affecting the inner arena brand).
 pub(crate) type HostFn = Arc<
-  dyn for<'gc, 'call> Fn(
-    &mut HostCtx<'gc, 'call>,
-    &[Gc<'gc, Accounted<'gc>>],
-  ) -> Result<Value<'gc>, String>,
+  dyn for<'gc, 'call> Fn(&mut HostCtx<'gc, 'call>, &[Value<'gc>]) -> Result<Value<'gc>, String>,
 >;
 
 /// A builtin: metadata ([`BuiltinSpec`]) plus its handler ([`HostFn`]).
@@ -121,10 +118,10 @@ impl Builtin {
   pub(crate) fn call<'gc, 'call>(
     &self,
     ctx: &mut HostCtx<'gc, 'call>,
-    args: &[Gc<'gc, Accounted<'gc>>],
+    args: &[Value<'gc>],
   ) -> Result<(), String> {
     let result = (self.func)(ctx, args)?;
-    ctx.push_gc(result);
+    ctx.push_value(result);
     Ok(())
   }
 
@@ -140,10 +137,7 @@ impl Builtin {
     name: &'static str,
     num_params: Option<u16>,
     signature: BuiltinSignature,
-    func: impl for<'gc, 'call> Fn(
-        &mut HostCtx<'gc, 'call>,
-        &[Gc<'gc, Accounted<'gc>>],
-      ) -> Result<SLVal<'gc>, String>
+    func: impl for<'gc, 'call> Fn(&mut HostCtx<'gc, 'call>, &[Value<'gc>]) -> Result<SLVal<'gc>, String>
       + 'static,
   ) -> Self {
     Builtin {
@@ -155,7 +149,7 @@ impl Builtin {
       },
       func: Arc::new(move |ctx, args| {
         let value = func(ctx, args)?;
-        Ok(ctx.alloc_value(value))
+        Ok(ctx.alloc_heap(value))
       }),
     }
   }
@@ -168,10 +162,7 @@ impl Builtin {
     name: &'static str,
     num_params: Option<u16>,
     signature: BuiltinSignature,
-    func: impl for<'gc, 'call> Fn(
-        &mut HostCtx<'gc, 'call>,
-        &[Gc<'gc, Accounted<'gc>>],
-      ) -> Result<Value<'gc>, String>
+    func: impl for<'gc, 'call> Fn(&mut HostCtx<'gc, 'call>, &[Value<'gc>]) -> Result<Value<'gc>, String>
       + 'static,
   ) -> Self {
     Builtin {
@@ -190,7 +181,7 @@ impl Builtin {
     module: &'static str,
     name: &'static str,
     signature: BuiltinSignature,
-    func: impl for<'gc> Fn(Gc<'gc, Accounted<'gc>>) -> Result<SLVal<'gc>, String> + 'static,
+    func: impl for<'gc> Fn(Value<'gc>) -> Result<Value<'gc>, String> + 'static,
   ) -> Self {
     Builtin {
       spec: BuiltinSpec {
@@ -199,10 +190,7 @@ impl Builtin {
         num_params: Some(1),
         signature,
       },
-      func: Arc::new(move |ctx, args| {
-        let value = func(args[0])?;
-        Ok(ctx.alloc_value(value))
-      }),
+      func: Arc::new(move |_ctx, args| func(args[0])),
     }
   }
 
@@ -211,8 +199,7 @@ impl Builtin {
     module: &'static str,
     name: &'static str,
     signature: BuiltinSignature,
-    func: impl for<'gc> Fn(Gc<'gc, Accounted<'gc>>, Gc<'gc, Accounted<'gc>>) -> Result<SLVal<'gc>, String>
-      + 'static,
+    func: impl for<'gc> Fn(Value<'gc>, Value<'gc>) -> Result<Value<'gc>, String> + 'static,
   ) -> Self {
     Builtin {
       spec: BuiltinSpec {
@@ -221,10 +208,7 @@ impl Builtin {
         num_params: Some(2),
         signature,
       },
-      func: Arc::new(move |ctx, args| {
-        let value = func(args[0], args[1])?;
-        Ok(ctx.alloc_value(value))
-      }),
+      func: Arc::new(move |_ctx, args| func(args[0], args[1])),
     }
   }
 
@@ -234,11 +218,7 @@ impl Builtin {
     module: &'static str,
     name: &'static str,
     signature: BuiltinSignature,
-    func: impl for<'gc> Fn(
-        &Mutation<'gc>,
-        Gc<'gc, Accounted<'gc>>,
-        Gc<'gc, Accounted<'gc>>,
-      ) -> Result<SLVal<'gc>, String>
+    func: impl for<'gc> Fn(&Mutation<'gc>, Value<'gc>, Value<'gc>) -> Result<SLVal<'gc>, String>
       + 'static,
   ) -> Self {
     Builtin {
@@ -250,7 +230,7 @@ impl Builtin {
       },
       func: Arc::new(move |ctx, args| {
         let value = func(ctx.mc(), args[0], args[1])?;
-        Ok(ctx.alloc_value(value))
+        Ok(ctx.alloc_heap(value))
       }),
     }
   }
@@ -260,12 +240,7 @@ impl Builtin {
     module: &'static str,
     name: &'static str,
     signature: BuiltinSignature,
-    func: impl for<'gc> Fn(
-        Gc<'gc, Accounted<'gc>>,
-        Gc<'gc, Accounted<'gc>>,
-        Gc<'gc, Accounted<'gc>>,
-      ) -> Result<SLVal<'gc>, String>
-      + 'static,
+    func: impl for<'gc> Fn(Value<'gc>, Value<'gc>, Value<'gc>) -> Result<Value<'gc>, String> + 'static,
   ) -> Self {
     Builtin {
       spec: BuiltinSpec {
@@ -274,10 +249,7 @@ impl Builtin {
         num_params: Some(3),
         signature,
       },
-      func: Arc::new(move |ctx, args| {
-        let value = func(args[0], args[1], args[2])?;
-        Ok(ctx.alloc_value(value))
-      }),
+      func: Arc::new(move |_ctx, args| func(args[0], args[1], args[2])),
     }
   }
 
@@ -289,7 +261,7 @@ impl Builtin {
     module: &'static str,
     name: &'static str,
     signature: BuiltinSignature,
-    func: impl for<'gc> Fn(&[Gc<'gc, Accounted<'gc>>]) -> Result<SLVal<'gc>, String> + 'static,
+    func: impl for<'gc> Fn(&[Value<'gc>]) -> Result<Value<'gc>, String> + 'static,
   ) -> Self {
     Builtin {
       spec: BuiltinSpec {
@@ -298,10 +270,7 @@ impl Builtin {
         num_params: None,
         signature,
       },
-      func: Arc::new(move |ctx, args| {
-        let value = func(args)?;
-        Ok(ctx.alloc_value(value))
-      }),
+      func: Arc::new(move |_ctx, args| func(args)),
     }
   }
 }
@@ -401,13 +370,13 @@ pub fn default_builtins() -> Builtins {
         None,
         TypeConst::var("A"),
       ),
-      |a, b| match (&a.value, &b.value) {
-        (SLVal::Int(x), SLVal::Int(y)) => Ok(SLVal::Int(x + y)),
-        (SLVal::Float(x), SLVal::Float(y)) => Ok(SLVal::Float(x + y)),
+      |a, b| match (a, b) {
+        (Value::Int(x), Value::Int(y)) => Ok(Value::Int(x + y)),
+        (Value::Float(x), Value::Float(y)) => Ok(Value::Float(x + y)),
         _ => Err(format!(
           "Couldn't add {} and {}",
-          a.value.type_name(),
-          b.value.type_name()
+          a.type_name(),
+          b.type_name()
         )),
       },
     ))
@@ -421,14 +390,14 @@ pub fn default_builtins() -> Builtins {
         TypeConst::var("A"),
       ),
       |a, b| {
-        match (&a.value, &b.value) {
+        match (a, b) {
           // `a` is the left operand, `b` is the right operand: left - right.
-          (SLVal::Int(x), SLVal::Int(y)) => Ok(SLVal::Int(x - y)),
-          (SLVal::Float(x), SLVal::Float(y)) => Ok(SLVal::Float(x - y)),
+          (Value::Int(x), Value::Int(y)) => Ok(Value::Int(x - y)),
+          (Value::Float(x), Value::Float(y)) => Ok(Value::Float(x - y)),
           _ => Err(format!(
             "Couldn't sub {} and {}",
-            a.value.type_name(),
-            b.value.type_name()
+            a.type_name(),
+            b.type_name()
           )),
         }
       },
@@ -442,7 +411,7 @@ pub fn default_builtins() -> Builtins {
         None,
         TypeConst::Bool,
       ),
-      |a, b| Ok(SLVal::Bool(a == b)),
+      |a, b| Ok(Value::Bool(a == b)),
     ))
     .with_builtin(Builtin::contextual(
       "std",
@@ -456,31 +425,38 @@ pub fn default_builtins() -> Builtins {
       ),
       |ctx, args| {
         let (a, b) = (args[0], args[1]);
-        match (&a.value, &b.value) {
-          (SLVal::String(x), SLVal::String(y)) => {
-            let len = x
-              .len()
-              .checked_add(y.len())
-              .ok_or_else(|| "concat: string length overflow".to_string())?;
-            let (mut combined, _reservation) = reserved_string(ctx, len, "concat")?;
-            combined.push_str(x);
-            combined.push_str(y);
-            Ok(SLVal::String(combined))
-          }
-          (SLVal::List(x), SLVal::List(y)) => {
-            let len = x
-              .len()
-              .checked_add(y.len())
-              .ok_or_else(|| "concat: list length overflow".to_string())?;
-            let (mut combined, _reservation) = reserved_vec(ctx, len, "concat")?;
-            combined.extend(x.iter().copied());
-            combined.extend(y.iter().copied());
-            Ok(SLVal::List(combined))
-          }
+        match (&a, &b) {
+          (Value::Heap(a), Value::Heap(b)) => match (&a.value, &b.value) {
+            (SLVal::String(x), SLVal::String(y)) => {
+              let len = x
+                .len()
+                .checked_add(y.len())
+                .ok_or_else(|| "concat: string length overflow".to_string())?;
+              let (mut combined, _reservation) = reserved_string(ctx, len, "concat")?;
+              combined.push_str(x);
+              combined.push_str(y);
+              Ok(SLVal::String(combined))
+            }
+            (SLVal::List(x), SLVal::List(y)) => {
+              let len = x
+                .len()
+                .checked_add(y.len())
+                .ok_or_else(|| "concat: list length overflow".to_string())?;
+              let (mut combined, _reservation) = reserved_vec(ctx, len, "concat")?;
+              combined.extend(x.iter().copied());
+              combined.extend(y.iter().copied());
+              Ok(SLVal::List(combined))
+            }
+            _ => Err(format!(
+              "Couldn't concat {} and {}",
+              a.value.type_name(),
+              b.value.type_name()
+            )),
+          },
           _ => Err(format!(
             "Couldn't concat {} and {}",
-            a.value.type_name(),
-            b.value.type_name()
+            a.type_name(),
+            b.type_name()
           )),
         }
       },
@@ -501,7 +477,7 @@ pub fn default_builtins() -> Builtins {
         Ok(SLVal::List(items))
       },
     ))
-    .with_builtin(Builtin::contextual(
+    .with_builtin(Builtin::contextual_value(
       "std",
       "cell",
       Some(1),
@@ -513,7 +489,7 @@ pub fn default_builtins() -> Builtins {
       ),
       |ctx, args| {
         let contents = CellContents::new(args[0]);
-        Ok(SLVal::Cell(Gc::new(ctx.mc(), RefLock::new(contents))))
+        Ok(Value::Cell(Gc::new(ctx.mc(), RefLock::new(contents))))
       },
     ))
     .with_builtin(Builtin::contextual_value(
@@ -526,15 +502,15 @@ pub fn default_builtins() -> Builtins {
         None,
         TypeConst::var("A"),
       ),
-      |_ctx, args| match &args[0].value {
-        SLVal::Cell(cell) => Ok(cell.borrow().value),
+      |_ctx, args| match args[0] {
+        Value::Cell(cell) => Ok(cell.borrow().value),
         other => Err(format!(
           "std.get: expected a Cell, got {}",
           other.type_name()
         )),
       },
     ))
-    .with_builtin(Builtin::contextual(
+    .with_builtin(Builtin::contextual_value(
       "std",
       "set!",
       Some(2),
@@ -544,13 +520,10 @@ pub fn default_builtins() -> Builtins {
         None,
         TypeConst::Void,
       ),
-      |ctx, args| match &args[0].value {
-        SLVal::Cell(cell) => {
-          Gc::write(ctx.mc(), *cell)
-            .unlock()
-            .borrow_mut()
-            .set(args[1]);
-          Ok(SLVal::Void)
+      |ctx, args| match args[0] {
+        Value::Cell(cell) => {
+          Gc::write(ctx.mc(), cell).unlock().borrow_mut().set(args[1]);
+          Ok(Value::Void)
         }
         other => Err(format!(
           "std.set!: expected a Cell, got {}",
@@ -567,9 +540,12 @@ pub fn default_builtins() -> Builtins {
         None,
         TypeConst::Int,
       ),
-      |a| match &a.value {
-        SLVal::List(items) => Ok(SLVal::Int(items.len() as i64)),
-        _ => Err(format!("len: expected a List, got {}", a.value.type_name())),
+      |a| match a {
+        Value::Heap(heap) => match &heap.value {
+          SLVal::List(items) => Ok(Value::Int(items.len() as i64)),
+          _ => Err(format!("len: expected a List, got {}", a.type_name())),
+        },
+        _ => Err(format!("len: expected a List, got {}", a.type_name())),
       },
     ))
     .with_builtin(Builtin::contextual_value(
@@ -584,23 +560,30 @@ pub fn default_builtins() -> Builtins {
       ),
       |_ctx, args| {
         let (a, b) = (args[0], args[1]);
-        match (&a.value, &b.value) {
-          (SLVal::List(items), SLVal::Int(i)) => {
-            let len = items.len() as i64;
-            let idx = if *i < 0 { *i + len } else { *i };
-            if idx < 0 || idx >= len {
-              Err(format!(
-                "idx: index {} out of range for list of length {}",
-                i, len
-              ))
-            } else {
-              Ok(items[idx as usize])
+        match (&a, &b) {
+          (Value::Heap(a), Value::Int(i)) => match &a.value {
+            SLVal::List(items) => {
+              let len = items.len() as i64;
+              let idx = if *i < 0 { *i + len } else { *i };
+              if idx < 0 || idx >= len {
+                Err(format!(
+                  "idx: index {} out of range for list of length {}",
+                  i, len
+                ))
+              } else {
+                Ok(items[idx as usize])
+              }
             }
-          }
+            _ => Err(format!(
+              "idx: expected (List, Int), got ({}, {})",
+              a.value.type_name(),
+              b.type_name()
+            )),
+          },
           _ => Err(format!(
             "idx: expected (List, Int), got ({}, {})",
-            a.value.type_name(),
-            b.value.type_name()
+            a.type_name(),
+            b.type_name()
           )),
         }
       },
@@ -617,21 +600,21 @@ pub fn default_builtins() -> Builtins {
       ),
       |ctx, args| {
         let (a, b) = (args[0], args[1]);
-        match &a.value {
-          SLVal::List(items) => {
-            let len = items
-              .len()
-              .checked_add(1)
-              .ok_or_else(|| "push: list length overflow".to_string())?;
-            let (mut new, _reservation) = reserved_vec(ctx, len, "push")?;
-            new.extend(items.iter().copied());
-            new.push(b);
-            Ok(SLVal::List(new))
-          }
-          _ => Err(format!(
-            "push: expected a List, got {}",
-            a.value.type_name()
-          )),
+        match &a {
+          Value::Heap(heap) => match &heap.value {
+            SLVal::List(items) => {
+              let len = items
+                .len()
+                .checked_add(1)
+                .ok_or_else(|| "push: list length overflow".to_string())?;
+              let (mut new, _reservation) = reserved_vec(ctx, len, "push")?;
+              new.extend(items.iter().copied());
+              new.push(b);
+              Ok(SLVal::List(new))
+            }
+            _ => Err(format!("push: expected a List, got {}", a.type_name())),
+          },
+          _ => Err(format!("push: expected a List, got {}", a.type_name())),
         }
       },
     ))
@@ -650,27 +633,24 @@ pub fn default_builtins() -> Builtins {
       ),
       |ctx, args| {
         let (a, b) = (args[0], args[1]);
-        match (&a.value, &b.value) {
-          (SLVal::Int(start), SLVal::Int(stop)) => {
+        match (a, b) {
+          (Value::Int(start), Value::Int(stop)) => {
             if stop <= start {
               Ok(SLVal::List(vec![]))
             } else {
-              let len = usize::try_from(i128::from(*stop) - i128::from(*start))
+              let len = usize::try_from(i128::from(stop) - i128::from(start))
                 .map_err(|_| "range: result is too large for this platform".to_string())?;
               let (mut values, _reservation) = reserved_vec(ctx, len, "range")?;
-              for i in *start..*stop {
-                values.push(ctx.alloc_value(SLVal::Int(i)));
-                // A range creates all of its GC boxes inside a single bytecode
-                // instruction, so enforce the limit incrementally.
-                ctx.check_memory_limit()?;
+              for i in start..stop {
+                values.push(Value::Int(i));
               }
               Ok(SLVal::List(values))
             }
           }
           _ => Err(format!(
             "range: expected (Int, Int), got ({}, {})",
-            a.value.type_name(),
-            b.value.type_name()
+            a.type_name(),
+            b.type_name()
           )),
         }
       },
@@ -695,12 +675,20 @@ pub fn default_builtins() -> Builtins {
       ),
       |ctx, args| {
         let (list, func) = (args[0], args[1]);
-        let items = match &list.value {
-          SLVal::List(items) => items,
-          other => {
+        let items = match &list {
+          Value::Heap(heap) => match &heap.value {
+            SLVal::List(items) => items,
+            _ => {
+              return Err(format!(
+                "std.map: expected a List, got {}",
+                list.type_name()
+              ))
+            }
+          },
+          _ => {
             return Err(format!(
               "std.map: expected a List, got {}",
-              other.type_name()
+              list.type_name()
             ))
           }
         };
@@ -724,42 +712,50 @@ pub fn default_builtins() -> Builtins {
       ),
       |ctx, args| {
         let (a, b, c) = (args[0], args[1], args[2]);
-        match (&a.value, &b.value, &c.value) {
-          (SLVal::List(items), SLVal::Int(start), SLVal::Int(stop)) => {
-            let len = items.len() as i64;
-            let s = norm_index(*start, len);
-            let e = norm_index(*stop, len);
-            let s = s.clamp(0, len);
-            let e = e.clamp(0, len);
-            if s >= e {
-              Ok(SLVal::List(vec![]))
-            } else {
-              let slice = &items[s as usize..e as usize];
-              let (mut result, _reservation) = reserved_vec(ctx, slice.len(), "slice")?;
-              result.extend(slice.iter().copied());
-              Ok(SLVal::List(result))
+        match (&a, &b, &c) {
+          (Value::Heap(heap), Value::Int(start), Value::Int(stop)) => match &heap.value {
+            SLVal::List(items) => {
+              let len = items.len() as i64;
+              let s = norm_index(*start, len);
+              let e = norm_index(*stop, len);
+              let s = s.clamp(0, len);
+              let e = e.clamp(0, len);
+              if s >= e {
+                Ok(SLVal::List(vec![]))
+              } else {
+                let slice = &items[s as usize..e as usize];
+                let (mut result, _reservation) = reserved_vec(ctx, slice.len(), "slice")?;
+                result.extend(slice.iter().copied());
+                Ok(SLVal::List(result))
+              }
             }
-          }
-          (SLVal::String(s), SLVal::Int(start), SLVal::Int(stop)) => {
-            let len = s.chars().count() as i64;
-            let st = norm_index(*start, len).clamp(0, len) as usize;
-            let en = norm_index(*stop, len).clamp(0, len) as usize;
-            if st >= en {
-              Ok(SLVal::String(String::new()))
-            } else {
-              let start_byte = char_boundary(s, st);
-              let end_byte = char_boundary(s, en);
-              let source = &s[start_byte..end_byte];
-              let (mut result, _reservation) = reserved_string(ctx, source.len(), "slice")?;
-              result.push_str(source);
-              Ok(SLVal::String(result))
+            SLVal::String(s) => {
+              let len = s.chars().count() as i64;
+              let st = norm_index(*start, len).clamp(0, len) as usize;
+              let en = norm_index(*stop, len).clamp(0, len) as usize;
+              if st >= en {
+                Ok(SLVal::String(String::new()))
+              } else {
+                let start_byte = char_boundary(s, st);
+                let end_byte = char_boundary(s, en);
+                let source = &s[start_byte..end_byte];
+                let (mut result, _reservation) = reserved_string(ctx, source.len(), "slice")?;
+                result.push_str(source);
+                Ok(SLVal::String(result))
+              }
             }
-          }
+            _ => Err(format!(
+              "slice: expected (List, Int, Int) or (String, Int, Int), got ({}, {}, {})",
+              a.type_name(),
+              b.type_name(),
+              c.type_name()
+            )),
+          },
           _ => Err(format!(
             "slice: expected (List, Int, Int) or (String, Int, Int), got ({}, {}, {})",
-            a.value.type_name(),
-            b.value.type_name(),
-            c.value.type_name()
+            a.type_name(),
+            b.type_name(),
+            c.type_name()
           )),
         }
       },
@@ -771,7 +767,7 @@ pub fn default_builtins() -> Builtins {
     //   `rand.roll!` can mutate it in place. Same inputs always produce the
     //   same Cell contents; differing `name` or `seed` produces differing
     //   output.
-    .with_builtin(Builtin::contextual(
+    .with_builtin(Builtin::contextual_value(
       "rand",
       "rng",
       Some(2),
@@ -783,8 +779,8 @@ pub fn default_builtins() -> Builtins {
       ),
       |ctx, args| {
         let (seed, name) = (args[0], args[1]);
-        let parent = match &seed.value {
-          SLVal::Int(i) => *i,
+        let parent = match seed {
+          Value::Int(i) => i,
           other => {
             return Err(format!(
               "rand.rng: expected Int seed, got {}",
@@ -792,8 +788,16 @@ pub fn default_builtins() -> Builtins {
             ))
           }
         };
-        let ns = match &name.value {
-          SLVal::String(s) => s.as_str(),
+        let ns = match &name {
+          Value::Heap(heap) => match &heap.value {
+            SLVal::String(s) => s.as_str(),
+            _ => {
+              return Err(format!(
+                "rand.rng: expected String name, got {}",
+                name.type_name()
+              ))
+            }
+          },
           other => {
             return Err(format!(
               "rand.rng: expected String name, got {}",
@@ -801,9 +805,9 @@ pub fn default_builtins() -> Builtins {
             ))
           }
         };
-        let state = ctx.alloc_value(SLVal::Int(rand_rng(parent, ns)));
+        let state = Value::Int(rand_rng(parent, ns));
         let contents = CellContents::new(state);
-        Ok(SLVal::Cell(Gc::new(ctx.mc(), RefLock::new(contents))))
+        Ok(Value::Cell(Gc::new(ctx.mc(), RefLock::new(contents))))
       },
     ))
     // (rand.roll! rng sides) -> Int
@@ -811,7 +815,7 @@ pub fn default_builtins() -> Builtins {
     //   and returns the roll (in `1..=sides`). The Cell is both the RNG state
     //   and (after the call) the advanced state, so callers don't need to
     //   thread a new seed through.
-    .with_builtin(Builtin::contextual(
+    .with_builtin(Builtin::contextual_value(
       "rand",
       "roll!",
       Some(2),
@@ -823,8 +827,8 @@ pub fn default_builtins() -> Builtins {
       ),
       |ctx, args| {
         let (rng, sides) = (args[0], args[1]);
-        let cell = match &rng.value {
-          SLVal::Cell(c) => *c,
+        let cell = match rng {
+          Value::Cell(c) => c,
           other => {
             return Err(format!(
               "rand.roll!: expected Cell rng, got {}",
@@ -832,8 +836,8 @@ pub fn default_builtins() -> Builtins {
             ))
           }
         };
-        let n = match &sides.value {
-          SLVal::Int(i) => *i,
+        let n = match sides {
+          Value::Int(i) => i,
           other => {
             return Err(format!(
               "rand.roll!: expected Int sides, got {}",
@@ -844,8 +848,8 @@ pub fn default_builtins() -> Builtins {
         if n <= 0 {
           return Err(format!("rand.roll!: sides must be positive, got {}", n));
         }
-        let s = match &cell.borrow().value.value {
-          SLVal::Int(i) => *i,
+        let s = match cell.borrow().value {
+          Value::Int(i) => i,
           other => {
             return Err(format!(
               "rand.roll!: expected Cell to hold an Int, got {}",
@@ -854,9 +858,11 @@ pub fn default_builtins() -> Builtins {
           }
         };
         let (roll, next) = rand_roll(s, n);
-        let next = ctx.alloc_value(SLVal::Int(next));
-        Gc::write(ctx.mc(), cell).unlock().borrow_mut().set(next);
-        Ok(SLVal::Int(roll))
+        Gc::write(ctx.mc(), cell)
+          .unlock()
+          .borrow_mut()
+          .set(Value::Int(next));
+        Ok(Value::Int(roll))
       },
     ))
 }
@@ -964,7 +970,7 @@ mod test {
   ) {
     assert!(result_external_bytes > 0);
     let mut exec = before_final_call(source);
-    let scratch_bytes = arity * std::mem::size_of::<Gc<'static, Accounted<'static>>>();
+    let scratch_bytes = arity * std::mem::size_of::<Value<'static>>();
     let limit = exec
       .memory_usage()
       .checked_add(scratch_bytes)
@@ -988,7 +994,7 @@ mod test {
   #[test]
   fn allocating_builtins_reserve_before_building_results() {
     let large = "x".repeat(512);
-    let ptr = std::mem::size_of::<Gc<'static, Accounted<'static>>>();
+    let ptr = std::mem::size_of::<Value<'static>>();
     let cases = [
       (
         format!("(fn main () ->String (std.concat \"{large}\" \"{large}\"))"),
@@ -1038,7 +1044,7 @@ mod test {
     let large = "x".repeat(64 * 1024);
     let source = format!("(fn main () ->String (std.idx (std.list \"{large}\") 0))");
     let mut exec = before_final_call(&source);
-    let scratch_bytes = 2 * std::mem::size_of::<Gc<'static, Accounted<'static>>>();
+    let scratch_bytes = 2 * std::mem::size_of::<Value<'static>>();
     exec.set_memory_limit(Some(exec.memory_usage() + scratch_bytes));
     let gc_before = exec.gc_count();
 
@@ -1060,7 +1066,7 @@ mod test {
         .join(" ")
     );
     let mut exec = before_final_call(&source);
-    let scratch_bytes = 128 * std::mem::size_of::<Gc<'static, Accounted<'static>>>();
+    let scratch_bytes = 128 * std::mem::size_of::<Value<'static>>();
     exec.set_memory_limit(Some(exec.memory_usage() + scratch_bytes - 1));
     let gc_before = exec.gc_count();
 
@@ -1070,22 +1076,21 @@ mod test {
   }
 
   #[test]
-  fn range_checks_gc_growth_during_the_builtin_call() {
+  fn range_reserves_result_buffer_before_allocation() {
     let mut exec = before_final_call("(fn main () ->(List Int) (std.range 0 10000))");
-    let ptr = std::mem::size_of::<Gc<'static, Accounted<'static>>>();
-    let scratch_bytes = 2 * ptr;
-    let result_vec_bytes = 10_000 * ptr;
+    let value_bytes = std::mem::size_of::<Value<'static>>();
+    let scratch_bytes = 2 * value_bytes;
+    let result_vec_bytes = 10_000 * value_bytes;
     exec.set_memory_limit(Some(
-      exec.memory_usage() + scratch_bytes + result_vec_bytes + 1024,
+      exec.memory_usage() + scratch_bytes + result_vec_bytes - 1,
     ));
     let gc_before = exec.gc_count();
 
     let err = exec.step().unwrap_err();
     assert!(err.contains("memory limit exceeded"), "unexpected: {err}");
-    let allocated = exec.gc_count() - gc_before;
     assert!(
-      allocated > 0 && allocated < 10_000,
-      "range should stop during construction, allocated {allocated} values"
+      exec.gc_count() <= gc_before,
+      "range allocated a result before rejecting its reservation"
     );
   }
 

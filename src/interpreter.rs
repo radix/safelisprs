@@ -219,19 +219,15 @@ impl Drop for MemoryCharge {
 ///
 /// - `String`: the `String`'s heap buffer (`capacity()`, not `len`).
 /// - `List`/`Partial`: the `Vec`'s backing array
-///   (`capacity() * size_of::<Gc<_>>()`).
-/// - `Cell`: 0 — the cell stores a `Gc<Accounted>` handle whose target owns
-///   its own external-memory charge. The `Cell` variant itself owns only the
-///   `Gc` box pointer, which gc-arena's `total_gc_allocation` already counts.
+///   (`capacity() * size_of::<Value>()`).
 ///
 /// Only *directly owned* storage is counted; pointed-to `Gc` boxes are
 /// accounted by their own `Accounted` wrappers, so there's no double-counting.
 pub(crate) fn external_bytes_of<'gc>(value: &SLVal<'gc>) -> usize {
   match value {
     SLVal::String(s) => s.capacity(),
-    SLVal::List(items) => items.capacity() * std::mem::size_of::<Gc<'gc, Accounted<'gc>>>(),
-    SLVal::Partial(p) => p.args.capacity() * std::mem::size_of::<Gc<'gc, Accounted<'gc>>>(),
-    _ => 0,
+    SLVal::List(items) => items.capacity() * std::mem::size_of::<Value<'gc>>(),
+    SLVal::Partial(p) => p.args.capacity() * std::mem::size_of::<Value<'gc>>(),
   }
 }
 
@@ -242,7 +238,7 @@ pub(crate) fn external_bytes_of<'gc>(value: &SLVal<'gc>) -> usize {
 /// [`MemoryTracker`] on `Drop`.
 ///
 /// `Accounted` is `!Clone` by design: every runtime value must be created via
-/// `ExecRoot::alloc_value`, which charges the tracker. The `charge` field is
+/// `ExecRoot::alloc_heap`, which charges the tracker. The `charge` field is
 /// `#[collect(require_static)]` (it's `'static` — only an `Rc<MemoryTracker>`
 /// and a `usize`, no `Gc` pointers), so gc-arena's derive skips tracing it and
 /// the `#[collect(no_drop)]` on `Accounted` is honest: the only `Drop` glue is
@@ -284,7 +280,7 @@ impl<'gc> Eq for Accounted<'gc> {}
 impl<'gc> Accounted<'gc> {
   /// Construct an `Accounted` value, charge its external storage to `tracker`,
   /// and return it ready to be boxed via `Gc::new`. Callers should go through
-  /// `ExecRoot::alloc_value` rather than calling this directly.
+  /// `ExecRoot::alloc_heap` rather than calling this directly.
   fn new(value: SLVal<'gc>, tracker: SharedTracker) -> Self {
     let external_bytes = external_bytes_of(&value);
     Accounted {
@@ -294,10 +290,20 @@ impl<'gc> Accounted<'gc> {
   }
 }
 
-/// The shared handle used for every existing in-arena value. Passing or
-/// storing a `Value` copies only a GC pointer; the underlying `SLVal` payload
-/// and its memory charge remain owned by one [`Accounted`] allocation.
-pub type Value<'gc> = Gc<'gc, Accounted<'gc>>;
+/// The shared handle used for every in-arena value. Small immutable values are
+/// stored inline; values with owned Rust-heap storage or recursive structure
+/// are held behind GC pointers.
+#[derive(Debug, Copy, Clone, PartialEq, Collect)]
+#[collect(no_drop)]
+pub enum Value<'gc> {
+  Void,
+  Bool(bool),
+  Int(i64),
+  Float(f64),
+  FunctionRef(u32, u32),
+  Cell(Gc<'gc, RefLock<CellContents<'gc>>>),
+  Heap(Gc<'gc, Accounted<'gc>>),
+}
 
 /// A `Vec<T>` that charges its backing-allocation capacity to a per-execution
 /// [`MemoryTracker`]. Used for `ExecRoot.stack`, `ExecRoot.frames`, and
@@ -420,7 +426,7 @@ impl<T> std::ops::IndexMut<usize> for TrackedVec<T> {
 #[derive(Collect)]
 #[collect(no_drop)]
 pub(crate) struct ExecRoot<'gc> {
-  stack: TrackedVec<Gc<'gc, Accounted<'gc>>>,
+  stack: TrackedVec<Value<'gc>>,
   frames: TrackedVec<Frame<'gc>>,
   /// Per-execution memory tracker. Owns the running external-bytes count (Rust
   /// heap storage not seen by gc-arena's `Metrics`) and the optional cap. Each
@@ -434,17 +440,11 @@ pub(crate) struct ExecRoot<'gc> {
 }
 
 impl<'gc> ExecRoot<'gc> {
-  /// The single chokepoint for creating a `Gc<Accounted>` value. Wraps the
+  /// The single chokepoint for creating heap-backed values. Wraps the
   /// `SLVal` in `Accounted` (charging the tracker for any directly-owned
-  /// external Rust-heap storage) and boxes it via `Gc::new`. Every runtime
-  /// allocation must go through here so unaccounted values are hard to create
-  /// by accident.
-  pub(crate) fn alloc_value(
-    &mut self,
-    mc: &'gc Mutation<'gc>,
-    value: SLVal<'gc>,
-  ) -> Gc<'gc, Accounted<'gc>> {
-    Gc::new(mc, Accounted::new(value, self.tracker.clone()))
+  /// external Rust-heap storage) and boxes it via `Gc::new`.
+  pub(crate) fn alloc_heap(&mut self, mc: &'gc Mutation<'gc>, value: SLVal<'gc>) -> Value<'gc> {
+    Value::Heap(Gc::new(mc, Accounted::new(value, self.tracker.clone())))
   }
 
   /// The per-execution shared memory tracker.
@@ -452,22 +452,20 @@ impl<'gc> ExecRoot<'gc> {
     self.tracker.clone()
   }
 
-  /// Reconstruct a `Gc<Accounted>` inside this execution's arena from an owned
-  /// `SLValue`, allocating fresh accounted `Gc` pointers for any non-scalar
-  /// sub-values. The arena-agnostic `SLValue` is deep-copied in, with each new
-  /// `Accounted` box charged to this execution's tracker.
-  fn import_value(&mut self, mc: &'gc Mutation<'gc>, value: &SLValue) -> Gc<'gc, Accounted<'gc>> {
+  /// Reconstruct a runtime `Value` inside this execution's arena from an owned
+  /// `SLValue`. Scalar values are imported inline; heap-shaped values are
+  /// deep-copied into fresh GC boxes.
+  fn import_value(&mut self, mc: &'gc Mutation<'gc>, value: &SLValue) -> Value<'gc> {
     match value {
-      SLValue::Int(i) => self.alloc_value(mc, SLVal::Int(*i)),
-      SLValue::Float(x) => self.alloc_value(mc, SLVal::Float(*x)),
-      SLValue::String(s) => self.alloc_value(mc, SLVal::String(s.clone())),
-      SLValue::Bool(b) => self.alloc_value(mc, SLVal::Bool(*b)),
-      SLValue::Void => self.alloc_value(mc, SLVal::Void),
-      SLValue::FunctionRef(m, n) => self.alloc_value(mc, SLVal::FunctionRef(*m, *n)),
+      SLValue::Int(i) => Value::Int(*i),
+      SLValue::Float(x) => Value::Float(*x),
+      SLValue::String(s) => self.alloc_heap(mc, SLVal::String(s.clone())),
+      SLValue::Bool(b) => Value::Bool(*b),
+      SLValue::Void => Value::Void,
+      SLValue::FunctionRef(m, n) => Value::FunctionRef(*m, *n),
       SLValue::Partial { function, args } => {
-        let sub: Vec<Gc<'gc, Accounted<'gc>>> =
-          args.iter().map(|a| self.import_value(mc, a)).collect();
-        self.alloc_value(
+        let sub: Vec<Value<'gc>> = args.iter().map(|a| self.import_value(mc, a)).collect();
+        self.alloc_heap(
           mc,
           SLVal::Partial(Partial {
             function: *function,
@@ -476,14 +474,13 @@ impl<'gc> ExecRoot<'gc> {
         )
       }
       SLValue::Cell(inner) => {
-        let inner_gc = self.import_value(mc, inner);
-        let contents = CellContents::new(inner_gc);
-        self.alloc_value(mc, SLVal::Cell(Gc::new(mc, RefLock::new(contents))))
+        let inner_value = self.import_value(mc, inner);
+        let contents = CellContents::new(inner_value);
+        Value::Cell(Gc::new(mc, RefLock::new(contents)))
       }
       SLValue::List(items) => {
-        let sub: Vec<Gc<'gc, Accounted<'gc>>> =
-          items.iter().map(|i| self.import_value(mc, i)).collect();
-        self.alloc_value(mc, SLVal::List(sub))
+        let sub: Vec<Value<'gc>> = items.iter().map(|i| self.import_value(mc, i)).collect();
+        self.alloc_heap(mc, SLVal::List(sub))
       }
     }
   }
@@ -500,7 +497,7 @@ impl<'gc> ExecRoot<'gc> {
 #[collect(no_drop)]
 struct Frame<'gc> {
   function: FrameFunc,
-  locals: TrackedVec<Gc<'gc, Accounted<'gc>>>,
+  locals: TrackedVec<Value<'gc>>,
   /// The index into the global `stack` at which this frame's segment begins.
   /// Everything at or above this index belongs to this frame or its callees.
   /// When we return, we can truncate to this and push the return value.
@@ -557,14 +554,14 @@ impl FrameFunc {
 // `Function` directly, e.g. `Execution::enter_function`'s signature.)
 gc_arena::static_collect!(Function);
 
-/// The mutable contents of a `Cell`: a shared handle to an existing accounted
-/// value. Cells retain the original value object rather than cloning its
-/// `SLVal` payload, matching ordinary function/list reference semantics.
+/// The mutable contents of a `Cell`: a shared handle to any runtime value.
+/// Cells retain existing heap handles rather than cloning their `SLVal`
+/// payloads, while immediate values are copied directly.
 ///
 /// Allocated as `Gc<RefLock<CellContents>>` (the `RefLock` provides interior
 /// mutability; the `Gc` box gives it an identity in the arena and makes it
-/// eligible for cycle collection). Tracing the `value` handle keeps its
-/// [`Accounted`] allocation—and therefore its external-memory charge—alive.
+/// eligible for cycle collection). Tracing the `value` handle keeps any
+/// reachable heap allocation—and therefore its external-memory charge—alive.
 #[derive(Collect)]
 #[collect(no_drop)]
 pub struct CellContents<'gc> {
@@ -602,15 +599,8 @@ impl<'gc> CellContents<'gc> {
 #[derive(Debug, PartialEq, Collect)]
 #[collect(no_drop)]
 pub enum SLVal<'gc> {
-  Int(i64),
-  Float(f64),
   String(String),
-  Bool(bool),
-  Void,
-  FunctionRef(u32, u32),
   Partial(Partial<'gc>),
-  /// A cell holding a mutable shared value handle.
-  Cell(Gc<'gc, RefLock<CellContents<'gc>>>),
   List(Vec<Value<'gc>>),
 }
 
@@ -642,21 +632,19 @@ pub enum SLValue {
   List(Vec<SLValue>),
 }
 
-impl<'gc> SLVal<'gc> {
+impl<'gc> Value<'gc> {
   /// A bounded-size description suitable for runtime type errors. Default
   /// builtins use this instead of debug-formatting guest-controlled values,
   /// which could itself allocate an unbounded diagnostic string.
   pub(crate) fn type_name(&self) -> &'static str {
     match self {
-      SLVal::Int(_) => "Int",
-      SLVal::Float(_) => "Float",
-      SLVal::String(_) => "String",
-      SLVal::Bool(_) => "Bool",
-      SLVal::Void => "Void",
-      SLVal::FunctionRef(_, _) => "FunctionRef",
-      SLVal::Partial(_) => "Partial",
-      SLVal::Cell(_) => "Cell",
-      SLVal::List(_) => "List",
+      Value::Int(_) => "Int",
+      Value::Float(_) => "Float",
+      Value::Heap(gc) => gc.value.type_name(),
+      Value::Bool(_) => "Bool",
+      Value::Void => "Void",
+      Value::FunctionRef(_, _) => "FunctionRef",
+      Value::Cell(_) => "Cell",
     }
   }
 
@@ -665,35 +653,49 @@ impl<'gc> SLVal<'gc> {
   /// arguments are represented only by type.
   fn error_description(&self) -> String {
     match self {
-      SLVal::Int(value) => format!("Int({value})"),
-      SLVal::Float(value) => format!("Float({value:?})"),
-      SLVal::Bool(value) => format!("Bool({value})"),
-      SLVal::Void => "Void".to_string(),
-      SLVal::FunctionRef(module, function) => {
+      Value::Int(value) => format!("Int({value})"),
+      Value::Float(value) => format!("Float({value:?})"),
+      Value::Bool(value) => format!("Bool({value})"),
+      Value::Void => "Void".to_string(),
+      Value::FunctionRef(module, function) => {
         format!("FunctionRef({module}, {function})")
       }
-      SLVal::String(_) | SLVal::Partial(_) | SLVal::Cell(_) | SLVal::List(_) => {
-        self.type_name().to_string()
-      }
+      Value::Heap(_) | Value::Cell(_) => self.type_name().to_string(),
     }
   }
 
-  /// Convert an `SLVal` into an owned `SLValue`, deep-copying any `Gc`-held
+  /// Convert a runtime `Value` into an owned `SLValue`, deep-copying any `Gc`-held
   /// sub-values out of the arena.
   fn to_value(&self) -> SLValue {
     match self {
-      SLVal::Int(i) => SLValue::Int(*i),
-      SLVal::Float(x) => SLValue::Float(*x),
+      Value::Int(i) => SLValue::Int(*i),
+      Value::Float(x) => SLValue::Float(*x),
+      Value::Heap(gc) => gc.value.to_value(),
+      Value::Bool(b) => SLValue::Bool(*b),
+      Value::Void => SLValue::Void,
+      Value::FunctionRef(m, n) => SLValue::FunctionRef(*m, *n),
+      Value::Cell(r) => SLValue::Cell(Box::new(r.borrow().value.to_value())),
+    }
+  }
+}
+
+impl<'gc> SLVal<'gc> {
+  pub(crate) fn type_name(&self) -> &'static str {
+    match self {
+      SLVal::String(_) => "String",
+      SLVal::Partial(_) => "Partial",
+      SLVal::List(_) => "List",
+    }
+  }
+
+  fn to_value(&self) -> SLValue {
+    match self {
       SLVal::String(s) => SLValue::String(s.clone()),
-      SLVal::Bool(b) => SLValue::Bool(*b),
-      SLVal::Void => SLValue::Void,
-      SLVal::FunctionRef(m, n) => SLValue::FunctionRef(*m, *n),
       SLVal::Partial(p) => SLValue::Partial {
         function: p.function,
-        args: p.args.iter().map(|a| a.value.to_value()).collect(),
+        args: p.args.iter().map(Value::to_value).collect(),
       },
-      SLVal::Cell(r) => SLValue::Cell(Box::new(r.borrow().value.value.to_value())),
-      SLVal::List(items) => SLValue::List(items.iter().map(|i| i.value.to_value()).collect()),
+      SLVal::List(items) => SLValue::List(items.iter().map(Value::to_value).collect()),
     }
   }
 }
@@ -771,7 +773,7 @@ pub struct Execution {
   pub executed: u64,
   /// Per-execution memory tracker, shared with every `Accounted` box in this
   /// arena. `Execution` owns the canonical `Rc`; cloned into each `Accounted`
-  /// at allocation (see `ExecRoot::alloc_value`).
+  /// at allocation (see `ExecRoot::alloc_heap`).
   tracker: SharedTracker,
 }
 
@@ -809,7 +811,7 @@ impl Execution {
     let mut result = Err("PEEK on an empty stack".to_string());
     self.arena.mutate(|_, root| {
       if let Some(top) = root.stack.last().copied() {
-        result = Ok(top.value.to_value());
+        result = Ok(top.to_value());
       }
     });
     result
@@ -924,7 +926,7 @@ impl Execution {
     pre_bound: Vec<SLValue>,
   ) -> Result<(), String> {
     let result = self.arena.mutate_root(|mc, root| {
-      let pre_bound_gc: Vec<Gc<'_, Accounted<'_>>> =
+      let pre_bound_gc: Vec<Value<'_>> =
         pre_bound.iter().map(|v| root.import_value(mc, v)).collect();
       root.enter_inline_function(mc, function.clone(), pre_bound_gc)
     });
@@ -946,7 +948,7 @@ impl Execution {
       _ => return Err(format!("Function not found: {}/{}", mod_idx, func_idx)),
     };
     let result = self.arena.mutate_root(|mc, root| {
-      let pre_bound_gc: Vec<Gc<'_, Accounted<'_>>> =
+      let pre_bound_gc: Vec<Value<'_>> =
         pre_bound.iter().map(|v| root.import_value(mc, v)).collect();
       root.enter_function(mc, mod_idx, func_idx, &function, pre_bound_gc)
     });
@@ -1050,14 +1052,14 @@ impl<'gc> ExecRoot<'gc> {
     Ok(())
   }
 
-  /// Push a `Gc<Accounted>` onto the execution's value stack. Used by
+  /// Push a `Value` onto the execution's value stack. Used by
   /// [`Builtin::call`] to push a builtin's result.
-  pub(crate) fn push_gc(&mut self, val: Gc<'gc, Accounted<'gc>>) {
+  pub(crate) fn push_value(&mut self, val: Value<'gc>) {
     self.stack.push(val);
   }
 
   /// Pop a value off the execution's value stack.
-  fn pop(&mut self) -> Result<Gc<'gc, Accounted<'gc>>, String> {
+  fn pop(&mut self) -> Result<Value<'gc>, String> {
     self
       .stack
       .pop()
@@ -1092,7 +1094,7 @@ impl<'gc> ExecRoot<'gc> {
     }
     if self.is_done() {
       let top = self.pop()?;
-      Ok(Status::Done(top.value.to_value()))
+      Ok(Status::Done(top.to_value()))
     } else {
       Ok(Status::Paused)
     }
@@ -1111,7 +1113,7 @@ impl<'gc> ExecRoot<'gc> {
       self.step(mc, package, builtins, executed)?;
     }
     let top = self.pop()?;
-    Ok(top.value.to_value())
+    Ok(top.to_value())
   }
 
   /// Run until `deadline` is reached or execution completes. Returns `Paused`
@@ -1130,7 +1132,7 @@ impl<'gc> ExecRoot<'gc> {
     }
     if self.is_done() {
       let top = self.pop()?;
-      Ok(Status::Done(top.value.to_value()))
+      Ok(Status::Done(top.to_value()))
     } else {
       Ok(Status::Paused)
     }
@@ -1197,24 +1199,20 @@ impl<'gc> ExecRoot<'gc> {
 
     match inst {
       Instruction::PushInt(i) => {
-        let v = self.alloc_value(mc, SLVal::Int(i));
-        self.stack.push(v);
+        self.stack.push(Value::Int(i));
       }
       Instruction::PushFloat(f) => {
-        let v = self.alloc_value(mc, SLVal::Float(f));
-        self.stack.push(v);
+        self.stack.push(Value::Float(f));
       }
       Instruction::PushString(s) => {
-        let v = self.alloc_value(mc, SLVal::String(s));
+        let v = self.alloc_heap(mc, SLVal::String(s));
         self.stack.push(v);
       }
       Instruction::PushBool(b) => {
-        let v = self.alloc_value(mc, SLVal::Bool(b));
-        self.stack.push(v);
+        self.stack.push(Value::Bool(b));
       }
       Instruction::PushVoid => {
-        let v = self.alloc_value(mc, SLVal::Void);
-        self.stack.push(v);
+        self.stack.push(Value::Void);
       }
       Instruction::Pop => {
         self.pop()?;
@@ -1259,8 +1257,7 @@ impl<'gc> ExecRoot<'gc> {
         self.call_dynamic(mc, package, builtins, arity)?;
       }
       Instruction::MakeFunctionRef((mod_index, func_index)) => {
-        let v = self.alloc_value(mc, SLVal::FunctionRef(mod_index, func_index));
-        self.stack.push(v);
+        self.stack.push(Value::FunctionRef(mod_index, func_index));
       }
       Instruction::PartialApply(num_args) => {
         self.partial_apply(mc, num_args)?;
@@ -1276,16 +1273,16 @@ impl<'gc> ExecRoot<'gc> {
       }
       Instruction::JumpIfFalse(offset) => {
         let val = self.pop()?;
-        match &val.value {
-          SLVal::Bool(false) => {
+        match val {
+          Value::Bool(false) => {
             let frame = self
               .frames
               .last_mut()
               .ok_or_else(|| "JumpIfFalse with no frame".to_string())?;
             frame.ip = frame.ip.wrapping_add(offset as usize);
           }
-          SLVal::Bool(true) => {}
-          other => {
+          Value::Bool(true) => {}
+          ref other => {
             return Err(format!(
               "`if` condition must be a bool, got {}",
               other.error_description()
@@ -1304,7 +1301,7 @@ impl<'gc> ExecRoot<'gc> {
   fn partial_apply(&mut self, mc: &'gc Mutation<'gc>, num_args: u16) -> Result<(), String> {
     let num_args = usize::from(num_args);
     let arg_bytes = num_args
-      .checked_mul(std::mem::size_of::<Gc<'gc, Accounted<'gc>>>())
+      .checked_mul(std::mem::size_of::<Value<'gc>>())
       .ok_or_else(|| "partial argument buffer size overflow".to_string())?;
     let mut args_reservation = self.reserve_memory(mc, arg_bytes)?;
     let func = self.pop()?;
@@ -1314,7 +1311,7 @@ impl<'gc> ExecRoot<'gc> {
       .map_err(|_| format!("failed to allocate partial argument buffer for {num_args} values"))?;
     let actual_arg_bytes = args
       .capacity()
-      .checked_mul(std::mem::size_of::<Gc<'gc, Accounted<'gc>>>())
+      .checked_mul(std::mem::size_of::<Value<'gc>>())
       .ok_or_else(|| "partial argument buffer capacity overflow".to_string())?;
     self.reconcile_reservation(mc, &mut args_reservation, actual_arg_bytes)?;
     for _ in 0..num_args {
@@ -1324,11 +1321,11 @@ impl<'gc> ExecRoot<'gc> {
     // No guest code or limit check can run between releasing the temporary
     // reservation and `Accounted::new` adopting the Vec's actual capacity.
     drop(args_reservation);
-    let closure = match &func.value {
-      SLVal::FunctionRef(mod_index, func_index) => self.alloc_value(
+    let closure = match func {
+      Value::FunctionRef(mod_index, func_index) => self.alloc_heap(
         mc,
         SLVal::Partial(Partial {
-          function: (*mod_index, *func_index),
+          function: (mod_index, func_index),
           args,
         }),
       ),
@@ -1386,7 +1383,7 @@ impl<'gc> ExecRoot<'gc> {
         // the only source of the arg count.
         let n = arity as usize;
         let arg_bytes = n
-          .checked_mul(std::mem::size_of::<Gc<'gc, Accounted<'gc>>>())
+          .checked_mul(std::mem::size_of::<Value<'gc>>())
           .ok_or_else(|| "builtin argument buffer size overflow".to_string())?;
         let mut args_reservation = self.reserve_memory(mc, arg_bytes)?;
         // Args were pushed left-to-right; popping gives reverse order.
@@ -1399,7 +1396,7 @@ impl<'gc> ExecRoot<'gc> {
         })?;
         let actual_arg_bytes = args
           .capacity()
-          .checked_mul(std::mem::size_of::<Gc<'gc, Accounted<'gc>>>())
+          .checked_mul(std::mem::size_of::<Value<'gc>>())
           .ok_or_else(|| "builtin argument buffer capacity overflow".to_string())?;
         self.reconcile_reservation(mc, &mut args_reservation, actual_arg_bytes)?;
         for _ in 0..n {
@@ -1431,36 +1428,42 @@ impl<'gc> ExecRoot<'gc> {
     arity: u16,
   ) -> Result<(), String> {
     let callable = self.pop()?;
-    match &callable.value {
-      SLVal::FunctionRef(mod_index, func_index) => {
-        self.call_fixed(mc, package, builtins, *mod_index, *func_index, arity)
+    match callable {
+      Value::FunctionRef(mod_index, func_index) => {
+        self.call_fixed(mc, package, builtins, mod_index, func_index, arity)
       }
-      SLVal::Partial(Partial {
-        function: (mod_index, func_index),
-        args,
-      }) => {
-        let (_, functions) = package
-          .get_module(*mod_index)
-          .ok_or_else(|| format!("Module not found: {}", mod_index))?;
-        let (func_name, callable) = functions
-          .get(*func_index as usize)
-          .ok_or_else(|| format!("Function not found: {}/{}", mod_index, func_index))?;
-        match callable {
-          Callable::Function(func) => {
-            // The remaining params (after the pre-bound ones) must be supplied
-            // by the call site; arity-check that they line up.
-            let expected = func.num_params.saturating_sub(args.len() as u16);
-            if arity != expected {
-              return Err(format!(
-                "{}.{} expects {} more arg(s) but was called with {}",
-                mod_index, func_name, expected, arity
-              ));
+      Value::Heap(heap) => match &heap.value {
+        SLVal::Partial(Partial {
+          function: (mod_index, func_index),
+          args,
+        }) => {
+          let (_, functions) = package
+            .get_module(*mod_index)
+            .ok_or_else(|| format!("Module not found: {}", mod_index))?;
+          let (func_name, callable) = functions
+            .get(*func_index as usize)
+            .ok_or_else(|| format!("Function not found: {}/{}", mod_index, func_index))?;
+          match callable {
+            Callable::Function(func) => {
+              // The remaining params (after the pre-bound ones) must be supplied
+              // by the call site; arity-check that they line up.
+              let expected = func.num_params.saturating_sub(args.len() as u16);
+              if arity != expected {
+                return Err(format!(
+                  "{}.{} expects {} more arg(s) but was called with {}",
+                  mod_index, func_name, expected, arity
+                ));
+              }
+              self.enter_function(mc, *mod_index, *func_index, func, args.clone())
             }
-            self.enter_function(mc, *mod_index, *func_index, func, args.clone())
+            Callable::Builtin => Err("Can't invoke a builtin as a closure".to_string()),
           }
-          Callable::Builtin => Err("Can't invoke a builtin as a closure".to_string()),
         }
-      }
+        _ => Err(format!(
+          "Can't call a non-callable! {}",
+          Value::Heap(heap).error_description()
+        )),
+      },
       x => Err(format!(
         "Can't call a non-callable! {}",
         x.error_description()
@@ -1476,19 +1479,16 @@ impl<'gc> ExecRoot<'gc> {
   /// into the frame.
   fn enter_function(
     &mut self,
-    mc: &'gc Mutation<'gc>,
+    _mc: &'gc Mutation<'gc>,
     mod_idx: u32,
     func_idx: u32,
     function: &Function,
-    pre_bound: Vec<Gc<'gc, Accounted<'gc>>>,
+    pre_bound: Vec<Value<'gc>>,
   ) -> Result<(), String> {
     let start = pre_bound.len();
     let mut locals = pre_bound;
-    // Initialize all remaining local slots to `Void`. `SLVal::Void` holds no
-    // `Gc` pointers, so allocating it on the GC heap is cheap and safe.
-    let void = self.alloc_value(mc, SLVal::Void);
     for _ in locals.len()..usize::from(function.num_locals) {
-      locals.push(void);
+      locals.push(Value::Void);
     }
     // The parameters are "in order" on the stack, so popping will give them to
     // us in reverse order.
@@ -1515,15 +1515,14 @@ impl<'gc> ExecRoot<'gc> {
   /// vector.
   fn enter_inline_function(
     &mut self,
-    mc: &'gc Mutation<'gc>,
+    _mc: &'gc Mutation<'gc>,
     function: Function,
-    pre_bound: Vec<Gc<'gc, Accounted<'gc>>>,
+    pre_bound: Vec<Value<'gc>>,
   ) -> Result<(), String> {
     let start = pre_bound.len();
     let mut locals = pre_bound;
-    let void = self.alloc_value(mc, SLVal::Void);
     for _ in locals.len()..usize::from(function.num_locals) {
-      locals.push(void);
+      locals.push(Value::Void);
     }
     for param_idx in (start..usize::from(function.num_params)).rev() {
       locals[param_idx] = self.pop()?;
@@ -1578,15 +1577,15 @@ impl<'gc, 'call> HostCtx<'gc, 'call> {
     self.mc
   }
 
-  /// Allocate a `Gc<Accounted>` value via the execution's chokepoint, charging
-  /// the tracker. This is the supported way for a builtin to box a result.
-  pub fn alloc_value(&mut self, value: SLVal<'gc>) -> Gc<'gc, Accounted<'gc>> {
-    self.root.alloc_value(self.mc, value)
+  /// Allocate a heap-backed value via the execution's chokepoint, charging the
+  /// tracker for the payload's direct Rust-heap storage.
+  pub fn alloc_heap(&mut self, value: SLVal<'gc>) -> Value<'gc> {
+    self.root.alloc_heap(self.mc, value)
   }
 
-  /// Push a `Gc<Accounted>` onto the execution's value stack.
-  pub fn push_gc(&mut self, value: Gc<'gc, Accounted<'gc>>) {
-    self.root.push_gc(value);
+  /// Push a value onto the execution's value stack.
+  pub fn push_value(&mut self, value: Value<'gc>) {
+    self.root.push_value(value);
   }
 
   /// The per-execution shared memory tracker.
@@ -1635,11 +1634,7 @@ impl<'gc, 'call> HostCtx<'gc, 'call> {
   /// The `callable` must be a `FunctionRef` or `Partial` value; anything else
   /// is a runtime error. The `args` are pushed left-to-right (so the first arg
   /// is the callable's first parameter).
-  pub fn call(
-    &mut self,
-    callable: Gc<'gc, Accounted<'gc>>,
-    args: &[Gc<'gc, Accounted<'gc>>],
-  ) -> Result<Gc<'gc, Accounted<'gc>>, String> {
+  pub fn call(&mut self, callable: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, String> {
     let root: &mut ExecRoot<'gc> = self.root;
     // Remember the current frame depth so we know when the sub-call has
     // returned: we push a frame for the callable, run until the frame stack
@@ -1753,8 +1748,8 @@ mod test {
       "main",
       "add2",
       sig(&[], vec![TypeConst::Int], None, TypeConst::Int),
-      |a| match &a.value {
-        SLVal::Int(n) => Ok(SLVal::Int(n + 2)),
+      |a| match a {
+        Value::Int(n) => Ok(Value::Int(n + 2)),
         other => Err(format!("nope: {:?}", other)),
       },
     ));
@@ -1949,6 +1944,69 @@ mod test {
   }
 
   #[test]
+  fn scalar_bytecode_pushes_do_not_allocate_gc_boxes() {
+    let cases = [
+      (
+        vec![Instruction::PushVoid, Instruction::Return],
+        SLValue::Void,
+      ),
+      (
+        vec![Instruction::PushBool(true), Instruction::Return],
+        SLValue::Bool(true),
+      ),
+      (
+        vec![Instruction::PushInt(7), Instruction::Return],
+        SLValue::Int(7),
+      ),
+      (
+        vec![Instruction::PushFloat(1.5), Instruction::Return],
+        SLValue::Float(1.5),
+      ),
+      (
+        vec![Instruction::MakeFunctionRef((0, 0)), Instruction::Return],
+        SLValue::FunctionRef(0, 0),
+      ),
+    ];
+
+    for (instructions, expected) in cases {
+      let code = compiler::Function {
+        num_locals: 0,
+        num_params: 0,
+        instructions,
+      };
+      let mut exec = Execution::new(Package::default(), default_builtins());
+      exec.enter_function(code, vec![]).unwrap();
+      assert_eq!(exec.gc_count(), 0);
+      assert_eq!(exec.run_until_done().unwrap(), expected);
+      assert_eq!(exec.gc_count(), 0);
+    }
+  }
+
+  #[test]
+  fn importing_scalar_slvalues_does_not_allocate_gc_boxes() {
+    let cases = [
+      SLValue::Void,
+      SLValue::Bool(true),
+      SLValue::Int(7),
+      SLValue::Float(1.5),
+      SLValue::FunctionRef(0, 0),
+    ];
+
+    for value in cases {
+      let code = compiler::Function {
+        num_locals: 1,
+        num_params: 0,
+        instructions: vec![Instruction::LoadLocal(0), Instruction::Return],
+      };
+      let mut exec = Execution::new(Package::default(), default_builtins());
+      exec.enter_function(code, vec![value.clone()]).unwrap();
+      assert_eq!(exec.gc_count(), 0);
+      assert_eq!(exec.run_until_done().unwrap(), value);
+      assert_eq!(exec.gc_count(), 0);
+    }
+  }
+
+  #[test]
   fn run_until_done_pops_final_value() {
     let pkg = Package::default();
     let code = compiler::Function {
@@ -2022,7 +2080,7 @@ mod test {
       "std",
       "varargs",
       sig(&[], vec![], Some(TypeConst::Int), TypeConst::Int),
-      |args| Ok(SLVal::Int(args.len() as i64)),
+      |args| Ok(Value::Int(args.len() as i64)),
     ))
   }
 
@@ -2310,10 +2368,9 @@ mod test {
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
 
-    // `call_main` enters the function, which allocates locals in the GC. Record
-    // the baseline allocation count before running.
+    // `call_main` enters the function. Inline Void locals do not allocate.
     let baseline = exec.gc_count();
-    assert_eq!(baseline, 1); // the single Void local for `main`
+    assert_eq!(baseline, 0);
 
     // Step through the program manually so we can observe allocations before
     // the final value is popped (which would make it unreachable). Completion
@@ -2324,24 +2381,13 @@ mod test {
     assert!(exec.is_done());
     assert_eq!(exec.peek_value().unwrap(), SLValue::Int(99));
 
-    // After running, the Cell is unreachable but may not yet have been
-    // collected (incremental collection difficult to predict because of the
-    // "debt" system). There should be at least one live `Gc` allocation right
-    // now (the dangling Cell + contents), plus the int `99` on the stack.
-    let after_run = exec.gc_count();
-    assert!(
-      after_run >= 3,
-      "expected at least 3 live Gc allocations (cell + inner value + result) after run, got {}",
-      after_run,
-    );
-
     // Forcing a full collection cycle must reclaim the unreachable Cell. The
-    // int `99` on the stack is still reachable and survives.
+    // int `99` on the stack is immediate and does not keep a GC box alive.
     exec.collect_all();
     let after_collect = exec.gc_count();
     assert_eq!(
-      after_collect, 1,
-      "expected 1 live Gc allocation (the result 99) after collect_all, got {}",
+      after_collect, 0,
+      "expected no live Gc allocations after collect_all, got {}",
       after_collect,
     );
   }
@@ -2404,18 +2450,36 @@ mod test {
     assert!(matches!(exec.peek_value().unwrap(), SLValue::Cell(_)));
 
     // The Cell on the stack is reachable and must survive a full collection.
-    // (There may also be a now-dead Void local from `enter_function`; that one
-    // is expected to be reclaimed.)
+    // Its inner Int is immediate, so only the cell box itself is live.
     exec.collect_all();
     let after = exec.gc_count();
     assert!(
-      after >= 2,
-      "expected the Cell + its inner value to survive collection, got {} live allocations",
+      after >= 1,
+      "expected the Cell to survive collection, got {} live allocations",
       after,
     );
 
     // And the value must still be readable after collection.
     assert!(matches!(exec.peek_value().unwrap(), SLValue::Cell(_)));
+  }
+
+  #[test]
+  fn cell_wrapping_immediate_allocates_one_gc_box() {
+    let source = "(fn main () ->(Cell Int) (std.cell 3))";
+    let pkg = compile_executable_from_source(source, ("main", "main"), &default_builtins().specs())
+      .unwrap();
+    let interp = Interpreter::new(pkg);
+    let mut exec = interp.call_main().unwrap();
+
+    while !exec.is_done() {
+      exec.step().unwrap();
+    }
+    exec.collect_all();
+    assert_eq!(
+      exec.gc_count(),
+      1,
+      "a Cell holding an immediate Int should only allocate the RefLock cell box"
+    );
   }
 
   #[test]
@@ -3458,8 +3522,8 @@ mod test {
   }
 
   /// Two Void functions with different hidden body values still compare equal
-  /// as Void (the body values are discarded by `Pop`; each returns a fresh
-  /// `Gc<SLVal::Void>`).
+  /// as Void (the body values are discarded by `Pop`; each returns inline
+  /// `Value::Void`).
   #[test]
   fn two_void_functions_with_different_body_values_compare_equal_as_void() {
     let source = "
@@ -3495,7 +3559,7 @@ mod test {
   fn host_call_with_value_returning_callback() {
     // A builtin that calls a guest function via HostCtx::call and returns its
     // result, doubling it.
-    let builtins = default_builtins().with_builtin(Builtin::contextual(
+    let builtins = default_builtins().with_builtin(Builtin::contextual_value(
       "main",
       "applydouble",
       None,
@@ -3507,10 +3571,10 @@ mod test {
       ),
       |ctx, args| {
         let f = args[0];
-        let arg = ctx.alloc_value(SLVal::Int(7));
+        let arg = Value::Int(7);
         let result = ctx.call(f, &[arg])?;
-        match &result.value {
-          SLVal::Int(n) => Ok(SLVal::Int(n * 2)),
+        match result {
+          Value::Int(n) => Ok(Value::Int(n * 2)),
           other => Err(format!(
             "expected Int from callback, got {}",
             other.type_name()
@@ -3532,7 +3596,7 @@ mod test {
   /// the result slot, so the builtin sees Void.
   #[test]
   fn host_call_with_void_returning_callback() {
-    let builtins = default_builtins().with_builtin(Builtin::contextual(
+    let builtins = default_builtins().with_builtin(Builtin::contextual_value(
       "main",
       "callvoid",
       None,
@@ -3544,10 +3608,10 @@ mod test {
       ),
       |ctx, args| {
         let f = args[0];
-        let arg = ctx.alloc_value(SLVal::Int(7));
+        let arg = Value::Int(7);
         let result = ctx.call(f, &[arg])?;
-        match &result.value {
-          SLVal::Void => Ok(SLVal::Bool(true)),
+        match result {
+          Value::Void => Ok(Value::Bool(true)),
           other => Err(format!(
             "expected Void from callback, got {}",
             other.type_name()
