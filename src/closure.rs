@@ -210,27 +210,10 @@ fn transform_ast(
       Ok(ast.with_kind(ASTKind::Call(Box::new(callable), new_args)))
     }
     ASTKind::CallFixed(ident, args) => {
-      match ident {
-        crate::parser::Identifier::Bare(name) => {
-          if !locals.contains(name) && environment.contains(name) {
-            push_unique(captures, name.clone());
-          }
+      if let crate::parser::Identifier::Bare(name) = ident {
+        if !locals.contains(name) && environment.contains(name) {
+          push_unique(captures, name.clone());
         }
-        crate::parser::Identifier::Qualified(receiver, field)
-          if args.is_empty() && (locals.contains(receiver) || environment.contains(receiver)) =>
-        {
-          if !locals.contains(receiver) && environment.contains(receiver) {
-            push_unique(captures, receiver.clone());
-          }
-          return Ok(ast.with_kind(ASTKind::FieldAccess(
-            Box::new(AST::new(
-              ASTKind::Variable(receiver.clone()),
-              ast.span.clone(),
-            )),
-            field.clone(),
-          )));
-        }
-        crate::parser::Identifier::Qualified(_, _) => {}
       }
       let mut new_args = vec![];
       for arg in args {
@@ -359,22 +342,7 @@ fn transform_ast(
     | ASTKind::String(_)
     | ASTKind::Bool(_)
     | ASTKind::DefineStruct(_) => Ok(ast.clone()),
-    ASTKind::FunctionRef(module, field) => {
-      if locals.contains(module) || environment.contains(module) {
-        if !locals.contains(module) && environment.contains(module) {
-          push_unique(captures, module.clone());
-        }
-        Ok(ast.with_kind(ASTKind::FieldAccess(
-          Box::new(AST::new(
-            ASTKind::Variable(module.clone()),
-            ast.span.clone(),
-          )),
-          field.clone(),
-        )))
-      } else {
-        Ok(ast.clone())
-      }
-    }
+    ASTKind::FunctionRef(_, _) => Ok(ast.clone()),
   }
 }
 

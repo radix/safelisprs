@@ -1456,7 +1456,7 @@ impl<'gc> ExecRoot<'gc> {
       Callable::Builtin => {
         let builtin = builtins
           .lookup(&module.name, func_name)
-          .ok_or_else(|| format!("No builtin {}.{}", module.name, func_name))?;
+          .ok_or_else(|| format!("No builtin {}::{}", module.name, func_name))?;
         // For fixed-arity builtins, enforce the declared arity at the call site.
         if let Some(expected) = builtin.spec().num_params {
           if arity != expected {
@@ -1813,11 +1813,11 @@ mod test {
   #[test]
   fn std_eq_strings() {
     assert_eq!(
-      eval_main("(fn main () ->Bool (std.== \"abc\" \"abc\"))"),
+      eval_main("(fn main () ->Bool (std::== \"abc\" \"abc\"))"),
       SLValue::Bool(true)
     );
     assert_eq!(
-      eval_main("(fn main () ->Bool (std.== \"abc\" \"abd\"))"),
+      eval_main("(fn main () ->Bool (std::== \"abc\" \"abd\"))"),
       SLValue::Bool(false)
     );
   }
@@ -1825,15 +1825,15 @@ mod test {
   #[test]
   fn std_concat_strings() {
     assert_eq!(
-      eval_main("(fn main () ->String (std.concat \"foo\" \"bar\"))"),
+      eval_main("(fn main () ->String (std::concat \"foo\" \"bar\"))"),
       SLValue::String("foobar".to_string())
     );
     assert_eq!(
-      eval_main("(fn main () ->String (std.concat \"ab\" \"CDE\"))"),
+      eval_main("(fn main () ->String (std::concat \"ab\" \"CDE\"))"),
       SLValue::String("abCDE".to_string())
     );
     assert_eq!(
-      eval_main("(fn main () ->String (std.concat \"\" \"x\"))"),
+      eval_main("(fn main () ->String (std::concat \"\" \"x\"))"),
       SLValue::String("x".to_string())
     );
   }
@@ -1845,7 +1845,7 @@ mod test {
         x:Int
         y:(Cell Int))
       (fn main () ->Int
-        (let foo (new Foo x:3 y:(std.cell 2)))
+        (let foo (new Foo x:3 y:(std::cell 2)))
         foo.x)";
     assert_eq!(eval_main(source), SLValue::Int(3));
   }
@@ -1857,9 +1857,9 @@ mod test {
         x:Int
         y:(Cell Int))
       (fn main () ->Int
-        (let foo (new Foo x:3 y:(std.cell 2)))
-        (std.set! foo.y 7)
-        (std.get foo.y))";
+        (let foo (new Foo x:3 y:(std::cell 2)))
+        (std::set! foo.y 7)
+        (std::get foo.y))";
     assert_eq!(eval_main(source), SLValue::Int(7));
   }
 
@@ -1871,8 +1871,23 @@ mod test {
         y:Int)
       (fn main () ->Int
         (let foo (new Foo y:2 x:3))
-        (std.+ foo.x foo.y))";
+        (std::+ foo.x foo.y))";
     assert_eq!(eval_main(source), SLValue::Int(5));
+  }
+
+  #[test]
+  fn chained_struct_field_access() {
+    let source = "
+      (struct Point
+        x:Int
+        y:Int)
+      (struct Box
+        origin:Point
+        size:Int)
+      (fn main () ->Int
+        (let b (new Box size:10 origin:(new Point x:4 y:5)))
+        (std::+ b.origin.x b.origin.y))";
+    assert_eq!(eval_main(source), SLValue::Int(9));
   }
 
   #[test]
@@ -1986,10 +2001,10 @@ mod test {
         get)
       (fn make-b () ->(Fn () -> Int)
         (let x 2)
-        (fn get () ->Int (std.+ x 10))
+        (fn get () ->Int (std::+ x 10))
         get)
       (fn main () ->Int
-        (std.+ ((make-a)) ((make-b))))
+        (std::+ ((make-a)) ((make-b))))
     ";
     assert_eq!(eval_main(source), SLValue::Int(13));
   }
@@ -2222,7 +2237,7 @@ mod test {
     let builtins = varargs_builtins();
     assert_eq!(
       eval_main_with(
-        "(fn main () ->Int (let result:Int (std.varargs)))",
+        "(fn main () ->Int (let result:Int (std::varargs)))",
         builtins
       ),
       SLValue::Int(0)
@@ -2233,7 +2248,7 @@ mod test {
   fn variadic_builtin_called_with_multiple_args() {
     let builtins = varargs_builtins();
     assert_eq!(
-      eval_main_with("(fn main () ->Int (std.varargs 1 2 3))", builtins),
+      eval_main_with("(fn main () ->Int (std::varargs 1 2 3))", builtins),
       SLValue::Int(3)
     );
   }
@@ -2242,7 +2257,7 @@ mod test {
   fn variadic_builtin_called_with_one_arg() {
     let builtins = varargs_builtins();
     assert_eq!(
-      eval_main_with("(fn main () ->Int (std.varargs 7))", builtins),
+      eval_main_with("(fn main () ->Int (std::varargs 7))", builtins),
       SLValue::Int(1)
     );
   }
@@ -2251,7 +2266,7 @@ mod test {
   fn fixed_arity_builtin_rejects_wrong_arg_count() {
     // `+` is a fixed binary builtin; calling it with one arg should now be
     // caught at the call site via the carried arity.
-    let src = "(fn main () ->Int (std.+ 1))";
+    let src = "(fn main () ->Int (std::+ 1))";
     let err = compile_executable_from_source(src, ("main", "main"), &default_builtins().specs())
       .unwrap_err();
     assert!(
@@ -2331,7 +2346,7 @@ mod test {
     // `boom` is never called and the program returns 42 cleanly. `boom` is
     // registered as a builtin (with an erroring handler) so the call links,
     // but its behavior is never invoked.
-    let source = "(fn main () ->Int (if (std.== 1 1) 42 (boom 0)))";
+    let source = "(fn main () ->Int (if (std::== 1 1) 42 (boom 0)))";
     let builtins = default_builtins().with_builtin(Builtin::unary(
       "main",
       "boom",
@@ -2382,8 +2397,8 @@ mod test {
 
   #[test]
   fn run_hits_limit_exactly() {
-    // (std.+ 1 2) is 4 bytecodes: PushInt(1), PushInt(2), Call(std.+), Return.
-    let source = "(fn main () ->Int (std.+ 1 2))";
+    // (std::+ 1 2) is 4 bytecodes: PushInt(1), PushInt(2), Call(std::+), Return.
+    let source = "(fn main () ->Int (std::+ 1 2))";
     let pkg = compile_executable_from_source(source, ("main", "main"), &default_builtins().specs())
       .unwrap();
     let interp = Interpreter::new(pkg);
@@ -2395,7 +2410,7 @@ mod test {
 
   #[test]
   fn run_limited_mid_program_pauses() {
-    let source = "(fn main () ->Int (std.+ 1 2))";
+    let source = "(fn main () ->Int (std::+ 1 2))";
     let pkg = compile_executable_from_source(source, ("main", "main"), &default_builtins().specs())
       .unwrap();
     let interp = Interpreter::new(pkg);
@@ -2495,7 +2510,7 @@ mod test {
     // discards it by returning `99`. After execution, the Cell should be
     // unreachable from the root. Forcing a full collection cycle should
     // reclaim those allocations.
-    let source = "(fn main () ->Int (let garbage (std.cell 42)) 99)";
+    let source = "(fn main () ->Int (let garbage (std::cell 42)) 99)";
     let pkg = compile_executable_from_source(source, ("main", "main"), &default_builtins().specs())
       .unwrap();
     let interp = Interpreter::new(pkg);
@@ -2534,11 +2549,11 @@ mod test {
     // rather than growing linearly with `n`.
     let source = "
       (fn waste (n:Int) ->Int
-        (if (std.== n 0)
+        (if (std::== n 0)
           0
           (block
-            (let garbage (std.cell n))
-            (waste (std.- n 1)))))
+            (let garbage (std::cell n))
+            (waste (std::- n 1)))))
       (fn main () ->Int (waste 1000))
     ";
     let pkg = compile_executable_from_source(source, ("main", "main"), &default_builtins().specs())
@@ -2568,7 +2583,7 @@ mod test {
   fn live_values_survive_collection() {
     // A program that returns a Cell: the Cell must survive a forced
     // collection, proving that reachable `Gc` pointers are not reclaimed.
-    let source = "(fn main () ->(Cell Int) (std.cell 3))";
+    let source = "(fn main () ->(Cell Int) (std::cell 3))";
     let pkg = compile_executable_from_source(source, ("main", "main"), &default_builtins().specs())
       .unwrap();
     let interp = Interpreter::new(pkg);
@@ -2598,7 +2613,7 @@ mod test {
 
   #[test]
   fn cell_wrapping_immediate_allocates_one_gc_box() {
-    let source = "(fn main () ->(Cell Int) (std.cell 3))";
+    let source = "(fn main () ->(Cell Int) (std::cell 3))";
     let pkg = compile_executable_from_source(source, ("main", "main"), &default_builtins().specs())
       .unwrap();
     let interp = Interpreter::new(pkg);
@@ -2629,7 +2644,7 @@ mod test {
 
   #[test]
   fn memory_limit_errors_when_exceeded() {
-    let source = "(fn main () ->Int (let garbage (std.cell 42)) 99)";
+    let source = "(fn main () ->Int (let garbage (std::cell 42)) 99)";
     let pkg = compile_executable_from_source(source, ("main", "main"), &default_builtins().specs())
       .unwrap();
     let interp = Interpreter::new(pkg);
@@ -2667,10 +2682,10 @@ mod test {
     // limit, the run must error instead of running to completion.
     let source = "
       (fn loop (n:Int acc:(List Int)) ->(List Int)
-        (if (std.== n 0)
+        (if (std::== n 0)
           acc
-          (loop (std.- n 1) (std.push acc n))))
-      (fn main () ->(List Int) (loop 100000 (std.list)))
+          (loop (std::- n 1) (std::push acc n))))
+      (fn main () ->(List Int) (loop 100000 (std::list)))
     ";
     let pkg = compile_executable_from_source(source, ("main", "main"), &default_builtins().specs())
       .unwrap();
@@ -2763,9 +2778,9 @@ mod test {
     // `total_gc_allocation + tracker.external_bytes()`.
     let source = "
       (fn grow (s:String n:Int) ->String
-        (if (std.== n 0)
+        (if (std::== n 0)
           s
-          (grow (std.concat s s) (std.- n 1))))
+          (grow (std::concat s s) (std::- n 1))))
       (fn main () ->String (grow \"x\" 25))
     ";
     let pkg = compile_executable_from_source(source, ("main", "main"), &default_builtins().specs())
@@ -2808,9 +2823,9 @@ mod test {
     // string object remains reachable and charged through the closure.
     let source = "
       (fn grow (s:String n:Int) ->String
-        (if (std.== n 0)
+        (if (std::== n 0)
           s
-          (grow (std.concat s s) (std.- n 1))))
+          (grow (std::concat s s) (std::- n 1))))
       (fn make-holder (big:String) ->(Fn () -> String)
         (fn holder () ->String big)
         holder)
@@ -2865,14 +2880,14 @@ mod test {
   #[test]
   fn cell_operations_do_not_clone_large_string_payloads() {
     let large = "x".repeat(64 * 1024);
-    let source = format!("(fn main () ->String (let c (std.cell \"{large}\")) (std.get c))");
+    let source = format!("(fn main () ->String (let c (std::cell \"{large}\")) (std::get c))");
     let pkg =
       compile_executable_from_source(&source, ("main", "main"), &default_builtins().specs())
         .unwrap();
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
 
-    // `std.get` should return the existing string value from the cell. If it
+    // `std::get` should return the existing string value from the cell. If it
     // cloned the 64 KiB payload, this tight-but-sufficient limit would be
     // exceeded by the duplicate external allocation.
     exec.set_memory_limit(Some(96 * 1024));
@@ -2883,10 +2898,10 @@ mod test {
   fn explicit_cell_is_shared_across_closures() {
     let source = "
       (fn counter () ->(Fn () -> Int)
-        (let count (std.cell 0))
+        (let count (std::cell 0))
         (fn inc () ->Int
-          (std.set! count (std.+ 1 (std.get count)))
-          (std.get count))
+          (std::set! count (std::+ 1 (std::get count)))
+          (std::get count))
         inc)
       (fn main () ->Int
         (let c (counter))
@@ -2900,14 +2915,14 @@ mod test {
   #[test]
   fn explicit_set_returns_void() {
     assert_eq!(
-      eval_main("(fn main () ->Void (let x (std.cell 1)) (std.set! x 11))"),
+      eval_main("(fn main () ->Void (let x (std::cell 1)) (std::set! x 11))"),
       SLValue::Void
     );
   }
 
   #[test]
   fn explicit_set_on_non_cell_errors() {
-    let source = "(fn main () ->Int (std.set! 1 2))";
+    let source = "(fn main () ->Int (std::set! 1 2))";
     let err = compile_executable_from_source(source, ("main", "main"), &default_builtins().specs())
       .unwrap_err();
     assert!(err.contains("expected `(Cell"), "unexpected error: {}", err);
@@ -2922,19 +2937,19 @@ mod test {
     //
     // (fn make-cycle () ->(Fn () -> Int)
     //   (fn placeholder () ->Int 0)
-    //   (let c (std.cell placeholder))
-    //   (fn self () ->Int (let ignored:(Fn () -> Int) (std.get c)) 1)
-    //   (std.set! c self)  ; Cell↔Partial cycle
+    //   (let c (std::cell placeholder))
+    //   (fn self () ->Int (let ignored:(Fn () -> Int) (std::get c)) 1)
+    //   (std::set! c self)  ; Cell↔Partial cycle
     //   self)              ; return the cyclic closure
     // (fn main () ->Int (make-cycle) 99)  ; discard the cycle, return 99
     let source = "
       (fn make-cycle () ->(Fn () -> Int)
         (fn placeholder () ->Int 0)
-        (let c (std.cell placeholder))
+        (let c (std::cell placeholder))
         (fn self () ->Int
-          (let ignored:(Fn () -> Int) (std.get c))
+          (let ignored:(Fn () -> Int) (std::get c))
           1)
-        (std.set! c self)
+        (std::set! c self)
         self)
       (fn main () ->Int (make-cycle) 99)
     ";
@@ -2966,10 +2981,10 @@ mod test {
     // `cycle_is_collected` (which builds a Partial↔Cell cycle via closures).
     let source = "
       (fn make-cycle ()
-        (let l (std.cell (std.list)))
+        (let l (std::cell (std::list)))
         (fn mkcycle ()
-          (std.set! l (std.list l))
-          (std.get l))
+          (std::set! l (std::list l))
+          (std::get l))
         mkcycle)
       (fn main () ->Int ((make-cycle)) 99)
     ";
@@ -3082,7 +3097,7 @@ mod test {
   #[test]
   fn list_empty() {
     assert_eq!(
-      eval_main("(fn main () ->(List Int) (let result:(List Int) (std.list)))"),
+      eval_main("(fn main () ->(List Int) (let result:(List Int) (std::list)))"),
       SLValue::List(vec![])
     );
   }
@@ -3090,7 +3105,7 @@ mod test {
   #[test]
   fn list_with_ints() {
     assert_eq!(
-      eval_main("(fn main () ->(List Int) (std.list 1 2 3))"),
+      eval_main("(fn main () ->(List Int) (std::list 1 2 3))"),
       SLValue::List(vec![SLValue::Int(1), SLValue::Int(2), SLValue::Int(3)])
     );
   }
@@ -3099,7 +3114,7 @@ mod test {
   fn variadic_builtin_can_be_called_through_local_binding() {
     let source = "
       (fn main () ->(List Int)
-        (let make std.list)
+        (let make std::list)
         (make 1 2 3))
     ";
     assert_eq!(
@@ -3114,7 +3129,7 @@ mod test {
       (fn use-list (make:(Fn (...Int) -> (List Int))) ->(List Int)
         (make 1 2 3))
       (fn main () ->(List Int)
-        (use-list std.list))
+        (use-list std::list))
     ";
     assert_eq!(
       eval_main(source),
@@ -3125,8 +3140,8 @@ mod test {
   #[test]
   fn top_level_function_is_a_first_class_value() {
     let source = "
-      (fn double (x:Int) ->Int (std.+ x x))
-      (fn main () ->(List Int) (std.map (std.list 1 2 3) double))
+      (fn double (x:Int) ->Int (std::+ x x))
+      (fn main () ->(List Int) (std::map (std::list 1 2 3) double))
     ";
     assert_eq!(
       eval_main(source),
@@ -3137,7 +3152,7 @@ mod test {
   #[test]
   fn top_level_function_can_be_called_through_a_local() {
     let source = "
-      (fn double (x:Int) ->Int (std.+ x x))
+      (fn double (x:Int) ->Int (std::+ x x))
       (fn main () ->Int (let f double) (f 4))
     ";
     assert_eq!(eval_main(source), SLValue::Int(8));
@@ -3146,11 +3161,11 @@ mod test {
   #[test]
   fn local_shadows_top_level_function_in_value_position() {
     let source = "
-      (fn transform (x:Int) ->Int (std.+ x x))
+      (fn transform (x:Int) ->Int (std::+ x x))
       (fn identity (x:Int) ->Int x)
       (fn main () ->(List Int)
         (let transform identity)
-        (std.map (std.list 1 2 3) transform))
+        (std::map (std::list 1 2 3) transform))
     ";
     assert_eq!(
       eval_main(source),
@@ -3161,8 +3176,8 @@ mod test {
   #[test]
   fn qualified_function_is_a_first_class_value() {
     let source = "
-      (fn double (x:Int) ->Int (std.+ x x))
-      (fn main () ->(List Int) (std.map (std.list 2 3) main.double))
+      (fn double (x:Int) ->Int (std::+ x x))
+      (fn main () ->(List Int) (std::map (std::list 2 3) main::double))
     ";
     assert_eq!(
       eval_main(source),
@@ -3174,7 +3189,7 @@ mod test {
   fn builtin_is_a_first_class_value() {
     let source = "
       (fn main () ->(List Int)
-        (std.map (std.list (std.list 1) (std.list 1 2)) std.len))
+        (std::map (std::list (std::list 1) (std::list 1 2)) std::len))
     ";
     assert_eq!(
       eval_main(source),
@@ -3186,17 +3201,17 @@ mod test {
   fn explicit_cell_get_set_and_nesting() {
     let source = "
       (fn main () ->Int
-        (let inner (std.cell 1))
-        (let outer (std.cell inner))
-        (std.set! (std.get outer) 7)
-        (std.get (std.get outer)))
+        (let inner (std::cell 1))
+        (let outer (std::cell inner))
+        (std::set! (std::get outer) 7)
+        (std::get (std::get outer)))
     ";
     assert_eq!(eval_main(source), SLValue::Int(7));
   }
 
   #[test]
   fn explicit_get_on_non_cell_errors() {
-    let err = eval_main_err("(fn main () ->Int (std.get 1))");
+    let err = eval_main_err("(fn main () ->Int (std::get 1))");
     assert!(err.contains("expected `(Cell"), "unexpected error: {err}");
   }
 
@@ -3215,7 +3230,7 @@ mod test {
   fn list_first_class_as_callable_value() {
     // `list` is a builtin (not a special form): its FunctionRef can be pushed
     // onto the stack and invoked via CallDynamic, exactly as a future `(let l
-    // std.list)` binding would compile to once the compiler supports
+    // std::list)` binding would compile to once the compiler supports
     // referencing builtins as values.
     let std_mod = 1u32; // "std" is the second module after "main"
                         // `list` is registered after `+`, `-`, `==`, `concat`, so its function
@@ -3262,9 +3277,9 @@ mod test {
     assert_eq!(
       eval_main(
         "(fn main () ->(List Int)
-           (let left:(List Int) (std.list))
-           (let right:(List Int) (std.list))
-           (std.concat left right))"
+           (let left:(List Int) (std::list))
+           (let right:(List Int) (std::list))
+           (std::concat left right))"
       ),
       SLValue::List(vec![])
     );
@@ -3273,7 +3288,7 @@ mod test {
   #[test]
   fn concat_lists() {
     assert_eq!(
-      eval_main("(fn main () ->(List Int) (std.concat (std.list 1 2) (std.list 3 4)))"),
+      eval_main("(fn main () ->(List Int) (std::concat (std::list 1 2) (std::list 3 4)))"),
       SLValue::List(vec![
         SLValue::Int(1),
         SLValue::Int(2),
@@ -3285,7 +3300,7 @@ mod test {
 
   #[test]
   fn concat_list_mismatch_errors() {
-    let err = eval_main_err("(fn main () ->Int (std.concat (std.list 1) \"x\"))");
+    let err = eval_main_err("(fn main () ->Int (std::concat (std::list 1) \"x\"))");
     assert!(
       err.contains("expected `(List Int)`"),
       "unexpected error: {}",
@@ -3296,15 +3311,15 @@ mod test {
   #[test]
   fn list_equality() {
     assert_eq!(
-      eval_main("(fn main () ->Bool (std.== (std.list 1 2 3) (std.list 1 2 3)))"),
+      eval_main("(fn main () ->Bool (std::== (std::list 1 2 3) (std::list 1 2 3)))"),
       SLValue::Bool(true)
     );
     assert_eq!(
-      eval_main("(fn main () ->Bool (std.== (std.list 1 2 3) (std.list 1 2 4)))"),
+      eval_main("(fn main () ->Bool (std::== (std::list 1 2 3) (std::list 1 2 4)))"),
       SLValue::Bool(false)
     );
     assert_eq!(
-      eval_main("(fn main () ->Bool (std.== (std.list 1) (std.list 1 2)))"),
+      eval_main("(fn main () ->Bool (std::== (std::list 1) (std::list 1 2)))"),
       SLValue::Bool(false)
     );
   }
@@ -3312,11 +3327,11 @@ mod test {
   #[test]
   fn idx_list_positive() {
     assert_eq!(
-      eval_main("(fn main () ->Int (std.idx (std.list 10 20 30) 0))"),
+      eval_main("(fn main () ->Int (std::idx (std::list 10 20 30) 0))"),
       SLValue::Int(10)
     );
     assert_eq!(
-      eval_main("(fn main () ->Int (std.idx (std.list 10 20 30) 2))"),
+      eval_main("(fn main () ->Int (std::idx (std::list 10 20 30) 2))"),
       SLValue::Int(30)
     );
   }
@@ -3324,54 +3339,54 @@ mod test {
   #[test]
   fn idx_list_negative() {
     assert_eq!(
-      eval_main("(fn main () ->Int (std.idx (std.list 10 20 30) -1))"),
+      eval_main("(fn main () ->Int (std::idx (std::list 10 20 30) -1))"),
       SLValue::Int(30)
     );
     assert_eq!(
-      eval_main("(fn main () ->Int (std.idx (std.list 10 20 30) -3))"),
+      eval_main("(fn main () ->Int (std::idx (std::list 10 20 30) -3))"),
       SLValue::Int(10)
     );
   }
 
   #[test]
   fn idx_list_out_of_range_errors() {
-    let err = eval_main_err("(fn main () ->Int (std.idx (std.list 1 2) 5))");
+    let err = eval_main_err("(fn main () ->Int (std::idx (std::list 1 2) 5))");
     assert!(err.contains("out of range"), "unexpected error: {}", err);
-    let err = eval_main_err("(fn main () ->Int (std.idx (std.list 1 2) -3))");
+    let err = eval_main_err("(fn main () ->Int (std::idx (std::list 1 2) -3))");
     assert!(err.contains("out of range"), "unexpected error: {}", err);
   }
 
   #[test]
   fn slice_string_replaces_character_indexing() {
     assert_eq!(
-      eval_main("(fn main () ->String (std.slice \"hello\" 0 1))"),
+      eval_main("(fn main () ->String (std::slice \"hello\" 0 1))"),
       SLValue::String("h".to_string())
     );
     assert_eq!(
-      eval_main("(fn main () ->String (std.slice \"hello\" 4 5))"),
+      eval_main("(fn main () ->String (std::slice \"hello\" 4 5))"),
       SLValue::String("o".to_string())
     );
     assert_eq!(
-      eval_main("(fn main () ->String (std.slice \"hello\" -1 5))"),
+      eval_main("(fn main () ->String (std::slice \"hello\" -1 5))"),
       SLValue::String("o".to_string())
     );
   }
 
   #[test]
   fn idx_string_errors() {
-    let err = eval_main_err("(fn main () ->Int (std.idx \"hi\" 0))");
+    let err = eval_main_err("(fn main () ->Int (std::idx \"hi\" 0))");
     assert!(err.contains("expected `(List"), "unexpected error: {err}");
   }
 
   #[test]
   fn push_returns_new_list() {
     assert_eq!(
-      eval_main("(fn main () ->(List Int) (std.push (std.list 1 2) 3))"),
+      eval_main("(fn main () ->(List Int) (std::push (std::list 1 2) 3))"),
       SLValue::List(vec![SLValue::Int(1), SLValue::Int(2), SLValue::Int(3)])
     );
     // empty + one
     assert_eq!(
-      eval_main("(fn main () ->(List Int) (std.push (std.list) 7))"),
+      eval_main("(fn main () ->(List Int) (std::push (std::list) 7))"),
       SLValue::List(vec![SLValue::Int(7)])
     );
   }
@@ -3379,14 +3394,14 @@ mod test {
   #[test]
   fn push_is_non_mutating() {
     // The original list is unaffected: indexing it afterwards still works.
-    let source = "(fn main () ->Int (let l (std.list 1 2)) (std.push l 3) (std.idx l 1))";
+    let source = "(fn main () ->Int (let l (std::list 1 2)) (std::push l 3) (std::idx l 1))";
     assert_eq!(eval_main(source), SLValue::Int(2));
   }
 
   #[test]
   fn slice_list_basic() {
     assert_eq!(
-      eval_main("(fn main () ->(List Int) (std.slice (std.list 1 2 3 4 5) 1 4))"),
+      eval_main("(fn main () ->(List Int) (std::slice (std::list 1 2 3 4 5) 1 4))"),
       SLValue::List(vec![SLValue::Int(2), SLValue::Int(3), SLValue::Int(4)])
     );
   }
@@ -3394,7 +3409,7 @@ mod test {
   #[test]
   fn slice_list_negative_indices() {
     assert_eq!(
-      eval_main("(fn main () ->(List Int) (std.slice (std.list 1 2 3 4 5) -3 -1))"),
+      eval_main("(fn main () ->(List Int) (std::slice (std::list 1 2 3 4 5) -3 -1))"),
       SLValue::List(vec![SLValue::Int(3), SLValue::Int(4)])
     );
   }
@@ -3403,12 +3418,12 @@ mod test {
   fn slice_list_clamped_bounds() {
     // stop past the end clamps to length.
     assert_eq!(
-      eval_main("(fn main () ->(List Int) (std.slice (std.list 1 2 3) 1 100))"),
+      eval_main("(fn main () ->(List Int) (std::slice (std::list 1 2 3) 1 100))"),
       SLValue::List(vec![SLValue::Int(2), SLValue::Int(3)])
     );
     // start before 0 clamps to 0.
     assert_eq!(
-      eval_main("(fn main () ->(List Int) (std.slice (std.list 1 2 3) -100 2))"),
+      eval_main("(fn main () ->(List Int) (std::slice (std::list 1 2 3) -100 2))"),
       SLValue::List(vec![SLValue::Int(1), SLValue::Int(2)])
     );
   }
@@ -3416,12 +3431,12 @@ mod test {
   #[test]
   fn slice_list_empty_result() {
     assert_eq!(
-      eval_main("(fn main () ->(List Int) (std.slice (std.list 1 2 3) 2 2))"),
+      eval_main("(fn main () ->(List Int) (std::slice (std::list 1 2 3) 2 2))"),
       SLValue::List(vec![])
     );
     // start > stop yields empty.
     assert_eq!(
-      eval_main("(fn main () ->(List Int) (std.slice (std.list 1 2 3) 3 0))"),
+      eval_main("(fn main () ->(List Int) (std::slice (std::list 1 2 3) 3 0))"),
       SLValue::List(vec![])
     );
   }
@@ -3429,11 +3444,11 @@ mod test {
   #[test]
   fn slice_string() {
     assert_eq!(
-      eval_main("(fn main () ->String (std.slice \"hello world\" 0 5))"),
+      eval_main("(fn main () ->String (std::slice \"hello world\" 0 5))"),
       SLValue::String("hello".to_string())
     );
     assert_eq!(
-      eval_main("(fn main () ->String (std.slice \"hello\" -2 100))"),
+      eval_main("(fn main () ->String (std::slice \"hello\" -2 100))"),
       SLValue::String("lo".to_string())
     );
   }
@@ -3441,14 +3456,14 @@ mod test {
   #[test]
   fn recursive_sum_of_list() {
     // Recursion over a list using `len` for the base case, `idx` for the head,
-    // and `slice` for the tail. `(std.slice l 1 (std.len l))` yields everything
+    // and `slice` for the tail. `(std::slice l 1 (std::len l))` yields everything
     // from index 1 to the end.
     let source = "
       (fn sum (l:(List Int)) ->Int
-        (if (std.== (std.len l) 0)
+        (if (std::== (std::len l) 0)
           0
-          (std.+ (std.idx l 0) (sum (std.slice l 1 (std.len l))))))
-      (fn main () ->Int (sum (std.list 1 2 3 4 5)))
+          (std::+ (std::idx l 0) (sum (std::slice l 1 (std::len l))))))
+      (fn main () ->Int (sum (std::list 1 2 3 4 5)))
     ";
     assert_eq!(eval_main(source), SLValue::Int(15));
   }
@@ -3499,7 +3514,7 @@ mod test {
     // to later expressions in the enclosing function body (the compiler's
     // `locals` map is shared across the block and its enclosing scope).
     assert_eq!(
-      eval_main("(fn main () ->Int (block (let a 7) a) (std.+ a 1))"),
+      eval_main("(fn main () ->Int (block (let a 7) a) (std::+ a 1))"),
       SLValue::Int(8)
     );
   }
@@ -3548,7 +3563,7 @@ mod test {
   #[test]
   fn void_returning_callee_discards_body_value() {
     let source = "
-      (fn side (x:Int) (std.+ x 1))
+      (fn side (x:Int) (std::+ x 1))
       (fn main () ->Void (side 5) (side 10))
     ";
     assert_eq!(eval_main(source), SLValue::Void);
@@ -3560,7 +3575,7 @@ mod test {
   fn nested_recursive_calls_restore_stack_segments() {
     let source = "
       (fn sum (n:Int) ->Int
-        (if (std.== n 0) 0 (std.+ n (sum (std.- n 1)))))
+        (if (std::== n 0) 0 (std::+ n (sum (std::- n 1)))))
       (fn main () ->Int (sum 500))
     ";
     assert_eq!(eval_main(source), SLValue::Int(125_250));
@@ -3574,7 +3589,7 @@ mod test {
   #[test]
   fn dynamic_call_and_partial_obey_frame_boundary() {
     let source = "
-      (fn add (a:Int b:Int) ->Int (std.+ a b))
+      (fn add (a:Int b:Int) ->Int (std::+ a b))
       (fn make-adder (a:Int) ->(Fn (Int) -> Int)
         (fn adder (b:Int) ->Int (add a b)))
       (fn main () ->Int
@@ -3584,7 +3599,7 @@ mod test {
     assert_eq!(eval_main(source), SLValue::Int(15));
     // And a fully dynamic call via a local.
     let source2 = "
-      (fn double (x:Int) ->Int (std.+ x x))
+      (fn double (x:Int) ->Int (std::+ x x))
       (fn main () ->Int (let f double) (f 21))
     ";
     assert_eq!(eval_main(source2), SLValue::Int(42));
@@ -3641,7 +3656,7 @@ mod test {
   /// stack garbage.
   #[test]
   fn top_level_void_function_completes_with_void() {
-    let source = "(fn main () (let a 1) (let b 2) (std.+ a b))";
+    let source = "(fn main () (let a 1) (let b 2) (std::+ a b))";
     let pkg = compile_executable_from_source(source, ("main", "main"), &default_builtins().specs())
       .unwrap();
     let interp = Interpreter::new(pkg);
@@ -3659,7 +3674,7 @@ mod test {
     let source = "
       (fn one () 1)
       (fn two () 2)
-      (fn main () ->Bool (std.== (one) (two)))
+      (fn main () ->Bool (std::== (one) (two)))
     ";
     assert_eq!(eval_main(source), SLValue::Bool(true));
   }
@@ -3668,17 +3683,17 @@ mod test {
   #[test]
   fn explicit_void_return_type() {
     let source = "
-      (fn f (x:Int) ->Void (std.+ x 1))
+      (fn f (x:Int) ->Void (std::+ x 1))
       (fn main () ->Void (f 5) (f 10))
     ";
     assert_eq!(eval_main(source), SLValue::Void);
   }
 
-  /// `std.set!` still returns Void.
+  /// `std::set!` still returns Void.
   #[test]
   fn std_set_still_returns_void() {
     assert_eq!(
-      eval_main("(fn main () ->Void (let x (std.cell 1)) (std.set! x 11))"),
+      eval_main("(fn main () ->Void (let x (std::cell 1)) (std::set! x 11))"),
       SLValue::Void
     );
   }
@@ -3713,7 +3728,7 @@ mod test {
       },
     ));
     let source = "
-      (fn dbl (x:Int) ->Int (std.+ x x))
+      (fn dbl (x:Int) ->Int (std::+ x x))
       (fn main () ->Int (applydouble dbl))
     ";
     let pkg = compile_executable_from_source(source, ("main", "main"), &builtins.specs()).unwrap();
@@ -3750,7 +3765,7 @@ mod test {
       },
     ));
     let source = "
-      (fn voidy (x:Int) (std.+ x 1))
+      (fn voidy (x:Int) (std::+ x 1))
       (fn main () ->Bool (callvoid voidy))
     ";
     let pkg = compile_executable_from_source(source, ("main", "main"), &builtins.specs()).unwrap();

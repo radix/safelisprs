@@ -2,8 +2,8 @@
 //! the SLC bytecode compiler + interpreter and the WASM backend + wasmtime.
 //!
 //! Only features supported by *both* backends are tested here (Int, Float,
-//! Bool, `let`, `if`, same-module function calls, and the `std.+`/`std.-`/
-//! `std.==` builtins). Backend-specific tests remain in their respective
+//! Bool, `let`, `if`, same-module function calls, and the `std::+`/`std::-`/
+//! `std::==` builtins). Backend-specific tests remain in their respective
 //! modules under `src/`.
 
 use rstest::rstest;
@@ -139,11 +139,11 @@ fn register_one(linker: &mut Linker<()>, b: &safelisp::wasm::Builtin) {
 #[case::let_binds_float("(fn main () ->Float (let a 2.5))", Val::Float(2.5))]
 #[case::later_let_is_returned("(fn main () ->Int (let a 1) (let b 2))", Val::Int(2))]
 #[case::let_does_not_shadow_later_result("(fn main () ->Int (let a 1) a)", Val::Int(1))]
-#[case::let_then_use_variable("(fn main () ->Int (let a 1) (let b 2) (std.+ a b))", Val::Int(3))]
+#[case::let_then_use_variable("(fn main () ->Int (let a 1) (let b 2) (std::+ a b))", Val::Int(3))]
 #[case::let_shadows_earlier_binding("(fn main () ->Int (let a 1) (let a 2) a)", Val::Int(2))]
 #[case::if_selects_then_branch("(fn main () ->Int (if true 42 0))", Val::Int(42))]
 #[case::if_selects_else_branch("(fn main () ->Int (if false 42 0))", Val::Int(0))]
-#[case::if_with_condition_from_call("(fn main () ->Int (if (std.== 1 1) 7 8))", Val::Int(7))]
+#[case::if_with_condition_from_call("(fn main () ->Int (if (std::== 1 1) 7 8))", Val::Int(7))]
 #[case::if_branches_can_use_let_variables(
   "(fn main () ->Int (let a 10) (if true a 0))",
   Val::Int(10)
@@ -168,37 +168,37 @@ fn register_one(linker: &mut Linker<()>, b: &safelisp::wasm::Builtin) {
   "(fn main () ->Int (later 7)) (fn later (x:Int) ->Int x)",
   Val::Int(7)
 )]
-#[case::std_add("(fn main () ->Int (std.+ 1 2))", Val::Int(3))]
-#[case::std_sub("(fn main () ->Int (std.- 1 2))", Val::Int(-1))]
-#[case::std_add_floats("(fn main () ->Float (std.+ 1.5 2.5))", Val::Float(4.0))]
-#[case::std_eq_int_true("(fn main () ->Bool (std.== 3 3))", Val::Bool(true))]
-#[case::std_eq_int_false("(fn main () ->Bool (std.== 3 4))", Val::Bool(false))]
-#[case::std_eq_float_true("(fn main () ->Bool (std.== 1.5 1.5))", Val::Bool(true))]
-#[case::std_eq_float_false("(fn main () ->Bool (std.== 1.5 2.5))", Val::Bool(false))]
-#[case::std_eq_bool_true("(fn main () ->Bool (std.== true true))", Val::Bool(true))]
-#[case::std_eq_bool_false("(fn main () ->Bool (std.== true false))", Val::Bool(false))]
+#[case::std_add("(fn main () ->Int (std::+ 1 2))", Val::Int(3))]
+#[case::std_sub("(fn main () ->Int (std::- 1 2))", Val::Int(-1))]
+#[case::std_add_floats("(fn main () ->Float (std::+ 1.5 2.5))", Val::Float(4.0))]
+#[case::std_eq_int_true("(fn main () ->Bool (std::== 3 3))", Val::Bool(true))]
+#[case::std_eq_int_false("(fn main () ->Bool (std::== 3 4))", Val::Bool(false))]
+#[case::std_eq_float_true("(fn main () ->Bool (std::== 1.5 1.5))", Val::Bool(true))]
+#[case::std_eq_float_false("(fn main () ->Bool (std::== 1.5 2.5))", Val::Bool(false))]
+#[case::std_eq_bool_true("(fn main () ->Bool (std::== true true))", Val::Bool(true))]
+#[case::std_eq_bool_false("(fn main () ->Bool (std::== true false))", Val::Bool(false))]
 #[case::void_functions_discard_body_values(
-  "(fn one () 1) (fn two () 2) (fn main () ->Bool (std.== (one) (two)))",
+  "(fn one () 1) (fn two () 2) (fn main () ->Bool (std::== (one) (two)))",
   Val::Bool(true)
 )]
 #[case::arithmetic_in_if(
-  "(fn main () ->Int (if (std.== (std.+ 1 1) 2) 100 200))",
+  "(fn main () ->Int (if (std::== (std::+ 1 1) 2) 100 200))",
   Val::Int(100)
 )]
 #[case::multiple_lets_and_calls(
-  "(fn main () ->Int (let a 1) (let b 2) (let c 3) (std.+ a (std.+ b c)))",
+  "(fn main () ->Int (let a 1) (let b 2) (let c 3) (std::+ a (std::+ b c)))",
   Val::Int(6)
 )]
 #[case::calls_function_that_calls_another(
-  "(fn inc (n:Int) ->Int (std.+ n 1)) (fn twice (n:Int) ->Int (std.+ (inc n) (inc n))) (fn main () ->Int (twice 10))",
+  "(fn inc (n:Int) ->Int (std::+ n 1)) (fn twice (n:Int) ->Int (std::+ (inc n) (inc n))) (fn main () ->Int (twice 10))",
   Val::Int(22)
 )]
 #[case::recursion_with_base_case(
-  "(fn triangle (n:Int) ->Int (if (std.== n 0) 0 (std.+ n (triangle (std.- n 1))))) (fn main () ->Int (triangle 10))",
+  "(fn triangle (n:Int) ->Int (if (std::== n 0) 0 (std::+ n (triangle (std::- n 1))))) (fn main () ->Int (triangle 10))",
   Val::Int(55),
 )]
 #[case::deep_recursion(
-  "(fn triangle (n:Int) ->Int (if (std.== n 0) 0 (std.+ n (triangle (std.- n 1))))) (fn main () ->Int (triangle 10000))",
+  "(fn triangle (n:Int) ->Int (if (std::== n 0) 0 (std::+ n (triangle (std::- n 1))))) (fn main () ->Int (triangle 10000))",
   Val::Int(50_005_000),
 )]
 #[case::block_returns_last("(fn main () ->Int (block 1 2 3))", Val::Int(3))]

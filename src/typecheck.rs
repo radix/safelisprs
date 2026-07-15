@@ -214,7 +214,7 @@ impl Checker {
       let key = ("main".to_string(), function.name.clone());
       if self.schemes.contains_key(&key) {
         return Err(
-          TypeError::new(format!("duplicate function `main.{}`", function.name))
+          TypeError::new(format!("duplicate function `main::{}`", function.name))
             .at(ast.span.clone()),
         );
       }
@@ -303,15 +303,7 @@ impl Checker {
       ASTKind::String(_) => Ok(Type::String),
       ASTKind::Bool(_) => Ok(Type::Bool),
       ASTKind::Variable(name) => self.resolve_bare(env, name),
-      ASTKind::FunctionRef(module, name) => {
-        if let Some(binding) = env.get(module).cloned() {
-          let receiver =
-            self.instantiate_binding(binding, Some(format!("field receiver `{module}`")))?;
-          self.field_type(receiver, name)
-        } else {
-          self.resolve_scheme(module, name)
-        }
-      }
+      ASTKind::FunctionRef(module, name) => self.resolve_scheme(module, name),
       ASTKind::Let(name, annotation, expression) => {
         let inferred = self.infer(env, type_vars, expression)?;
         if let Some(annotation) = annotation {
@@ -471,7 +463,7 @@ impl Checker {
   ) -> Result<Type, TypeError> {
     let label = match identifier {
       Identifier::Bare(name) => name.clone(),
-      Identifier::Qualified(module, name) => format!("{module}.{name}"),
+      Identifier::Qualified(module, name) => format!("{module}::{name}"),
     };
 
     if let Identifier::Bare(name) = identifier {
@@ -506,15 +498,6 @@ impl Checker {
         self.schemes.get(&(module.clone(), name.clone())).cloned()
       }
     };
-    if let Identifier::Qualified(receiver, field) = identifier {
-      if args.is_empty() {
-        if let Some(binding) = env.get(receiver).cloned() {
-          let receiver =
-            self.instantiate_binding(binding, Some(format!("field receiver `{receiver}`")))?;
-          return self.field_type(receiver, field);
-        }
-      }
-    }
     let Some(scheme) = scheme else {
       return Err(TypeError::new(format!("unknown function `{label}`")));
     };
@@ -566,7 +549,7 @@ impl Checker {
       .get(&("main".to_string(), name.to_string()))
       .cloned()
       .ok_or_else(|| TypeError::new(format!("Unknown name `{name}`")))?;
-    let instantiated = self.instantiate(&scheme, Some(format!("function `main.{name}`")));
+    let instantiated = self.instantiate(&scheme, Some(format!("function `main::{name}`")));
     Ok(Type::fn_scheme_type(instantiated))
   }
 
@@ -575,8 +558,8 @@ impl Checker {
       .schemes
       .get(&(module.to_string(), name.to_string()))
       .cloned()
-      .ok_or_else(|| TypeError::new(format!("unknown function `{module}.{name}`")))?;
-    let instantiated = self.instantiate(&scheme, Some(format!("function `{module}.{name}`")));
+      .ok_or_else(|| TypeError::new(format!("unknown function `{module}::{name}`")))?;
+    let instantiated = self.instantiate(&scheme, Some(format!("function `{module}::{name}`")));
     Ok(Type::fn_scheme_type(instantiated))
   }
 
@@ -1284,7 +1267,7 @@ mod tests {
   fn polymorphic_identity_can_be_used_at_two_types() {
     check(
       "(fn id (a:A) ->A a)
-       (fn main () ->Bool (block (id 1) (std.== (id \"x\") \"x\")))",
+       (fn main () ->Bool (block (id 1) (std::== (id \"x\") \"x\")))",
     )
     .unwrap();
   }
@@ -1294,8 +1277,20 @@ mod tests {
     check(
       "(struct Foo x:Int y:(Cell Int))
        (fn main () ->Int
-         (let foo (new Foo y:(std.cell 2) x:3))
+         (let foo (new Foo y:(std::cell 2) x:3))
          foo.x)",
+    )
+    .unwrap();
+  }
+
+  #[test]
+  fn chained_struct_field_access_typechecks() {
+    check(
+      "(struct Point x:Int y:Int)
+       (struct Box origin:Point size:Int)
+       (fn main () ->Int
+         (let b (new Box size:10 origin:(new Point x:4 y:5)))
+         (std::+ b.origin.x b.origin.y))",
     )
     .unwrap();
   }
@@ -1327,7 +1322,7 @@ mod tests {
 
   #[test]
   fn missing_bound_is_rejected() {
-    let error = check("(fn double (a:A) ->A (std.+ a a))").unwrap_err();
+    let error = check("(fn double (a:A) ->A (std::+ a a))").unwrap_err();
     assert!(error.message.contains("requires trait `Add`"), "{error}");
   }
 
@@ -1343,7 +1338,7 @@ mod tests {
 
   #[test]
   fn unresolved_empty_list_is_rejected() {
-    let error = check("(fn main () ->Int (let xs (std.list)) (std.len xs))").unwrap_err();
+    let error = check("(fn main () ->Int (let xs (std::list)) (std::len xs))").unwrap_err();
     assert!(error.message.contains("type annotation needed"), "{error}");
   }
 
@@ -1351,7 +1346,7 @@ mod tests {
   fn variadic_builtin_can_be_called_through_local_binding() {
     check(
       "(fn main () ->(List Int)
-         (let make std.list)
+         (let make std::list)
          (make 1 2 3))",
     )
     .unwrap();
@@ -1363,7 +1358,7 @@ mod tests {
       "(fn use-list (make:(Fn (...Int) -> (List Int))) ->(List Int)
          (make 1 2 3))
        (fn main () ->(List Int)
-         (use-list std.list))",
+         (use-list std::list))",
     )
     .unwrap();
   }
@@ -1371,8 +1366,8 @@ mod tests {
   #[test]
   fn map_accepts_top_level_function() {
     check(
-      "(fn sq (x:Int) ->Int (std.+ x x))
-       (fn main () ->(List Int) (std.map (std.range 0 5) sq))",
+      "(fn sq (x:Int) ->Int (std::+ x x))
+       (fn main () ->(List Int) (std::map (std::range 0 5) sq))",
     )
     .unwrap();
   }
@@ -1385,7 +1380,7 @@ mod tests {
 
   #[test]
   fn declared_trait_bound_allows_polymorphic_builtin_use() {
-    check("(fn double (a:A) ->A where ((A Add)) (std.+ a a))").unwrap();
+    check("(fn double (a:A) ->A where ((A Add)) (std::+ a a))").unwrap();
   }
 
   #[test]
@@ -1413,14 +1408,14 @@ mod tests {
       "(fn main () ->Bool
          (let id (fn id (a:A) ->A a))
          (id 1)
-         (std.== (id \"x\") \"x\"))",
+         (std::== (id \"x\") \"x\"))",
     )
     .unwrap();
   }
 
   #[test]
   fn void_return_discards_the_final_expression_type() {
-    check("(fn main () (std.+ 1 2))").unwrap();
+    check("(fn main () (std::+ 1 2))").unwrap();
   }
 
   #[test]
@@ -1470,7 +1465,7 @@ mod tests {
 
   #[test]
   fn type_errors_point_to_the_offending_argument() {
-    let source = "(fn main () ->Int\n  (std.+ 1\n    \"not-an-int\"))";
+    let source = "(fn main () ->Int\n  (std::+ 1\n    \"not-an-int\"))";
     let error = check(source).unwrap_err();
     let start = source.find("\"not-an-int\"").unwrap();
     assert_eq!(error.span.as_ref().map(|span| span.start), Some(start));
@@ -1482,7 +1477,7 @@ mod tests {
 
   #[test]
   fn outer_context_does_not_replace_an_inner_error_span() {
-    let source = "(fn main () ->Int\n  (std.+ 1\n    missing))";
+    let source = "(fn main () ->Int\n  (std::+ 1\n    missing))";
     let error = check(source).unwrap_err();
     let start = source.find("missing").unwrap();
     assert_eq!(error.span.as_ref().map(|span| span.start), Some(start));

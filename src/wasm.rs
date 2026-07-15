@@ -880,7 +880,7 @@ impl<'b> ModuleCompiler<'b> {
         let imp = self
           .used_imports
           .get(&key)
-          .ok_or_else(|| format!("call to unknown function: {}.{}", key.0, key.1))?;
+          .ok_or_else(|| format!("call to unknown function: {}::{}", key.0, key.1))?;
         imp.func_index
       }
     };
@@ -958,13 +958,13 @@ impl<'b> ModuleCompiler<'b> {
         .function_names
         .get(name)
         .map(|index| num_imports + index)
-        .ok_or_else(|| format!("unknown function: {module}.{name}"));
+        .ok_or_else(|| format!("unknown function: {module}::{name}"));
     }
     self
       .used_imports
       .get(&(module.to_string(), name.to_string()))
       .map(|import| import.func_index)
-      .ok_or_else(|| format!("unknown function: {module}.{name}"))
+      .ok_or_else(|| format!("unknown function: {module}::{name}"))
   }
 
   /// Resolve a variable name to its local pair index (most recent binding wins).
@@ -1072,7 +1072,7 @@ mod test {
           ))
         }
       };
-      result.map_err(|e| format!("link {}.{}: {e}", b.module, b.name))?;
+      result.map_err(|e| format!("link {}::{}: {e}", b.module, b.name))?;
     }
     Ok(())
   }
@@ -1138,7 +1138,7 @@ mod test {
   #[test]
   fn let_then_use_variable() {
     assert_main_eq(
-      "(fn main () ->Int (let a 1) (let b 2) (std.+ a b))",
+      "(fn main () ->Int (let a 1) (let b 2) (std::+ a b))",
       SLValue::Int(3),
     );
   }
@@ -1146,7 +1146,7 @@ mod test {
   #[test]
   fn top_level_function_can_be_called_through_local() {
     assert_main_eq(
-      "(fn double (x:Int) ->Int (std.+ x x)) (fn main () ->Int (let f double) (f 4))",
+      "(fn double (x:Int) ->Int (std::+ x x)) (fn main () ->Int (let f double) (f 4))",
       SLValue::Int(8),
     );
   }
@@ -1154,7 +1154,7 @@ mod test {
   #[test]
   fn qualified_function_can_be_called_dynamically() {
     assert_main_eq(
-      "(fn double (x:Int) ->Int (std.+ x x)) (fn main () ->Int (let f main.double) (f 4))",
+      "(fn double (x:Int) ->Int (std::+ x x)) (fn main () ->Int (let f main::double) (f 4))",
       SLValue::Int(8),
     );
   }
@@ -1162,7 +1162,7 @@ mod test {
   #[test]
   fn builtin_function_can_be_called_through_local() {
     assert_main_eq(
-      "(fn main () ->Int (let add std.+) (add 2 3))",
+      "(fn main () ->Int (let add std::+) (add 2 3))",
       SLValue::Int(5),
     );
   }
@@ -1170,7 +1170,7 @@ mod test {
   #[test]
   fn local_shadows_top_level_function_as_value() {
     assert_main_eq(
-      "(fn transform (x:Int) ->Int (std.+ x x))
+      "(fn transform (x:Int) ->Int (std::+ x x))
        (fn identity (x:Int) ->Int x)
        (fn main () ->Int (let transform identity) (transform 7))",
       SLValue::Int(7),
@@ -1194,7 +1194,7 @@ mod test {
 
   #[test]
   fn if_with_condition_from_call() {
-    assert_main_eq("(fn main () ->Int (if (std.== 1 1) 7 8))", SLValue::Int(7));
+    assert_main_eq("(fn main () ->Int (if (std::== 1 1) 7 8))", SLValue::Int(7));
   }
 
   #[test]
@@ -1231,33 +1231,33 @@ mod test {
 
   #[test]
   fn std_add() {
-    assert_main_eq("(fn main () ->Int (std.+ 1 2))", SLValue::Int(3));
+    assert_main_eq("(fn main () ->Int (std::+ 1 2))", SLValue::Int(3));
   }
 
   #[test]
   fn std_sub() {
-    assert_main_eq("(fn main () ->Int (std.- 1 2))", SLValue::Int(-1));
+    assert_main_eq("(fn main () ->Int (std::- 1 2))", SLValue::Int(-1));
   }
 
   #[test]
   fn std_eq_true() {
-    assert_main_eq("(fn main () ->Bool (std.== 3 3))", SLValue::Bool(true));
+    assert_main_eq("(fn main () ->Bool (std::== 3 3))", SLValue::Bool(true));
   }
 
   #[test]
   fn std_eq_false() {
-    assert_main_eq("(fn main () ->Bool (std.== 3 4))", SLValue::Bool(false));
+    assert_main_eq("(fn main () ->Bool (std::== 3 4))", SLValue::Bool(false));
   }
 
   #[test]
   fn std_add_floats() {
-    assert_main_eq("(fn main () ->Float (std.+ 1.5 2.5))", SLValue::Float(4.0));
+    assert_main_eq("(fn main () ->Float (std::+ 1.5 2.5))", SLValue::Float(4.0));
   }
 
   #[test]
   fn arithmetic_in_if() {
     assert_main_eq(
-      "(fn main () ->Int (if (std.== (std.+ 1 1) 2) 100 200))",
+      "(fn main () ->Int (if (std::== (std::+ 1 1) 2) 100 200))",
       SLValue::Int(100),
     );
   }
@@ -1265,7 +1265,7 @@ mod test {
   #[test]
   fn multiple_lets_and_calls() {
     assert_main_eq(
-      "(fn main () ->Int (let a 1) (let b 2) (let c 3) (std.+ a (std.+ b c)))",
+      "(fn main () ->Int (let a 1) (let b 2) (let c 3) (std::+ a (std::+ b c)))",
       SLValue::Int(6),
     );
   }
@@ -1273,7 +1273,7 @@ mod test {
   #[test]
   fn calls_function_that_calls_another() {
     assert_main_eq(
-      "(fn inc (n:Int) ->Int (std.+ n 1)) (fn twice (n:Int) ->Int (std.+ (inc n) (inc n))) (fn main () ->Int (twice 10))",
+      "(fn inc (n:Int) ->Int (std::+ n 1)) (fn twice (n:Int) ->Int (std::+ (inc n) (inc n))) (fn main () ->Int (twice 10))",
       SLValue::Int(22),
     );
   }
@@ -1281,7 +1281,7 @@ mod test {
   #[test]
   fn recursion_with_base_case() {
     assert_main_eq(
-      "(fn triangle (n:Int) ->Int (if (std.== n 0) 0 (std.+ n (triangle (std.- n 1))))) (fn main () ->Int (triangle 10))",
+      "(fn triangle (n:Int) ->Int (if (std::== n 0) 0 (std::+ n (triangle (std::- n 1))))) (fn main () ->Int (triangle 10))",
       SLValue::Int(55),
     );
   }
@@ -1289,7 +1289,7 @@ mod test {
   #[test]
   fn deep_recursion() {
     assert_main_eq(
-      "(fn triangle (n:Int) ->Int (if (std.== n 0) 0 (std.+ n (triangle (std.- n 1))))) (fn main () ->Int (triangle 10000))",
+      "(fn triangle (n:Int) ->Int (if (std::== n 0) 0 (std::+ n (triangle (std::- n 1))))) (fn main () ->Int (triangle 10000))",
       SLValue::Int(50_005_000),
     );
   }
@@ -1328,7 +1328,7 @@ mod test {
 
   #[test]
   fn compile_rejects_type_errors_before_wasm_codegen() {
-    let source = "(fn main () ->Int\n  (std.+ 1\n    true))";
+    let source = "(fn main () ->Int\n  (std::+ 1\n    true))";
     let error = compile(source, &std_builtins()).unwrap_err();
     assert!(error.starts_with("line 3, column 5: TypeError:"), "{error}");
     assert!(error.contains("expected `Int`, got `Bool`"), "{error}");
@@ -1345,7 +1345,7 @@ mod test {
         _ => SLValue::Void,
       },
     ));
-    let result = run_main_with("(fn main () ->Int (math.double 21))", &builtins).unwrap();
+    let result = run_main_with("(fn main () ->Int (math::double 21))", &builtins).unwrap();
     assert_eq!(result, SLValue::Int(42));
   }
 
@@ -1366,7 +1366,7 @@ mod test {
 
   #[test]
   fn unused_builtins_are_not_emitted() {
-    let wasm = compile("(fn main () ->Int (std.+ 1 2))", &std_builtins()).unwrap();
+    let wasm = compile("(fn main () ->Int (std::+ 1 2))", &std_builtins()).unwrap();
     let engine = Engine::default();
     let module = Module::from_binary(&engine, &wasm).unwrap();
     let num_imports = module.imports().filter(|i| i.module() == "std").count();

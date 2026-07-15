@@ -250,12 +250,12 @@ fn link_instruction(
   Ok(match instruction {
     Instruction::Call((mod_name, func_name), arity) => {
       let (mod_idx, func_idx) = find_function(module_table, &mod_name, &func_name)
-        .ok_or_else(|| format!("Call to undefined function {}.{}", mod_name, func_name))?;
+        .ok_or_else(|| format!("Call to undefined function {}::{}", mod_name, func_name))?;
       Instruction::Call((mod_idx, func_idx), arity)
     }
     Instruction::MakeFunctionRef((mod_name, func_name)) => {
       let (mod_idx, func_idx) = find_function(module_table, &mod_name, &func_name)
-        .ok_or_else(|| format!("Call to undefined function {}.{}", mod_name, func_name))?;
+        .ok_or_else(|| format!("Call to undefined function {}::{}", mod_name, func_name))?;
       Instruction::MakeFunctionRef((mod_idx, func_idx))
     }
     Instruction::NewStruct((mod_name, struct_name)) => {
@@ -452,16 +452,6 @@ fn compile_expr(
       instructions.push(Instruction::CallDynamic(arg_exprs.len() as u16))
     }
     ASTKind::CallFixed(identifier, arg_exprs) => {
-      if let Identifier::Qualified(receiver, field) = identifier {
-        if arg_exprs.is_empty() {
-          if let Some(local) = locals.get(receiver) {
-            let field_index = field_index(ctx, local, field)?;
-            instructions.push(Instruction::LoadLocal(local.index));
-            instructions.push(Instruction::GetField(field_index));
-            return Ok(instructions);
-          }
-        }
-      }
       for expr in arg_exprs {
         instructions.extend(compile_expr(ctx, expr, locals)?);
       }
@@ -482,16 +472,10 @@ fn compile_expr(
       ))
     }
     ASTKind::FunctionRef(mname, fname) => {
-      if let Some(local) = locals.get(mname) {
-        let field_index = field_index(ctx, local, fname)?;
-        instructions.push(Instruction::LoadLocal(local.index));
-        instructions.push(Instruction::GetField(field_index));
-      } else {
-        instructions.push(Instruction::MakeFunctionRef((
-          mname.to_owned(),
-          fname.to_owned(),
-        )));
-      }
+      instructions.push(Instruction::MakeFunctionRef((
+        mname.to_owned(),
+        fname.to_owned(),
+      )));
     }
     ASTKind::Let(name, _, expr) => {
       if !locals.contains_key(name) {
@@ -539,7 +523,7 @@ fn compile_expr(
     ASTKind::FieldAccess(receiver, field) => {
       let receiver_type = infer_struct_type(ctx, receiver, locals)
         .ok_or_else(|| format!("field access receiver has no known struct type: {receiver:?}"))?;
-      let field_index = field_index_for_struct(ctx, &receiver_type, field)?;
+      let (field_index, _) = field_for_struct(ctx, &receiver_type, field)?;
       instructions.extend(compile_expr(ctx, receiver, locals)?);
       instructions.push(Instruction::GetField(field_index));
     }
@@ -628,9 +612,6 @@ fn infer_struct_type(
   match &ast.kind {
     ASTKind::NewStruct(name, _) if ctx.structs.contains_key(name) => Some(name.clone()),
     ASTKind::Variable(name) => locals.get(name).and_then(|local| local.struct_type.clone()),
-    ASTKind::FunctionRef(receiver, field) => locals
-      .get(receiver)
-      .and_then(|local| field_struct_type(ctx, local, field)),
     ASTKind::FieldAccess(receiver, field) => {
       let receiver = infer_struct_type(ctx, receiver, locals)?;
       field_struct_type_for_struct(ctx, &receiver, field)
@@ -657,34 +638,23 @@ fn infer_struct_type(
   }
 }
 
-fn field_index(ctx: &CompileContext<'_>, local: &LocalInfo, field: &str) -> Result<u16, String> {
-  let struct_name = local
-    .struct_type
-    .as_ref()
-    .ok_or_else(|| format!("field access receiver has no known struct type for `{field}`"))?;
-  field_index_for_struct(ctx, struct_name, field)
-}
-
-fn field_index_for_struct(
+fn field_for_struct(
   ctx: &CompileContext<'_>,
   struct_name: &str,
   field: &str,
-) -> Result<u16, String> {
+) -> Result<(u16, Option<String>), String> {
   let struct_ = ctx
     .structs
     .get(struct_name)
     .ok_or_else(|| format!("unknown struct `{struct_name}`"))?;
-  struct_
+  let (index, ty) = struct_
     .fields
     .iter()
-    .position(|(name, _)| name == field)
-    .map(|index| index as u16)
-    .ok_or_else(|| format!("struct `{struct_name}` has no field `{field}`"))
-}
-
-fn field_struct_type(ctx: &CompileContext<'_>, local: &LocalInfo, field: &str) -> Option<String> {
-  let struct_name = local.struct_type.as_ref()?;
-  field_struct_type_for_struct(ctx, struct_name, field)
+    .enumerate()
+    .find(|(_, (name, _))| name == field)
+    .map(|(index, (_, ty))| (index as u16, ty))
+    .ok_or_else(|| format!("struct `{struct_name}` has no field `{field}`"))?;
+  Ok((index, struct_name_from_type(ty, ctx.structs)))
 }
 
 fn field_struct_type_for_struct(
@@ -692,9 +662,9 @@ fn field_struct_type_for_struct(
   struct_name: &str,
   field: &str,
 ) -> Option<String> {
-  let struct_ = ctx.structs.get(struct_name)?;
-  let (_, ty) = struct_.fields.iter().find(|(name, _)| name == field)?;
-  struct_name_from_type(ty, ctx.structs)
+  field_for_struct(ctx, struct_name, field)
+    .ok()
+    .and_then(|(_, struct_name)| struct_name)
 }
 
 pub fn compile_executable_from_source(
@@ -949,6 +919,43 @@ mod test {
   }
 
   #[test]
+  fn chained_field_access_emits_multiple_field_indices() {
+    let builtins = crate::builtins::default_builtins();
+    let source = "
+      (struct Point x:Int y:Int)
+      (struct Box origin:Point size:Int)
+      (fn main () ->Int
+        (let b (new Box size:10 origin:(new Point x:4 y:5)))
+        (std::+ b.origin.x b.origin.y))";
+    let package =
+      compile_executable_from_source(source, ("main", "main"), &builtins.specs()).unwrap();
+    let Callable::Function(main) = package.get_function(0, 0).unwrap() else {
+      panic!("expected main function");
+    };
+    assert_eq!(
+      main.instructions,
+      vec![
+        Instruction::PushInt(4),
+        Instruction::PushInt(5),
+        Instruction::NewStruct((0, 0)),
+        Instruction::PushInt(10),
+        Instruction::NewStruct((0, 1)),
+        Instruction::SetLocal(0),
+        Instruction::LoadLocal(0),
+        Instruction::Pop,
+        Instruction::LoadLocal(0),
+        Instruction::GetField(0),
+        Instruction::GetField(0),
+        Instruction::LoadLocal(0),
+        Instruction::GetField(0),
+        Instruction::GetField(1),
+        Instruction::Call((1, 0), 2),
+        Instruction::Return,
+      ]
+    );
+  }
+
+  #[test]
   fn field_access_after_function_return_uses_return_annotation() {
     let builtins = crate::builtins::default_builtins();
     let source = "
@@ -971,7 +978,7 @@ mod test {
   #[test]
   fn source_compilation_rejects_type_errors_before_codegen() {
     let builtins = crate::builtins::default_builtins();
-    let source = "(fn main () ->Int\n  (std.+ 1\n    \"not-an-int\"))";
+    let source = "(fn main () ->Int\n  (std::+ 1\n    \"not-an-int\"))";
     let error =
       compile_executable_from_source(source, ("main", "main"), &builtins.specs()).unwrap_err();
     assert!(error.starts_with("line 3, column 5: TypeError:"), "{error}");
