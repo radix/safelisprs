@@ -477,7 +477,7 @@ fn compile_expr(
         fname.to_owned(),
       )));
     }
-    ASTKind::Let(name, _, expr) => {
+    ASTKind::Let(name, annotation, expr) => {
       if !locals.contains_key(name) {
         locals.insert(
           name.clone(),
@@ -488,7 +488,10 @@ fn compile_expr(
         );
       }
       instructions.extend(compile_expr(ctx, expr, locals)?);
-      let struct_type = infer_struct_type(ctx, expr, locals);
+      let struct_type = annotation
+        .as_ref()
+        .and_then(|ty| struct_name_from_type(ty, ctx.structs))
+        .or_else(|| infer_struct_type(ctx, expr, locals));
       let local = locals.get_mut(name).expect("local was inserted above");
       local.struct_type = struct_type;
       let local_index = local.index;
@@ -963,6 +966,26 @@ mod test {
       (fn make () ->Foo (new Foo x:9))
       (fn main () ->Int
         (let foo (make))
+        foo.x)";
+    let package =
+      compile_executable_from_source(source, ("main", "main"), &builtins.specs()).unwrap();
+    let Callable::Function(main) = package.get_function(0, 1).unwrap() else {
+      panic!("expected main function");
+    };
+    assert!(main
+      .instructions
+      .iter()
+      .any(|instruction| matches!(instruction, Instruction::GetField(0))));
+  }
+
+  #[test]
+  fn let_annotation_preserves_struct_type_after_generic_call() {
+    let builtins = crate::builtins::default_builtins();
+    let source = "
+      (struct Foo x:Int)
+      (fn id (x:A) ->A x)
+      (fn main () ->Int
+        (let foo:Foo (id (new Foo x:9)))
         foo.x)";
     let package =
       compile_executable_from_source(source, ("main", "main"), &builtins.specs()).unwrap();
