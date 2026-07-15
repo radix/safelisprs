@@ -228,6 +228,7 @@ pub(crate) fn external_bytes_of<'gc>(value: &SLVal<'gc>) -> usize {
     SLVal::String(s) => s.capacity(),
     SLVal::List(items) => items.capacity() * std::mem::size_of::<Value<'gc>>(),
     SLVal::Partial(p) => p.args.capacity() * std::mem::size_of::<Value<'gc>>(),
+    SLVal::Struct(s) => s.fields.capacity() * std::mem::size_of::<Value<'gc>>(),
   }
 }
 
@@ -482,6 +483,19 @@ impl<'gc> ExecRoot<'gc> {
         let sub: Vec<Value<'gc>> = items.iter().map(|i| self.import_value(mc, i)).collect();
         self.alloc_heap(mc, SLVal::List(sub))
       }
+      SLValue::Struct { struct_, fields } => {
+        let sub = fields
+          .iter()
+          .map(|value| self.import_value(mc, value))
+          .collect();
+        self.alloc_heap(
+          mc,
+          SLVal::Struct(StructInstance {
+            struct_: *struct_,
+            fields: sub,
+          }),
+        )
+      }
     }
   }
 }
@@ -534,7 +548,7 @@ impl FrameFunc {
   /// The byte footprint of an `Inline` function's `instructions: Vec<…>`:
   /// `capacity() * size_of::<Instruction>()`.
   fn instruction_bytes(f: &Function) -> usize {
-    let elem_size = std::mem::size_of::<crate::compiler::Instruction<(u32, u32)>>();
+    let elem_size = std::mem::size_of::<crate::compiler::Instruction<(u32, u32), (u32, u32)>>();
     f.instructions.capacity() * elem_size
   }
 
@@ -602,6 +616,7 @@ pub enum SLVal<'gc> {
   String(String),
   Partial(Partial<'gc>),
   List(Vec<Value<'gc>>),
+  Struct(StructInstance<'gc>),
 }
 
 #[derive(Debug, PartialEq, Collect)]
@@ -609,6 +624,13 @@ pub enum SLVal<'gc> {
 pub struct Partial<'gc> {
   function: (u32, u32),
   args: Vec<Value<'gc>>,
+}
+
+#[derive(Debug, PartialEq, Collect)]
+#[collect(no_drop)]
+pub struct StructInstance<'gc> {
+  pub struct_: (u32, u32),
+  pub fields: Vec<Value<'gc>>,
 }
 
 /// An owned, arena-agnostic value that can escape the arena and be fed back
@@ -630,6 +652,10 @@ pub enum SLValue {
   },
   Cell(Box<SLValue>),
   List(Vec<SLValue>),
+  Struct {
+    struct_: (u32, u32),
+    fields: Vec<SLValue>,
+  },
 }
 
 impl<'gc> Value<'gc> {
@@ -685,6 +711,7 @@ impl<'gc> SLVal<'gc> {
       SLVal::String(_) => "String",
       SLVal::Partial(_) => "Partial",
       SLVal::List(_) => "List",
+      SLVal::Struct(_) => "Struct",
     }
   }
 
@@ -696,6 +723,10 @@ impl<'gc> SLVal<'gc> {
         args: p.args.iter().map(Value::to_value).collect(),
       },
       SLVal::List(items) => SLValue::List(items.iter().map(Value::to_value).collect()),
+      SLVal::Struct(s) => SLValue::Struct {
+        struct_: s.struct_,
+        fields: s.fields.iter().map(Value::to_value).collect(),
+      },
     }
   }
 }
@@ -1214,6 +1245,61 @@ impl<'gc> ExecRoot<'gc> {
       Instruction::PushVoid => {
         self.stack.push(Value::Void);
       }
+      Instruction::NewStruct(struct_) => {
+        let struct_def = package
+          .get_struct(struct_.0, struct_.1)
+          .ok_or_else(|| format!("Struct not found: {}/{}", struct_.0, struct_.1))?;
+        let field_count = struct_def.fields.len();
+        let field_bytes = field_count
+          .checked_mul(std::mem::size_of::<Value<'gc>>())
+          .ok_or_else(|| "struct field buffer size overflow".to_string())?;
+        let mut fields_reservation = self.reserve_memory(mc, field_bytes)?;
+        let mut fields = Vec::new();
+        fields.try_reserve_exact(field_count).map_err(|_| {
+          format!(
+            "failed to allocate struct field buffer for {} fields",
+            field_count
+          )
+        })?;
+        let actual_field_bytes = fields
+          .capacity()
+          .checked_mul(std::mem::size_of::<Value<'gc>>())
+          .ok_or_else(|| "struct field buffer capacity overflow".to_string())?;
+        self.reconcile_reservation(mc, &mut fields_reservation, actual_field_bytes)?;
+        for _ in 0..field_count {
+          fields.push(self.pop()?);
+        }
+        fields.reverse();
+        drop(fields_reservation);
+        let value = self.alloc_heap(mc, SLVal::Struct(StructInstance { struct_, fields }));
+        self.stack.push(value);
+      }
+      Instruction::GetField(field) => {
+        let receiver = self.pop()?;
+        let value = match receiver {
+          Value::Heap(heap) => match &heap.value {
+            SLVal::Struct(instance) => *instance.fields.get(field as usize).ok_or_else(|| {
+              format!(
+                "struct field index {} out of range for struct {}/{}",
+                field, instance.struct_.0, instance.struct_.1
+              )
+            })?,
+            _ => {
+              return Err(format!(
+                "field access expected a struct, got {}",
+                receiver.type_name()
+              ))
+            }
+          },
+          _ => {
+            return Err(format!(
+              "field access expected a struct, got {}",
+              receiver.type_name()
+            ))
+          }
+        };
+        self.stack.push(value);
+      }
       Instruction::Pop => {
         self.pop()?;
       }
@@ -1350,10 +1436,11 @@ impl<'gc> ExecRoot<'gc> {
     func_index: u32,
     arity: u16,
   ) -> Result<(), String> {
-    let (module_name, functions) = package
+    let module = package
       .get_module(mod_index)
       .ok_or_else(|| format!("Module not found: {}", mod_index))?;
-    let (func_name, callable) = functions
+    let (func_name, callable) = module
+      .functions
       .get(func_index as usize)
       .ok_or_else(|| format!("Function not found: {}/{}", mod_index, func_index))?;
     match callable {
@@ -1361,21 +1448,21 @@ impl<'gc> ExecRoot<'gc> {
         if arity != func.num_params {
           return Err(format!(
             "{}.{} expects {} arg(s) but was called with {}",
-            module_name, func_name, func.num_params, arity
+            module.name, func_name, func.num_params, arity
           ));
         }
         self.enter_function(mc, mod_index, func_index, func, vec![])?;
       }
       Callable::Builtin => {
         let builtin = builtins
-          .lookup(module_name, func_name)
-          .ok_or_else(|| format!("No builtin {}.{}", module_name, func_name))?;
+          .lookup(&module.name, func_name)
+          .ok_or_else(|| format!("No builtin {}.{}", module.name, func_name))?;
         // For fixed-arity builtins, enforce the declared arity at the call site.
         if let Some(expected) = builtin.spec().num_params {
           if arity != expected {
             return Err(format!(
               "{}.{} expects {} arg(s) but was called with {}",
-              module_name, func_name, expected, arity
+              module.name, func_name, expected, arity
             ));
           }
         }
@@ -1437,10 +1524,11 @@ impl<'gc> ExecRoot<'gc> {
           function: (mod_index, func_index),
           args,
         }) => {
-          let (_, functions) = package
+          let module = package
             .get_module(*mod_index)
             .ok_or_else(|| format!("Module not found: {}", mod_index))?;
-          let (func_name, callable) = functions
+          let (func_name, callable) = module
+            .functions
             .get(*func_index as usize)
             .ok_or_else(|| format!("Function not found: {}/{}", mod_index, func_index))?;
           match callable {
@@ -1681,6 +1769,14 @@ mod test {
     exec.run_until_done().unwrap()
   }
 
+  fn test_module(name: &str, functions: Vec<(String, LinkedCallable)>) -> LinkedModule {
+    LinkedModule {
+      name: name.to_string(),
+      functions,
+      structs: vec![],
+    }
+  }
+
   /// Test for a simple "identity" function that returns its argument
   #[test]
   fn test_interpret_identity() {
@@ -1700,8 +1796,8 @@ mod test {
       ],
     };
     let pkg = Package {
-      modules: vec![(
-        "main".to_string(),
+      modules: vec![test_module(
+        "main",
         vec![
           ("id".to_string(), Callable::Function(id)),
           ("main".to_string(), Callable::Function(main)),
@@ -1740,6 +1836,43 @@ mod test {
       eval_main("(fn main () ->String (std.concat \"\" \"x\"))"),
       SLValue::String("x".to_string())
     );
+  }
+
+  #[test]
+  fn constructs_structs_and_reads_fields_without_parentheses() {
+    let source = "
+      (struct Foo
+        x:Int
+        y:(Cell Int))
+      (fn main () ->Int
+        (let foo (new Foo x:3 y:(std.cell 2)))
+        foo.x)";
+    assert_eq!(eval_main(source), SLValue::Int(3));
+  }
+
+  #[test]
+  fn struct_cell_fields_can_be_mutated() {
+    let source = "
+      (struct Foo
+        x:Int
+        y:(Cell Int))
+      (fn main () ->Int
+        (let foo (new Foo x:3 y:(std.cell 2)))
+        (std.set! foo.y 7)
+        (std.get foo.y))";
+    assert_eq!(eval_main(source), SLValue::Int(7));
+  }
+
+  #[test]
+  fn struct_field_initializers_are_named() {
+    let source = "
+      (struct Foo
+        x:Int
+        y:Int)
+      (fn main () ->Int
+        (let foo (new Foo y:2 x:3))
+        (std.+ foo.x foo.y))";
+    assert_eq!(eval_main(source), SLValue::Int(5));
   }
 
   #[test]
@@ -1782,8 +1915,8 @@ mod test {
     };
 
     let pkg = Package {
-      modules: vec![(
-        "main".to_string(),
+      modules: vec![test_module(
+        "main",
         vec![
           ("inner".to_string(), Callable::Function(inner)),
           ("main".to_string(), Callable::Function(main)),
@@ -2149,8 +2282,8 @@ mod test {
       ],
     };
     let pkg = Package {
-      modules: vec![(
-        "main".to_string(),
+      modules: vec![test_module(
+        "main",
         vec![
           ("inner".to_string(), Callable::Function(inner)),
           ("main".to_string(), Callable::Function(main)),
@@ -3102,12 +3235,9 @@ mod test {
     };
     let pkg = Package {
       modules: vec![
-        (
-          "main".to_string(),
-          vec![("main".to_string(), Callable::Function(main))],
-        ),
-        (
-          "std".to_string(),
+        test_module("main", vec![("main".to_string(), Callable::Function(main))]),
+        test_module(
+          "std",
           vec![
             ("+".to_string(), Callable::Builtin),
             ("-".to_string(), Callable::Builtin),

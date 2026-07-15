@@ -4,7 +4,9 @@ use std::fmt;
 use std::rc::Rc;
 
 use crate::builtins::{BuiltinSignature, BuiltinSpec, Trait, TypeConst};
-use crate::parser::{source_position, ASTKind, Function, Identifier, Span, TypeAst, AST};
+use crate::parser::{
+  source_position, ASTKind, Function, Identifier, Span, Struct as StructAst, TypeAst, AST,
+};
 
 pub type TvRef = Rc<RefCell<TypeVar>>;
 
@@ -15,6 +17,7 @@ pub enum Type {
   String,
   Bool,
   Void,
+  Struct(String),
   Cell(Box<Type>),
   List(Box<Type>),
   Fn {
@@ -154,6 +157,7 @@ pub fn typecheck_named<'a>(
 
 struct Checker {
   schemes: HashMap<(String, String), FnScheme>,
+  structs: HashMap<String, StructAst>,
   next_var: usize,
   inference_vars: Vec<TvRef>,
 }
@@ -162,6 +166,7 @@ impl Checker {
   fn new<'a>(builtins: impl IntoIterator<Item = (&'a str, &'a str, &'a BuiltinSignature)>) -> Self {
     let mut checker = Self {
       schemes: HashMap::new(),
+      structs: HashMap::new(),
       next_var: 0,
       inference_vars: Vec::new(),
     };
@@ -176,9 +181,34 @@ impl Checker {
 
   fn check(mut self, asts: &[AST]) -> Result<(), TypeError> {
     for ast in asts {
+      if let ASTKind::DefineStruct(struct_) = &ast.kind {
+        if self.structs.contains_key(&struct_.name) {
+          return Err(
+            TypeError::new(format!("duplicate struct `{}`", struct_.name)).at(ast.span.clone()),
+          );
+        }
+        self.structs.insert(struct_.name.clone(), struct_.clone());
+      };
+    }
+
+    for ast in asts {
+      if let ASTKind::DefineStruct(struct_) = &ast.kind {
+        self.validate_struct(struct_).map_err(|error| {
+          error
+            .context(format!("in struct `{}`", struct_.name))
+            .at(ast.span.clone())
+        })?;
+      }
+    }
+
+    for ast in asts {
       let ASTKind::DefineFn(function) = &ast.kind else {
+        if matches!(ast.kind, ASTKind::DefineStruct(_)) {
+          continue;
+        }
         return Err(
-          TypeError::new("only function definitions are allowed at top level").at(ast.span.clone()),
+          TypeError::new("only function and struct definitions are allowed at top level")
+            .at(ast.span.clone()),
         );
       };
       let key = ("main".to_string(), function.name.clone());
@@ -206,6 +236,17 @@ impl Checker {
               .at(ast.span.clone())
           })?;
       }
+    }
+    Ok(())
+  }
+
+  fn validate_struct(&self, struct_: &StructAst) -> Result<(), TypeError> {
+    let mut seen = HashSet::new();
+    for (field, ty) in &struct_.fields {
+      if !seen.insert(field) {
+        return Err(TypeError::new(format!("duplicate field `{field}`")));
+      }
+      self.resolve_type(ty, &HashMap::new())?;
     }
     Ok(())
   }
@@ -262,11 +303,19 @@ impl Checker {
       ASTKind::String(_) => Ok(Type::String),
       ASTKind::Bool(_) => Ok(Type::Bool),
       ASTKind::Variable(name) => self.resolve_bare(env, name),
-      ASTKind::FunctionRef(module, name) => self.resolve_scheme(module, name),
+      ASTKind::FunctionRef(module, name) => {
+        if let Some(binding) = env.get(module).cloned() {
+          let receiver =
+            self.instantiate_binding(binding, Some(format!("field receiver `{module}`")))?;
+          self.field_type(receiver, name)
+        } else {
+          self.resolve_scheme(module, name)
+        }
+      }
       ASTKind::Let(name, annotation, expression) => {
         let inferred = self.infer(env, type_vars, expression)?;
         if let Some(annotation) = annotation {
-          let expected = resolve_type(annotation, type_vars)?;
+          let expected = self.resolve_type(annotation, type_vars)?;
           self
             .unify(inferred.clone(), expected)
             .map_err(|error| error.at(expression.span.clone()))?;
@@ -314,6 +363,11 @@ impl Checker {
       ASTKind::CallFixed(identifier, args) => {
         self.infer_fixed_call(env, type_vars, identifier, args)
       }
+      ASTKind::NewStruct(name, fields) => self.infer_new_struct(env, type_vars, name, fields),
+      ASTKind::FieldAccess(receiver, field) => {
+        let receiver = self.infer(env, type_vars, receiver)?;
+        self.field_type(receiver, field)
+      }
       ASTKind::If(condition, then_branch, else_branch) => {
         let condition_type = self.infer(env, type_vars, condition)?;
         self
@@ -339,6 +393,72 @@ impl Checker {
       ASTKind::PartialApply(_, _) => Err(TypeError::new(
         "internal transformed AST reached the source typechecker",
       )),
+      ASTKind::DefineStruct(_) => Err(TypeError::new(
+        "struct definitions are only allowed at top level",
+      )),
+    }
+  }
+
+  fn infer_new_struct(
+    &mut self,
+    env: &mut Env,
+    type_vars: &TypeVars,
+    name: &str,
+    fields: &[(String, AST)],
+  ) -> Result<Type, TypeError> {
+    let struct_ = self
+      .structs
+      .get(name)
+      .cloned()
+      .ok_or_else(|| TypeError::new(format!("unknown struct `{name}`")))?;
+    let mut provided = HashSet::new();
+    for (field, expr) in fields {
+      if !provided.insert(field.as_str()) {
+        return Err(TypeError::new(format!(
+          "duplicate initializer for field `{field}`"
+        )));
+      }
+      let expected = struct_
+        .fields
+        .iter()
+        .find(|(expected, _)| expected == field)
+        .ok_or_else(|| TypeError::new(format!("unknown field `{field}` for struct `{name}`")))?;
+      let actual = self.infer(env, type_vars, expr)?;
+      let expected = self.resolve_type(&expected.1, type_vars)?;
+      self.unify(actual, expected).map_err(|error| {
+        error
+          .at(expr.span.clone())
+          .context(format!("while checking field `{field}` of `{name}`"))
+      })?;
+    }
+    for (field, _) in &struct_.fields {
+      if !provided.contains(field.as_str()) {
+        return Err(TypeError::new(format!(
+          "missing initializer for field `{field}` of `{name}`"
+        )));
+      }
+    }
+    Ok(Type::Struct(name.to_string()))
+  }
+
+  fn field_type(&self, receiver: Type, field: &str) -> Result<Type, TypeError> {
+    match prune(&receiver) {
+      Type::Struct(name) => {
+        let struct_ = self
+          .structs
+          .get(&name)
+          .ok_or_else(|| TypeError::new(format!("unknown struct `{name}`")))?;
+        let (_, ty) = struct_
+          .fields
+          .iter()
+          .find(|(name, _)| name == field)
+          .ok_or_else(|| TypeError::new(format!("struct `{name}` has no field `{field}`")))?;
+        self.resolve_type(ty, &HashMap::new())
+      }
+      other => Err(TypeError::new(format!(
+        "field access expected a struct, got `{}`",
+        display_type(&other)
+      ))),
     }
   }
 
@@ -385,8 +505,19 @@ impl Checker {
       Identifier::Qualified(module, name) => {
         self.schemes.get(&(module.clone(), name.clone())).cloned()
       }
+    };
+    if let Identifier::Qualified(receiver, field) = identifier {
+      if args.is_empty() {
+        if let Some(binding) = env.get(receiver).cloned() {
+          let receiver =
+            self.instantiate_binding(binding, Some(format!("field receiver `{receiver}`")))?;
+          return self.field_type(receiver, field);
+        }
+      }
     }
-    .ok_or_else(|| TypeError::new(format!("unknown function `{label}`")))?;
+    let Some(scheme) = scheme else {
+      return Err(TypeError::new(format!("unknown function `{label}`")));
+    };
 
     let instantiated = self.instantiate(&scheme, Some(format!("call to `{label}`")));
     let minimum = instantiated.params.len();
@@ -462,10 +593,10 @@ impl Checker {
           function.name
         ))
       })?;
-      collect_type_vars(annotation, &mut names)?;
+      self.collect_type_vars(annotation, &mut names)?;
     }
     if let Some(ret) = &function.return_type {
-      collect_type_vars(ret, &mut names)?;
+      self.collect_type_vars(ret, &mut names)?;
     }
 
     let own_names: HashSet<String> = names
@@ -508,12 +639,12 @@ impl Checker {
     let params = function
       .params
       .iter()
-      .map(|(_, annotation)| resolve_type(annotation.as_ref().unwrap(), &vars))
+      .map(|(_, annotation)| self.resolve_type(annotation.as_ref().unwrap(), &vars))
       .collect::<Result<Vec<_>, _>>()?;
     let ret = function
       .return_type
       .as_ref()
-      .map(|annotation| resolve_type(annotation, &vars))
+      .map(|annotation| self.resolve_type(annotation, &vars))
       .transpose()?
       .unwrap_or(Type::Void);
     Ok((
@@ -614,6 +745,7 @@ impl Checker {
       | (Type::String, Type::String)
       | (Type::Bool, Type::Bool)
       | (Type::Void, Type::Void) => Ok(()),
+      (Type::Struct(a), Type::Struct(b)) if a == b => Ok(()),
       (Type::Cell(a), Type::Cell(b)) | (Type::List(a), Type::List(b)) => self.unify(*a, *b),
       (
         Type::Fn {
@@ -808,6 +940,14 @@ impl Checker {
     }
     Ok(())
   }
+
+  fn resolve_type(&self, ast: &TypeAst, vars: &TypeVars) -> Result<Type, TypeError> {
+    resolve_type(ast, vars, &self.structs)
+  }
+
+  fn collect_type_vars(&self, ast: &TypeAst, names: &mut HashSet<String>) -> Result<(), TypeError> {
+    collect_type_vars(ast, names, &self.structs)
+  }
 }
 
 fn intersect_compatible_bindings(then_env: Env, else_env: &Env) -> Env {
@@ -858,6 +998,7 @@ fn types_equivalent(left: &Type, right: &Type) -> bool {
     | (Type::String, Type::String)
     | (Type::Bool, Type::Bool)
     | (Type::Void, Type::Void) => true,
+    (Type::Struct(left), Type::Struct(right)) => left == right,
     (Type::Cell(left), Type::Cell(right)) | (Type::List(left), Type::List(right)) => {
       types_equivalent(&left, &right)
     }
@@ -890,7 +1031,11 @@ fn types_equivalent(left: &Type, right: &Type) -> bool {
   }
 }
 
-fn resolve_type(ast: &TypeAst, vars: &TypeVars) -> Result<Type, TypeError> {
+fn resolve_type(
+  ast: &TypeAst,
+  vars: &TypeVars,
+  structs: &HashMap<String, StructAst>,
+) -> Result<Type, TypeError> {
   match ast {
     TypeAst::Named(name) => match name.as_str() {
       "Int" => Ok(Type::Int),
@@ -901,6 +1046,7 @@ fn resolve_type(ast: &TypeAst, vars: &TypeVars) -> Result<Type, TypeError> {
       "List" | "Cell" | "Fn" => Err(TypeError::new(format!(
         "type constructor `{name}` requires arguments"
       ))),
+      _ if structs.contains_key(name) => Ok(Type::Struct(name.clone())),
       _ => vars
         .get(name)
         .cloned()
@@ -908,8 +1054,8 @@ fn resolve_type(ast: &TypeAst, vars: &TypeVars) -> Result<Type, TypeError> {
         .ok_or_else(|| TypeError::new(format!("unknown type `{name}`"))),
     },
     TypeAst::Apply(name, args) => match (name.as_str(), args.as_slice()) {
-      ("List", [item]) => Ok(Type::List(Box::new(resolve_type(item, vars)?))),
-      ("Cell", [item]) => Ok(Type::Cell(Box::new(resolve_type(item, vars)?))),
+      ("List", [item]) => Ok(Type::List(Box::new(resolve_type(item, vars, structs)?))),
+      ("Cell", [item]) => Ok(Type::Cell(Box::new(resolve_type(item, vars, structs)?))),
       ("List" | "Cell", _) => Err(TypeError::new(format!(
         "type constructor `{name}` expects one argument, got {}",
         args.len()
@@ -919,18 +1065,22 @@ fn resolve_type(ast: &TypeAst, vars: &TypeVars) -> Result<Type, TypeError> {
     TypeAst::Fn(params, rest, ret) => Ok(Type::Fn {
       params: params
         .iter()
-        .map(|param| resolve_type(param, vars))
+        .map(|param| resolve_type(param, vars, structs))
         .collect::<Result<Vec<_>, _>>()?,
       rest: rest
         .as_ref()
-        .map(|rest| resolve_type(rest, vars).map(Box::new))
+        .map(|rest| resolve_type(rest, vars, structs).map(Box::new))
         .transpose()?,
-      ret: Box::new(resolve_type(ret, vars)?),
+      ret: Box::new(resolve_type(ret, vars, structs)?),
     }),
   }
 }
 
-fn collect_type_vars(ast: &TypeAst, names: &mut HashSet<String>) -> Result<(), TypeError> {
+fn collect_type_vars(
+  ast: &TypeAst,
+  names: &mut HashSet<String>,
+  structs: &HashMap<String, StructAst>,
+) -> Result<(), TypeError> {
   match ast {
     TypeAst::Named(name) => match name.as_str() {
       "Int" | "Float" | "String" | "Bool" | "Void" => {}
@@ -939,6 +1089,7 @@ fn collect_type_vars(ast: &TypeAst, names: &mut HashSet<String>) -> Result<(), T
           "type constructor `{name}` requires arguments"
         )))
       }
+      _ if structs.contains_key(name) => {}
       _ if name.chars().next().is_some_and(char::is_uppercase) => {
         names.insert(name.clone());
       }
@@ -954,16 +1105,16 @@ fn collect_type_vars(ast: &TypeAst, names: &mut HashSet<String>) -> Result<(), T
           args.len()
         )));
       }
-      collect_type_vars(&args[0], names)?;
+      collect_type_vars(&args[0], names, structs)?;
     }
     TypeAst::Fn(params, rest, ret) => {
       for param in params {
-        collect_type_vars(param, names)?;
+        collect_type_vars(param, names, structs)?;
       }
       if let Some(rest) = rest {
-        collect_type_vars(rest, names)?;
+        collect_type_vars(rest, names, structs)?;
       }
-      collect_type_vars(ret, names)?;
+      collect_type_vars(ret, names, structs)?;
     }
   }
   Ok(())
@@ -1100,6 +1251,7 @@ fn display_type(ty: &Type) -> String {
     Type::String => "String".to_string(),
     Type::Bool => "Bool".to_string(),
     Type::Void => "Void".to_string(),
+    Type::Struct(name) => name,
     Type::Cell(item) => format!("(Cell {})", display_type(&item)),
     Type::List(item) => format!("(List {})", display_type(&item)),
     Type::Fn { params, rest, ret } => {
@@ -1135,6 +1287,42 @@ mod tests {
        (fn main () ->Bool (block (id 1) (std.== (id \"x\") \"x\")))",
     )
     .unwrap();
+  }
+
+  #[test]
+  fn structs_typecheck_construction_and_field_access() {
+    check(
+      "(struct Foo x:Int y:(Cell Int))
+       (fn main () ->Int
+         (let foo (new Foo y:(std.cell 2) x:3))
+         foo.x)",
+    )
+    .unwrap();
+  }
+
+  #[test]
+  fn struct_construction_requires_known_fields() {
+    let error = check(
+      "(struct Foo x:Int)
+       (fn main () ->Foo
+         (new Foo x:1 y:2))",
+    )
+    .unwrap_err();
+    assert!(error.message.contains("unknown field `y`"), "{error}");
+  }
+
+  #[test]
+  fn struct_construction_requires_all_fields() {
+    let error = check(
+      "(struct Foo x:Int y:Int)
+       (fn main () ->Foo
+         (new Foo x:1))",
+    )
+    .unwrap_err();
+    assert!(
+      error.message.contains("missing initializer for field `y`"),
+      "{error}"
+    );
   }
 
   #[test]
