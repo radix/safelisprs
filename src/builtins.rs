@@ -505,7 +505,7 @@ pub fn default_builtins() -> Builtins {
       |_ctx, args| match args[0] {
         Value::Cell(cell) => Ok(cell.borrow().value),
         other => Err(format!(
-          "std.get: expected a Cell, got {}",
+          "std::get: expected a Cell, got {}",
           other.type_name()
         )),
       },
@@ -526,7 +526,7 @@ pub fn default_builtins() -> Builtins {
           Ok(Value::Void)
         }
         other => Err(format!(
-          "std.set!: expected a Cell, got {}",
+          "std::set!: expected a Cell, got {}",
           other.type_name()
         )),
       },
@@ -618,7 +618,7 @@ pub fn default_builtins() -> Builtins {
         }
       },
     ))
-    // (std.range start stop) -> List<Int>
+    // (std::range start stop) -> List<Int>
     //   Like Python's `list(range(start, stop))`: half-open, `[start, stop)`.
     //   `start >= stop` yields the empty list.
     .with_builtin(Builtin::contextual(
@@ -655,7 +655,7 @@ pub fn default_builtins() -> Builtins {
         }
       },
     ))
-    // (std.map list fn) -> List
+    // (std::map list fn) -> List
     //   Applies `fn` (a callable value: FunctionRef or Partial) to each element
     //   of `list` and collects the results into a new list. Implemented as a
     //   builtin with [`HostCtx`] access so it can synchronously invoke the
@@ -680,14 +680,14 @@ pub fn default_builtins() -> Builtins {
             SLVal::List(items) => items,
             _ => {
               return Err(format!(
-                "std.map: expected a List, got {}",
+                "std::map: expected a List, got {}",
                 list.type_name()
               ))
             }
           },
           _ => {
             return Err(format!(
-              "std.map: expected a List, got {}",
+              "std::map: expected a List, got {}",
               list.type_name()
             ))
           }
@@ -761,10 +761,10 @@ pub fn default_builtins() -> Builtins {
       },
     ))
     // ── rand module ────────────────────────────────────────────────────────
-    // (rand.rng seed "name") -> Cell(Int)
+    // (rand::rng seed "name") -> Cell(Int)
     //   Deterministically derives a new 64-bit seed from `seed` (Int) and
     //   `name` (String) using BLAKE3, and wraps it in a Cell so that
-    //   `rand.roll!` can mutate it in place. Same inputs always produce the
+    //   `rand::roll!` can mutate it in place. Same inputs always produce the
     //   same Cell contents; differing `name` or `seed` produces differing
     //   output.
     .with_builtin(Builtin::contextual_value(
@@ -783,7 +783,7 @@ pub fn default_builtins() -> Builtins {
           Value::Int(i) => i,
           other => {
             return Err(format!(
-              "rand.rng: expected Int seed, got {}",
+              "rand::rng: expected Int seed, got {}",
               other.type_name()
             ))
           }
@@ -793,14 +793,14 @@ pub fn default_builtins() -> Builtins {
             SLVal::String(s) => s.as_str(),
             _ => {
               return Err(format!(
-                "rand.rng: expected String name, got {}",
+                "rand::rng: expected String name, got {}",
                 name.type_name()
               ))
             }
           },
           other => {
             return Err(format!(
-              "rand.rng: expected String name, got {}",
+              "rand::rng: expected String name, got {}",
               other.type_name()
             ))
           }
@@ -810,7 +810,7 @@ pub fn default_builtins() -> Builtins {
         Ok(Value::Cell(Gc::new(ctx.mc(), RefLock::new(contents))))
       },
     ))
-    // (rand.roll! rng sides) -> Int
+    // (rand::roll! rng sides) -> Int
     //   Mutates the `rng` in place, advancing it to the next seed,
     //   and returns the roll (in `1..=sides`). The Cell is both the RNG state
     //   and (after the call) the advanced state, so callers don't need to
@@ -831,7 +831,7 @@ pub fn default_builtins() -> Builtins {
           Value::Cell(c) => c,
           other => {
             return Err(format!(
-              "rand.roll!: expected Cell rng, got {}",
+              "rand::roll!: expected Cell rng, got {}",
               other.type_name()
             ))
           }
@@ -840,19 +840,19 @@ pub fn default_builtins() -> Builtins {
           Value::Int(i) => i,
           other => {
             return Err(format!(
-              "rand.roll!: expected Int sides, got {}",
+              "rand::roll!: expected Int sides, got {}",
               other.type_name()
             ))
           }
         };
         if n <= 0 {
-          return Err(format!("rand.roll!: sides must be positive, got {}", n));
+          return Err(format!("rand::roll!: sides must be positive, got {}", n));
         }
         let s = match cell.borrow().value {
           Value::Int(i) => i,
           other => {
             return Err(format!(
-              "rand.roll!: expected Cell to hold an Int, got {}",
+              "rand::roll!: expected Cell to hold an Int, got {}",
               other.type_name()
             ))
           }
@@ -881,7 +881,7 @@ pub fn rand_rng(parent_seed: i64, name: &str) -> i64 {
 
 /// Roll a die with `sides` faces from `seed`. Returns `(roll, new_seed)` where
 /// `roll` is in `1..=sides` and `new_seed` is the advanced state, so callers
-/// thread it into the next `rand_roll` (or `rand.rng`) call. Pure and
+/// thread it into the next `rand_roll` (or `rand::rng`) call. Pure and
 /// deterministic: same inputs always yield the same outputs.
 pub fn rand_roll(seed: i64, sides: i64) -> (i64, i64) {
   // NEVER CHANGE THIS CODE
@@ -997,38 +997,38 @@ mod test {
     let ptr = std::mem::size_of::<Value<'static>>();
     let cases = [
       (
-        format!("(fn main () ->String (std.concat \"{large}\" \"{large}\"))"),
+        format!("(fn main () ->String (std::concat \"{large}\" \"{large}\"))"),
         2,
         1024,
       ),
       (
-        "(fn main () ->(List Int) (std.list 1 2 3 4))".to_string(),
+        "(fn main () ->(List Int) (std::list 1 2 3 4))".to_string(),
         4,
         4 * ptr,
       ),
       (
-        "(fn main () ->(List Int) (std.push (std.list 1 2 3) 4))".to_string(),
+        "(fn main () ->(List Int) (std::push (std::list 1 2 3) 4))".to_string(),
         2,
         4 * ptr,
       ),
       (
-        "(fn main () ->(List Int) (std.range 0 10000))".to_string(),
+        "(fn main () ->(List Int) (std::range 0 10000))".to_string(),
         2,
         10_000 * ptr,
       ),
       (
-        "(fn main () ->(List Int) (fn id (x:Int) ->Int x) (std.map (std.list 1 2 3) id))"
+        "(fn main () ->(List Int) (fn id (x:Int) ->Int x) (std::map (std::list 1 2 3) id))"
           .to_string(),
         2,
         3 * ptr,
       ),
       (
-        "(fn main () ->(List Int) (std.slice (std.list 1 2 3 4) 1 3))".to_string(),
+        "(fn main () ->(List Int) (std::slice (std::list 1 2 3 4) 1 3))".to_string(),
         3,
         2 * ptr,
       ),
       (
-        format!("(fn main () ->String (std.slice \"{large}\" 0 512))"),
+        format!("(fn main () ->String (std::slice \"{large}\" 0 512))"),
         3,
         large.len(),
       ),
@@ -1042,7 +1042,7 @@ mod test {
   #[test]
   fn list_idx_returns_the_existing_value_without_cloning() {
     let large = "x".repeat(64 * 1024);
-    let source = format!("(fn main () ->String (std.idx (std.list \"{large}\") 0))");
+    let source = format!("(fn main () ->String (std::idx (std::list \"{large}\") 0))");
     let mut exec = before_final_call(&source);
     let scratch_bytes = 2 * std::mem::size_of::<Value<'static>>();
     exec.set_memory_limit(Some(exec.memory_usage() + scratch_bytes));
@@ -1059,7 +1059,7 @@ mod test {
   #[test]
   fn builtin_argument_buffer_is_reserved_before_allocation() {
     let source = format!(
-      "(fn main () ->(List Int) (std.list {}))",
+      "(fn main () ->(List Int) (std::list {}))",
       (0..128)
         .map(|i| i.to_string())
         .collect::<Vec<_>>()
@@ -1077,7 +1077,7 @@ mod test {
 
   #[test]
   fn range_reserves_result_buffer_before_allocation() {
-    let mut exec = before_final_call("(fn main () ->(List Int) (std.range 0 10000))");
+    let mut exec = before_final_call("(fn main () ->(List Int) (std::range 0 10000))");
     let value_bytes = std::mem::size_of::<Value<'static>>();
     let scratch_bytes = 2 * value_bytes;
     let result_vec_bytes = 10_000 * value_bytes;
@@ -1097,20 +1097,20 @@ mod test {
   #[test]
   fn string_slicing_uses_character_indices() {
     assert_eq!(
-      eval_builtin_main("(fn main () ->String (std.slice \"aé🦀z\" 1 3))").unwrap(),
+      eval_builtin_main("(fn main () ->String (std::slice \"aé🦀z\" 1 3))").unwrap(),
       SLValue::String("é🦀".to_string())
     );
     assert_eq!(
-      eval_builtin_main("(fn main () ->String (std.slice \"aé🦀z\" -3 -1))").unwrap(),
+      eval_builtin_main("(fn main () ->String (std::slice \"aé🦀z\" -3 -1))").unwrap(),
       SLValue::String("é🦀".to_string())
     );
     assert_eq!(
-      eval_builtin_main("(fn main () ->String (std.slice \"aé🦀z\" -2 -1))").unwrap(),
+      eval_builtin_main("(fn main () ->String (std::slice \"aé🦀z\" -2 -1))").unwrap(),
       SLValue::String("🦀".to_string())
     );
   }
 
-  /// End-to-end: the surface `(rand.rng seed "name")` returns a `Cell(Int)`
+  /// End-to-end: the surface `(rand::rng seed "name")` returns a `Cell(Int)`
   /// whose contents match [`rand_rng`] directly.
   #[rstest]
   #[case::alpha(0, "alpha", -1438303955140652998)]
@@ -1124,23 +1124,26 @@ mod test {
   #[case::big(123_456_789, "big", -7499502896394584729)]
   #[case::huge(-8_589_934_592, "huge", 5640261956235639084)]
   fn rand_rng_surface(#[case] seed: i64, #[case] name: &str, #[case] expected: i64) {
-    let source = format!("(fn main () ->(Cell Int) (rand.rng {} \"{}\"))", seed, name);
+    let source = format!(
+      "(fn main () ->(Cell Int) (rand::rng {} \"{}\"))",
+      seed, name
+    );
     let result = eval_builtin_main(&source).unwrap();
     match result {
       SLValue::Cell(inner) => {
         assert_eq!(
           *inner,
           SLValue::Int(expected),
-          "rand.rng {} {:?}",
+          "rand::rng {} {:?}",
           seed,
           name
         )
       }
-      other => panic!("expected Cell from rand.rng, got {:?}", other),
+      other => panic!("expected Cell from rand::rng, got {:?}", other),
     }
   }
 
-  /// End-to-end: `(rand.roll! rng sides)` mutates the Cell<Int> `rng` in place
+  /// End-to-end: `(rand::roll! rng sides)` mutates the Cell<Int> `rng` in place
   /// and returns the roll as an Int. Calling it 10 times against the same cell
   /// reproduces the expected 10-roll chain.
   #[rstest]
@@ -1155,16 +1158,16 @@ mod test {
   #[case::big(123_456_789, "big", [17, 8, 18, 16, 14, 11, 11, 4, 10, 9])]
   #[case::huge(-8_589_934_592, "huge", [4, 18, 7, 17, 11, 14, 15, 18, 1, 9])]
   fn rand_roll_surface_chain(#[case] seed: i64, #[case] name: &str, #[case] expected: [i64; 10]) {
-    // (std.map (std.range 0 10) (fn roll (_idx:Int) ->Int (rand.roll! rng 20)))
+    // (std::map (std::range 0 10) (fn roll (_idx:Int) ->Int (rand::roll! rng 20)))
     //
-    // `std.map` applies `roll` to each element of `(std.range 0 10)` and
+    // `std::map` applies `roll` to each element of `(std::range 0 10)` and
     // collects the rolls. `roll` ignores its argument (the index) and captures
-    // the explicit `rng` cell, which `rand.roll!` mutates.
+    // the explicit `rng` cell, which `rand::roll!` mutates.
     let src = format!(
       "(fn main () ->(List Int)\n\
-        (let rng (rand.rng {seed} \"{name}\"))\n\
-        (fn roll (_idx:Int) ->Int (rand.roll! rng 20))\n\
-        (std.map (std.range 0 10) roll))"
+        (let rng (rand::rng {seed} \"{name}\"))\n\
+        (fn roll (_idx:Int) ->Int (rand::roll! rng 20))\n\
+        (std::map (std::range 0 10) roll))"
     );
     let result = eval_builtin_main(&src).unwrap();
     let got: Vec<i64> = match result {
@@ -1175,16 +1178,16 @@ mod test {
           other => panic!("expected Int in roll list, got {:?}", other),
         })
         .collect(),
-      other => panic!("expected List from std.map, got {:?}", other),
+      other => panic!("expected List from std::map, got {:?}", other),
     };
     assert_eq!(got, expected.to_vec(), "seed={} name={:?}", seed, name);
   }
 
-  /// `std.range` produces a half-open list of ints, like Python's `range`.
+  /// `std::range` produces a half-open list of ints, like Python's `range`.
   #[test]
   fn range_basic() {
     assert_eq!(
-      eval_builtin_main("(fn main () ->(List Int) (std.range 0 5))").unwrap(),
+      eval_builtin_main("(fn main () ->(List Int) (std::range 0 5))").unwrap(),
       SLValue::List(vec![
         SLValue::Int(0),
         SLValue::Int(1),
@@ -1198,11 +1201,11 @@ mod test {
   #[test]
   fn range_empty() {
     assert_eq!(
-      eval_builtin_main("(fn main () ->(List Int) (std.range 3 3))").unwrap(),
+      eval_builtin_main("(fn main () ->(List Int) (std::range 3 3))").unwrap(),
       SLValue::List(vec![])
     );
     assert_eq!(
-      eval_builtin_main("(fn main () ->(List Int) (std.range 5 2))").unwrap(),
+      eval_builtin_main("(fn main () ->(List Int) (std::range 5 2))").unwrap(),
       SLValue::List(vec![])
     );
   }
@@ -1210,7 +1213,7 @@ mod test {
   #[test]
   fn range_negative_start() {
     assert_eq!(
-      eval_builtin_main("(fn main () ->(List Int) (std.range -2 2))").unwrap(),
+      eval_builtin_main("(fn main () ->(List Int) (std::range -2 2))").unwrap(),
       SLValue::List(vec![
         SLValue::Int(-2),
         SLValue::Int(-1),
@@ -1220,14 +1223,14 @@ mod test {
     );
   }
 
-  /// `std.map` applies a function to each element of a list.
+  /// `std::map` applies a function to each element of a list.
   #[test]
   fn map_doubles() {
     assert_eq!(
       eval_builtin_main(
         "(fn main () ->(List Int)
-           (fn dbl (x:Int) ->Int (std.+ x x))
-           (std.map (std.list 1 2 3) dbl))"
+           (fn dbl (x:Int) ->Int (std::+ x x))
+           (std::map (std::list 1 2 3) dbl))"
       )
       .unwrap(),
       SLValue::List(vec![SLValue::Int(2), SLValue::Int(4), SLValue::Int(6)])
@@ -1240,7 +1243,7 @@ mod test {
       eval_builtin_main(
         "(fn main () ->(List Int)
            (fn id (x:Int) ->Int x)
-           (std.map (std.list) id))"
+           (std::map (std::list) id))"
       )
       .unwrap(),
       SLValue::List(vec![])
@@ -1252,8 +1255,8 @@ mod test {
     assert_eq!(
       eval_builtin_main(
         "(fn main () ->(List Int)
-           (fn inc (x:Int) ->Int (std.+ x 1))
-           (std.map (std.range 0 5) inc))"
+           (fn inc (x:Int) ->Int (std::+ x 1))
+           (std::map (std::range 0 5) inc))"
       )
       .unwrap(),
       SLValue::List(vec![
@@ -1271,31 +1274,31 @@ mod test {
     let err = eval_builtin_main(
       "(fn main () ->Int
          (fn id (x:Int) ->Int x)
-         (std.map 5 id))",
+         (std::map 5 id))",
     )
     .unwrap_err();
     assert!(err.contains("expected `(List"), "got: {}", err);
   }
 
-  /// `rand.roll!` rejects non-positive sides with a runtime error.
+  /// `rand::roll!` rejects non-positive sides with a runtime error.
   #[test]
   fn rand_roll_rejects_non_positive_sides() {
     let err =
-      eval_builtin_main("(fn main () ->Int (rand.roll! (rand.rng 0 \"x\") 0))").unwrap_err();
+      eval_builtin_main("(fn main () ->Int (rand::roll! (rand::rng 0 \"x\") 0))").unwrap_err();
     assert!(err.contains("sides must be positive"), "got: {}", err);
   }
 
-  /// `rand.roll!` rejects a non-Cell rng.
+  /// `rand::roll!` rejects a non-Cell rng.
   #[test]
   fn rand_roll_rejects_non_cell_rng() {
-    let err = eval_builtin_main("(fn main () ->Int (rand.roll! \"not-a-cell\" 6))").unwrap_err();
+    let err = eval_builtin_main("(fn main () ->Int (rand::roll! \"not-a-cell\" 6))").unwrap_err();
     assert!(err.contains("expected `(Cell Int)`"), "got: {}", err);
   }
 
-  /// `rand.rng` rejects non-Int seeds.
+  /// `rand::rng` rejects non-Int seeds.
   #[test]
   fn rand_rng_rejects_non_int_seed() {
-    let err = eval_builtin_main("(fn main () ->Int (rand.rng \"x\" \"name\"))").unwrap_err();
+    let err = eval_builtin_main("(fn main () ->Int (rand::rng \"x\" \"name\"))").unwrap_err();
     assert!(err.contains("expected `Int`"), "got: {}", err);
   }
 }

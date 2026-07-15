@@ -23,13 +23,13 @@ return type is `Void`; local `let` bindings are inferred and may optionally be
 annotated:
 
 ```lisp
-(fn double (x:Int) ->Int (std.+ x x))
+(fn double (x:Int) ->Int (std::+ x x))
 
 (fn map-double (xs:(List Int)) ->(List Int)
-  (std.map xs double))
+  (std::map xs double))
 
 (fn generic-double (x:A) ->A where ((A Add))
-  (std.+ x x))
+  (std::+ x x))
 ```
 
 ## TODO

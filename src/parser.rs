@@ -30,11 +30,10 @@ pub enum ASTKind {
   NewStruct(String, Vec<(String, AST)>),
   FieldAccess(Box<AST>, String),
 
-  // The following variants aren't represented in the syntax, but are produced
-  // by transformations on the previous variants.
   /// Bind up some arguments with a callable. This is used for closure captures.
+  /// Not represented directly in source syntax.
   PartialApply(Box<AST>, Vec<AST>),
-  /// Get a reference to a function.
+  /// Get a reference to a function. Source syntax is `module::function`.
   FunctionRef(String, String),
   /// Conditional: evaluate `cond`; if truthy, evaluate `then`, else evaluate `els`.
   If(Box<AST>, Box<AST>, Box<AST>),
@@ -96,6 +95,10 @@ impl AST {
   pub(crate) fn FunctionRef(module: String, name: String) -> Self {
     Self::synthetic(ASTKind::FunctionRef(module, name))
   }
+
+  pub(crate) fn FieldAccess(receiver: AST, field: String) -> Self {
+    Self::synthetic(ASTKind::FieldAccess(Box::new(receiver), field))
+  }
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -147,6 +150,7 @@ enum TokenKind {
   LParen,
   RParen,
   Colon,
+  DoubleColon,
   Arrow,
   Sym(String),
   Int(i64),
@@ -247,6 +251,14 @@ impl<'a> Lexer<'a> {
           self.bump_char();
           Token {
             kind: TokenKind::RParen,
+            span: start..self.offset,
+          }
+        }
+        ':' if self.source[self.offset..].starts_with("::") => {
+          self.bump_char();
+          self.bump_char();
+          Token {
+            kind: TokenKind::DoubleColon,
             span: start..self.offset,
           }
         }
@@ -444,10 +456,20 @@ impl Parser {
       TokenKind::RParen => {
         Err(ParseError::new(token.span, "unexpected `)`").expected("an expression"))
       }
-      TokenKind::Colon | TokenKind::Arrow => {
+      TokenKind::Colon | TokenKind::DoubleColon | TokenKind::Arrow => {
         Err(ParseError::new(token.span, "unexpected type-syntax token").expected("an expression"))
       }
-      TokenKind::Sym(name) => Ok(ast_from_symbol(name, token.span)),
+      TokenKind::Sym(name) => {
+        if matches!(self.peek().kind, TokenKind::DoubleColon) {
+          let (identifier, span) = self.parse_qualified_identifier(name, token.span)?;
+          let Identifier::Qualified(module, name) = identifier else {
+            unreachable!("qualified parser always returns a qualified identifier")
+          };
+          Ok(AST::new(ASTKind::FunctionRef(module, name), span))
+        } else {
+          Ok(ast_from_symbol(name, token.span))
+        }
+      }
       TokenKind::Int(value) => Ok(AST::new(ASTKind::Int(value), token.span)),
       TokenKind::Float(value) => Ok(AST::new(ASTKind::Float(value), token.span)),
       TokenKind::Str(value) => Ok(AST::new(ASTKind::String(value), token.span)),
@@ -691,10 +713,29 @@ impl Parser {
     let TokenKind::Sym(name) = head.kind else {
       unreachable!("fixed calls have symbol heads")
     };
-    let identifier = parse_identifier(&name);
+    let (identifier, head_span) = if matches!(self.peek().kind, TokenKind::DoubleColon) {
+      self.parse_qualified_identifier(name, head.span)?
+    } else {
+      (Identifier::Bare(name), head.span)
+    };
     let (args, close) = self.parse_call_args()?;
     let span = start..close.span.end;
-    Ok(AST::new(ASTKind::CallFixed(identifier, args), span))
+    match identifier {
+      Identifier::Bare(name) => {
+        let callee = ast_from_symbol(name, head_span);
+        match callee.kind {
+          ASTKind::Variable(name) => Ok(AST::new(
+            ASTKind::CallFixed(Identifier::Bare(name), args),
+            span,
+          )),
+          _ => Ok(AST::new(ASTKind::Call(Box::new(callee), args), span)),
+        }
+      }
+      Identifier::Qualified(module, name) => Ok(AST::new(
+        ASTKind::CallFixed(Identifier::Qualified(module, name), args),
+        span,
+      )),
+    }
   }
 
   fn parse_dynamic_call(&mut self, start: usize) -> Result<AST, ParseError> {
@@ -717,6 +758,24 @@ impl Parser {
       args.push(self.parse_expr()?);
     }
     Ok((args, self.advance()))
+  }
+
+  fn parse_qualified_identifier(
+    &mut self,
+    module: String,
+    start_span: Span,
+  ) -> Result<(Identifier, Span), ParseError> {
+    self.advance();
+    let token = self.advance();
+    match token.kind {
+      TokenKind::Sym(name) => {
+        let span = start_span.start..token.span.end;
+        Ok((Identifier::Qualified(module, name), span))
+      }
+      _ => {
+        Err(ParseError::new(token.span, "`::` must be followed by a symbol").expected("a symbol"))
+      }
+    }
   }
 
   fn expect_symbol(&mut self, message: &'static str) -> Result<String, ParseError> {
@@ -847,22 +906,28 @@ fn ast_from_symbol(name: String, span: Span) -> AST {
   let kind = match name.as_str() {
     "true" => ASTKind::Bool(true),
     "false" => ASTKind::Bool(false),
-    _ => match parse_identifier(&name) {
-      Identifier::Bare(name) => ASTKind::Variable(name),
-      Identifier::Qualified(module, name) => ASTKind::FunctionRef(module, name),
-    },
+    _ => return ast_from_variable_or_field_access(name, span),
   };
   AST::new(kind, span)
 }
 
-fn parse_identifier(name: &str) -> Identifier {
-  if name == "..." {
-    return Identifier::Bare(name.to_string());
+fn ast_from_variable_or_field_access(name: String, span: Span) -> AST {
+  if name == "..." || !name.contains('.') || name.split('.').any(str::is_empty) {
+    return AST::new(ASTKind::Variable(name), span);
   }
-  match name.split_once('.') {
-    Some((module, name)) => Identifier::Qualified(module.to_string(), name.to_string()),
-    None => Identifier::Bare(name.to_string()),
+
+  let mut parts = name.split('.');
+  let first = parts
+    .next()
+    .expect("contains('.') ensures at least one component");
+  let mut ast = AST::new(ASTKind::Variable(first.to_string()), span.clone());
+  for field in parts {
+    ast = AST::new(
+      ASTKind::FieldAccess(Box::new(ast), field.to_string()),
+      span.clone(),
+    );
   }
+  ast
 }
 
 fn parse_internal(source: &str) -> Result<Vec<AST>, ParseError> {
@@ -885,8 +950,8 @@ mod test {
   }
 
   #[test]
-  fn dotted_symbol_in_value_position_is_a_function_ref() {
-    let result = read_multiple("std.len").unwrap();
+  fn qualified_symbol_in_value_position_is_a_function_ref() {
+    let result = read_multiple("std::len").unwrap();
     assert_eq!(
       result,
       vec![AST::FunctionRef("std".to_string(), "len".to_string())]
@@ -894,14 +959,41 @@ mod test {
   }
 
   #[test]
-  fn dotted_symbol_in_call_head_is_a_qualified_fixed_call() {
-    let result = read_multiple("(std.+ 1 2)").unwrap();
+  fn dotted_symbol_in_value_position_is_field_access() {
+    let result = read_multiple("foo.bar.baz").unwrap();
+    assert_eq!(
+      result,
+      vec![AST::FieldAccess(
+        AST::FieldAccess(AST::Variable("foo".to_string()), "bar".to_string()),
+        "baz".to_string(),
+      )]
+    );
+  }
+
+  #[test]
+  fn qualified_symbol_in_call_head_is_a_qualified_fixed_call() {
+    let result = read_multiple("(std::+ 1 2)").unwrap();
     assert_eq!(
       result,
       vec![AST::CallFixed(
         Identifier::Qualified("std".to_string(), "+".to_string()),
         vec![AST::Int(1), AST::Int(2)],
       )]
+    );
+  }
+
+  #[test]
+  fn dotted_symbol_in_call_head_is_a_dynamic_field_call() {
+    let result = read_multiple("(foo.bar 3)").unwrap();
+    assert_eq!(
+      result,
+      vec![AST::synthetic(ASTKind::Call(
+        Box::new(AST::FieldAccess(
+          AST::Variable("foo".to_string()),
+          "bar".to_string(),
+        )),
+        vec![AST::Int(3)],
+      ))]
     );
   }
 
@@ -934,7 +1026,7 @@ mod test {
 
   #[test]
   fn parses_nested_functions() {
-    let result = read_multiple("(fn outer (x:Int) (fn inner (y:Int) ->Int (std.+ x y)) inner)");
+    let result = read_multiple("(fn outer (x:Int) (fn inner (y:Int) ->Int (std::+ x y)) inner)");
     assert!(result.is_ok(), "got: {result:?}");
   }
 

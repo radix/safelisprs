@@ -3,7 +3,7 @@ use std::process::Command;
 #[test]
 fn code_argument_compiles_and_executes_source() {
   let output = Command::new(env!("CARGO_BIN_EXE_sli"))
-    .args(["-c", "(fn main () ->Int (std.+ 1 2))"])
+    .args(["-c", "(fn main () ->Int (std::+ 1 2))"])
     .output()
     .expect("failed to run sli");
 
