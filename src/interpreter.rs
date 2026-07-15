@@ -387,6 +387,14 @@ impl<T> TrackedVec<T> {
   pub fn is_empty(&self) -> bool {
     self.inner.is_empty()
   }
+
+  /// Shorten the vector to `len`, dropping any elements beyond it. Used by
+  /// `Return` to discard a callee's entire stack segment after
+  /// extracting (or discarding) its result, restoring the caller's view. Does
+  /// not shrink capacity, so no reconcile is needed.
+  pub fn truncate(&mut self, len: usize) {
+    self.inner.truncate(len);
+  }
 }
 
 impl<T> std::ops::Index<usize> for TrackedVec<T> {
@@ -493,6 +501,10 @@ impl<'gc> ExecRoot<'gc> {
 struct Frame<'gc> {
   function: FrameFunc,
   locals: TrackedVec<Gc<'gc, Accounted<'gc>>>,
+  /// The index into the global `stack` at which this frame's segment begins.
+  /// Everything at or above this index belongs to this frame or its callees.
+  /// When we return, we can truncate to this and push the return value.
+  stack_base: usize,
   ip: usize,
 }
 
@@ -1052,6 +1064,17 @@ impl<'gc> ExecRoot<'gc> {
       .ok_or_else(|| "POP on an empty stack".to_string())
   }
 
+  /// The `stack_base` of the current (top) frame: the index into the global
+  /// stack at which the current frame's segment begins. This is where we can
+  /// truncate when returning from a function.
+  fn frame_stack_base(&self) -> Result<usize, String> {
+    self
+      .frames
+      .last()
+      .map(|f| f.stack_base)
+      .ok_or_else(|| "Return with no frame".to_string())
+  }
+
   /// Run up to `n` bytecodes starting from `start` executed count. Returns
   /// `Paused` if the budget exhausted before completion, or `Done(v)` if the
   /// program completed. Errors propagate via `Err`.
@@ -1197,8 +1220,22 @@ impl<'gc> ExecRoot<'gc> {
         self.pop()?;
       }
       Instruction::Return => {
-        // Pop the top frame; the return value stays on self.stack.
+        // Pop the top frame and everything within it on the global stack, then
+        // push the return value.
+        let stack_base = self.frame_stack_base()?;
+        if self.stack.len() != stack_base + 1 {
+          return Err(format!(
+            "Return expects exactly one value in the frame segment, found {}",
+            self.stack.len().saturating_sub(stack_base)
+          ));
+        }
+        let result = self
+          .stack
+          .pop()
+          .ok_or_else(|| "Return with an empty frame segment".to_string())?;
+        self.stack.truncate(stack_base);
         self.frames.pop();
+        self.stack.push(result);
       }
       Instruction::SetLocal(i) => {
         let val = self.pop()?;
@@ -1487,9 +1524,13 @@ impl<'gc> ExecRoot<'gc> {
       locals[param_idx] = self.pop()?;
     }
     let locals = TrackedVec::from_vec(locals, self.tracker.clone());
+    // After all call arguments have been popped, the remaining stack belongs
+    // to the caller; record the boundary so `Return` can restore it.
+    let stack_base = self.stack.len();
     self.frames.push(Frame {
       function: FrameFunc::Indexed((mod_idx, func_idx)),
       locals,
+      stack_base,
       ip: 0,
     });
     Ok(())
@@ -1516,9 +1557,11 @@ impl<'gc> ExecRoot<'gc> {
       locals[param_idx] = self.pop()?;
     }
     let locals = TrackedVec::from_vec(locals, self.tracker.clone());
+    let stack_base = self.stack.len();
     self.frames.push(Frame {
       function: FrameFunc::inline(function, self.tracker.clone()),
       locals,
+      stack_base,
       ip: 0,
     });
     Ok(())
@@ -3475,5 +3518,248 @@ mod test {
       "got: {}",
       err
     );
+  }
+
+  // ---- Segmented stack tests ----
+
+  /// A value-returning callee transfers exactly its result to its caller and
+  /// leaves no stack garbage below it.
+  #[test]
+  fn value_returning_callee_transfers_exactly_its_result() {
+    let source = "
+      (fn id (a:Int) ->Int a)
+      (fn main () ->Int
+        (let a 1) (id 10) (let b 2) (id 20) (let c 3) (id 30))
+    ";
+    let pkg = compile_executable_from_source(source, ("main", "main"), &default_builtins().specs())
+      .unwrap();
+    let (mod_idx, fn_idx) = pkg.main.unwrap();
+    let function = pkg.get_function(mod_idx, fn_idx).cloned().unwrap();
+    if let Callable::Function(function) = function {
+      let mut exec = Execution::new(pkg, default_builtins());
+      exec.enter_function(function, vec![]).unwrap();
+      let result = exec.run_until_done().unwrap();
+      assert_eq!(result, SLValue::Int(30));
+      // run_until_done pops the final value; the stack should be empty.
+      assert_eq!(exec.stack_len(), 0);
+    }
+  }
+
+  /// A Void-returning callee discards a non-Void body result and transfers the
+  /// shared Void value to its caller. The body here is a non-Void `Int`; the
+  /// caller observes `Void`, and the Int must not leak onto the caller's
+  /// stack.
+  #[test]
+  fn void_returning_callee_discards_body_value() {
+    let source = "
+      (fn side (x:Int) (std.+ x 1))
+      (fn main () ->Void (side 5) (side 10))
+    ";
+    assert_eq!(eval_main(source), SLValue::Void);
+  }
+
+  /// Nested and recursive calls restore each caller's stack segment correctly:
+  /// after a deep recursion unwinds, only the final result remains.
+  #[test]
+  fn nested_recursive_calls_restore_stack_segments() {
+    let source = "
+      (fn sum (n:Int) ->Int
+        (if (std.== n 0) 0 (std.+ n (sum (std.- n 1)))))
+      (fn main () ->Int (sum 500))
+    ";
+    assert_eq!(eval_main(source), SLValue::Int(125_250));
+  }
+
+  /// Dynamic calls and partial applications obey the same frame boundary: a
+  /// partial application's bound args do not leak into the caller's segment.
+  /// Partial applications arise from the closure transform (a closure
+  /// captures its environment via `PartialApply`), so we exercise the boundary
+  /// through a capturing closure.
+  #[test]
+  fn dynamic_call_and_partial_obey_frame_boundary() {
+    let source = "
+      (fn add (a:Int b:Int) ->Int (std.+ a b))
+      (fn make-adder (a:Int) ->(Fn (Int) -> Int)
+        (fn adder (b:Int) ->Int (add a b)))
+      (fn main () ->Int
+        (let add5 (make-adder 5))
+        (add5 10))
+    ";
+    assert_eq!(eval_main(source), SLValue::Int(15));
+    // And a fully dynamic call via a local.
+    let source2 = "
+      (fn double (x:Int) ->Int (std.+ x x))
+      (fn main () ->Int (let f double) (f 21))
+    ";
+    assert_eq!(eval_main(source2), SLValue::Int(42));
+  }
+
+  /// Malformed inline bytecode returning zero values reports a clear
+  /// stack-imbalance error rather than consuming caller values.
+  #[test]
+  fn return_with_empty_frame_segment_errors() {
+    let code = compiler::Function {
+      num_locals: 0,
+      num_params: 0,
+      instructions: vec![
+        Instruction::PushInt(1),
+        Instruction::Pop,
+        Instruction::Return,
+      ],
+    };
+    let mut exec = Execution::new(Package::default(), default_builtins());
+    exec.enter_function(code, vec![]).unwrap();
+    let err = exec.run_until_done().unwrap_err();
+    assert!(
+      err.contains("Return expects exactly one value"),
+      "unexpected error: {}",
+      err
+    );
+  }
+
+  /// Malformed inline bytecode returning multiple values reports a clear
+  /// stack-imbalance error rather than leaking extras into the caller.
+  #[test]
+  fn return_with_multiple_frame_values_errors() {
+    let pkg = Package::default();
+    let code = compiler::Function {
+      num_locals: 0,
+      num_params: 0,
+      instructions: vec![
+        Instruction::PushInt(1),
+        Instruction::PushInt(2),
+        Instruction::Return,
+      ],
+    };
+    let mut exec = Execution::new(pkg, default_builtins());
+    exec.enter_function(code, vec![]).unwrap();
+    let err = exec.run_until_done().unwrap_err();
+    assert!(
+      err.contains("Return expects exactly one value"),
+      "unexpected error: {}",
+      err
+    );
+  }
+
+  /// A top-level Void function completes with `SLValue::Void` and leaves no
+  /// stack garbage.
+  #[test]
+  fn top_level_void_function_completes_with_void() {
+    let source = "(fn main () (let a 1) (let b 2) (std.+ a b))";
+    let pkg = compile_executable_from_source(source, ("main", "main"), &default_builtins().specs())
+      .unwrap();
+    let interp = Interpreter::new(pkg);
+    let mut exec = interp.call_main().unwrap();
+    let result = exec.run_until_done().unwrap();
+    assert_eq!(result, SLValue::Void);
+    assert_eq!(exec.stack_len(), 0);
+  }
+
+  /// Two Void functions with different hidden body values still compare equal
+  /// as Void (the body values are discarded by `Pop`; each returns a fresh
+  /// `Gc<SLVal::Void>`).
+  #[test]
+  fn two_void_functions_with_different_body_values_compare_equal_as_void() {
+    let source = "
+      (fn one () 1)
+      (fn two () 2)
+      (fn main () ->Bool (std.== (one) (two)))
+    ";
+    assert_eq!(eval_main(source), SLValue::Bool(true));
+  }
+
+  /// Cover both omitted return types and explicit `->Void`.
+  #[test]
+  fn explicit_void_return_type() {
+    let source = "
+      (fn f (x:Int) ->Void (std.+ x 1))
+      (fn main () ->Void (f 5) (f 10))
+    ";
+    assert_eq!(eval_main(source), SLValue::Void);
+  }
+
+  /// `std.set!` still returns Void.
+  #[test]
+  fn std_set_still_returns_void() {
+    assert_eq!(
+      eval_main("(fn main () ->Void (let x (std.cell 1)) (std.set! x 11))"),
+      SLValue::Void
+    );
+  }
+
+  /// `HostCtx::call` with a value-returning callback returns the callee's
+  /// result, exercising the frame-boundary bookkeeping under a nested sub-loop.
+  #[test]
+  fn host_call_with_value_returning_callback() {
+    // A builtin that calls a guest function via HostCtx::call and returns its
+    // result, doubling it.
+    let builtins = default_builtins().with_builtin(Builtin::contextual(
+      "main",
+      "applydouble",
+      None,
+      sig(
+        &[],
+        vec![TypeConst::function(vec![TypeConst::Int], TypeConst::Int)],
+        None,
+        TypeConst::Int,
+      ),
+      |ctx, args| {
+        let f = args[0];
+        let arg = ctx.alloc_value(SLVal::Int(7));
+        let result = ctx.call(f, &[arg])?;
+        match &result.value {
+          SLVal::Int(n) => Ok(SLVal::Int(n * 2)),
+          other => Err(format!(
+            "expected Int from callback, got {}",
+            other.type_name()
+          )),
+        }
+      },
+    ));
+    let source = "
+      (fn dbl (x:Int) ->Int (std.+ x x))
+      (fn main () ->Int (applydouble dbl))
+    ";
+    let pkg = compile_executable_from_source(source, ("main", "main"), &builtins.specs()).unwrap();
+    let interp = Interpreter::with_builtins(pkg, builtins);
+    let mut exec = interp.call_main().unwrap();
+    assert_eq!(exec.run_until_done().unwrap(), SLValue::Int(28));
+  }
+
+  /// `HostCtx::call` with a Void-returning callback supplies a Void value in
+  /// the result slot, so the builtin sees Void.
+  #[test]
+  fn host_call_with_void_returning_callback() {
+    let builtins = default_builtins().with_builtin(Builtin::contextual(
+      "main",
+      "callvoid",
+      None,
+      sig(
+        &[],
+        vec![TypeConst::function(vec![TypeConst::Int], TypeConst::Void)],
+        None,
+        TypeConst::Bool,
+      ),
+      |ctx, args| {
+        let f = args[0];
+        let arg = ctx.alloc_value(SLVal::Int(7));
+        let result = ctx.call(f, &[arg])?;
+        match &result.value {
+          SLVal::Void => Ok(SLVal::Bool(true)),
+          other => Err(format!(
+            "expected Void from callback, got {}",
+            other.type_name()
+          )),
+        }
+      },
+    ));
+    let source = "
+      (fn voidy (x:Int) (std.+ x 1))
+      (fn main () ->Bool (callvoid voidy))
+    ";
+    let pkg = compile_executable_from_source(source, ("main", "main"), &builtins.specs()).unwrap();
+    let interp = Interpreter::with_builtins(pkg, builtins);
+    let mut exec = interp.call_main().unwrap();
+    assert_eq!(exec.run_until_done().unwrap(), SLValue::Bool(true));
   }
 }
