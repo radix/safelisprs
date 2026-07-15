@@ -1277,19 +1277,6 @@ impl<'gc> ExecRoot<'gc> {
           other => return Err(format!("Not a cell: {}", other.error_description())),
         }
       }
-      Instruction::SetCell => {
-        // Pop the Cell (TOS) and the new value (below it), point the Cell at
-        // that existing value, and push the same handle back as the result.
-        let cell_gc = self.pop()?;
-        let new_val = self.pop()?;
-        match &cell_gc.value {
-          SLVal::Cell(cell_ref) => {
-            Gc::write(mc, *cell_ref).unlock().borrow_mut().set(new_val);
-          }
-          other => return Err(format!("Not a cell: {}", other.error_description())),
-        }
-        self.stack.push(new_val);
-      }
       Instruction::PartialApply(num_args) => {
         self.partial_apply(mc, num_args)?;
       }
@@ -2842,41 +2829,6 @@ mod test {
     assert_eq!(
       exec.peek_value().unwrap(),
       SLValue::String("x".repeat(64 * 1024))
-    );
-  }
-
-  #[test]
-  fn set_cell_reuses_the_incoming_value_object() {
-    let function = compiler::Function {
-      num_locals: 1,
-      num_params: 0,
-      instructions: vec![
-        Instruction::PushString("old".repeat(16 * 1024)),
-        Instruction::MakeCell,
-        Instruction::SetLocal(0),
-        Instruction::PushString("new".repeat(16 * 1024)),
-        Instruction::LoadLocal(0),
-        Instruction::SetCell,
-        Instruction::Return,
-      ],
-    };
-    let mut exec = Execution::new(Package::default(), default_builtins());
-    exec.enter_function(function, vec![]).unwrap();
-
-    for _ in 0..5 {
-      exec.step().unwrap();
-    }
-    exec.set_memory_limit(Some(exec.memory_usage() + 4096));
-    let gc_before = exec.gc_count();
-
-    exec.step().unwrap(); // SetCell
-    assert!(
-      exec.gc_count() <= gc_before,
-      "SetCell allocated a duplicate value object"
-    );
-    assert_eq!(
-      exec.peek_value().unwrap(),
-      SLValue::String("new".repeat(16 * 1024))
     );
   }
 
