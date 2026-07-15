@@ -15,24 +15,24 @@ pub struct Package {
   pub main: Option<(u32, u32)>,
 }
 
-pub type LinkedCallable = Callable<(u32, u32)>;
-type CompiledCallable = Callable<(String, String)>;
+pub type LinkedCallable = Callable<(u32, u32), (u32, u32)>;
+type CompiledCallable = Callable<(String, String), (String, String)>;
 
 /// Packages contain Callables, which can either be LinkedFunctions or
 /// Builtins. This is so the interpreter can know whether it should fall back to
 /// the builtins when invoking a function. Builtin doesn't need a name because
 /// it's already in the Package::functions data.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum Callable<CallType> {
-  Function(Function<CallType>),
+pub enum Callable<CallType, StructType> {
+  Function(Function<CallType, StructType>),
   Builtin,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Function<CallType> {
+pub struct Function<CallType, StructType> {
   pub num_params: u16,
   pub num_locals: u16,
-  pub instructions: Vec<Instruction<CallType>>,
+  pub instructions: Vec<Instruction<CallType, StructType>>,
 }
 
 /// Instructions are parameterized by the representation of function calls.
@@ -42,7 +42,7 @@ pub struct Function<CallType> {
 /// TODO: This Instruction type is BIG. I'm guessing that reducing its size down
 /// to, say, 64 bits would lead to some wins?
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum Instruction<CallType> {
+pub enum Instruction<CallType, StructType> {
   /// loads local variable onto the stack
   LoadLocal(u16),
   /// assigns top of the stack to local variable.
@@ -52,6 +52,10 @@ pub enum Instruction<CallType> {
   PushString(String),
   PushBool(bool),
   PushVoid,
+  /// Pop all declared fields and allocate a heap-backed struct instance.
+  NewStruct(StructType),
+  /// Pop a struct value and push the field at this declaration-order offset.
+  GetField(u16),
   /// discards topmost stack item
   Pop,
   /// Call the function at `(module, function)` in the function table.
@@ -82,18 +86,37 @@ pub enum Instruction<CallType> {
   JumpIfFalse(u32),
 }
 
-pub type LinkedFunction = Function<(u32, u32)>;
-type CompiledFunction = Function<(String, String)>;
+pub type LinkedFunction = Function<(u32, u32), (u32, u32)>;
+type CompiledFunction = Function<(String, String), (String, String)>;
 
-type LinkedInstruction = Instruction<(u32, u32)>;
-type CompiledInstruction = Instruction<(String, String)>;
+type LinkedInstruction = Instruction<(u32, u32), (u32, u32)>;
+type CompiledInstruction = Instruction<(String, String), (String, String)>;
 
-type CompiledModule = Vec<(String, CompiledCallable)>;
-type CompiledModules = Vec<(String, CompiledModule)>;
-pub type LinkedModule = Vec<(String, LinkedCallable)>;
-pub type LinkedModules = Vec<(String, LinkedModule)>;
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StructDef {
+  pub name: String,
+  pub fields: Vec<String>,
+}
 
-type ModuleIndex = HashMap<String, (u32, HashMap<String, u32>)>;
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Module<CallType, StructType> {
+  pub name: String,
+  pub functions: Vec<(String, Callable<CallType, StructType>)>,
+  pub structs: Vec<StructDef>,
+}
+
+type CompiledModule = Module<(String, String), (String, String)>;
+type CompiledModules = Vec<CompiledModule>;
+pub type LinkedModule = Module<(u32, u32), (u32, u32)>;
+pub type LinkedModules = Vec<LinkedModule>;
+
+struct ModuleIndexEntry {
+  module: u32,
+  functions: HashMap<String, u32>,
+  structs: HashMap<String, u32>,
+}
+
+type ModuleIndex = HashMap<String, ModuleIndexEntry>;
 
 // This is what a Module should actually be, instead of a (u32, HashMap<String, u32>)
 // struct Module {
@@ -131,7 +154,7 @@ impl Package {
     }
   }
 
-  pub fn get_module(&self, mod_index: u32) -> Option<&(String, LinkedModule)> {
+  pub fn get_module(&self, mod_index: u32) -> Option<&LinkedModule> {
     self.modules.get(mod_index as usize)
   }
 
@@ -139,22 +162,37 @@ impl Package {
     self
       .modules
       .get(module as usize)
-      .and_then(|(_, m)| m.get(function as usize))
+      .and_then(|m| m.functions.get(function as usize))
       .map(|(_, f)| f)
+  }
+
+  pub fn get_struct(&self, module: u32, struct_: u32) -> Option<&StructDef> {
+    self
+      .modules
+      .get(module as usize)
+      .and_then(|m| m.structs.get(struct_ as usize))
   }
 }
 
-fn index_modules<'a>(modules: impl Iterator<Item = &'a (String, CompiledModule)>) -> ModuleIndex {
+fn index_modules<'a>(modules: impl Iterator<Item = &'a CompiledModule>) -> ModuleIndex {
   let mut module_table = hashmap! {};
-  for (mod_index, (mod_name, functions)) in modules.enumerate() {
-    module_table.insert(mod_name.to_string(), (mod_index as u32, hashmap! {}));
-    for (func_index, (func_name, _)) in functions.iter().enumerate() {
-      module_table
-        .get_mut(mod_name)
-        .unwrap()
-        .1
+  for (mod_index, module) in modules.enumerate() {
+    let mut entry = ModuleIndexEntry {
+      module: mod_index as u32,
+      functions: hashmap! {},
+      structs: hashmap! {},
+    };
+    for (func_index, (func_name, _)) in module.functions.iter().enumerate() {
+      entry
+        .functions
         .insert(func_name.to_string(), func_index as u32);
     }
+    for (struct_index, struct_) in module.structs.iter().enumerate() {
+      entry
+        .structs
+        .insert(struct_.name.to_string(), struct_index as u32);
+    }
+    module_table.insert(module.name.to_string(), entry);
   }
   module_table
 }
@@ -163,9 +201,10 @@ fn link(module_table: &ModuleIndex, modules: CompiledModules) -> Result<LinkedMo
   //! In a set of modules, replace all String-based references to functions and modules with
   //! index-based references.
   let mut result = vec![];
-  for (mod_name, functions) in modules {
+  for module in modules {
     // consuming
-    let new_functions = functions
+    let new_functions = module
+      .functions
       .into_iter()
       .map(|(func_name, callable)| {
         let new_callable = match callable {
@@ -176,8 +215,12 @@ fn link(module_table: &ModuleIndex, modules: CompiledModules) -> Result<LinkedMo
         };
         Ok((func_name, new_callable))
       })
-      .collect::<Result<LinkedModule, String>>()?;
-    result.push((mod_name, new_functions));
+      .collect::<Result<Vec<_>, String>>()?;
+    result.push(LinkedModule {
+      name: module.name,
+      functions: new_functions,
+      structs: module.structs,
+    });
   }
   Ok(result)
 }
@@ -215,6 +258,16 @@ fn link_instruction(
         .ok_or_else(|| format!("Call to undefined function {}.{}", mod_name, func_name))?;
       Instruction::MakeFunctionRef((mod_idx, func_idx))
     }
+    Instruction::NewStruct((mod_name, struct_name)) => {
+      let (mod_idx, struct_idx) =
+        find_struct(module_table, &mod_name, &struct_name).ok_or_else(|| {
+          format!(
+            "Construction of undefined struct {}.{}",
+            mod_name, struct_name
+          )
+        })?;
+      Instruction::NewStruct((mod_idx, struct_idx))
+    }
 
     // Here's what I want to say:
     // x => Ok(x),
@@ -228,6 +281,7 @@ fn link_instruction(
     Instruction::PushString(string) => Instruction::PushString(string),
     Instruction::PushBool(b) => Instruction::PushBool(b),
     Instruction::PushVoid => Instruction::PushVoid,
+    Instruction::GetField(field) => Instruction::GetField(field),
     Instruction::Pop => Instruction::Pop,
     Instruction::Return => Instruction::Return,
     Instruction::PartialApply(size) => Instruction::PartialApply(size),
@@ -236,15 +290,25 @@ fn link_instruction(
   })
 }
 
-pub fn find_function(
+fn find_function(
   index: &ModuleIndex,
   module_name: &str,
   function_name: &str,
 ) -> Option<(u32, u32)> {
-  index.get(module_name).and_then(|(mod_index, functions)| {
-    functions
+  index.get(module_name).and_then(|entry| {
+    entry
+      .functions
       .get(function_name)
-      .map(|func_index| (*mod_index, *func_index))
+      .map(|func_index| (entry.module, *func_index))
+  })
+}
+
+fn find_struct(index: &ModuleIndex, module_name: &str, struct_name: &str) -> Option<(u32, u32)> {
+  index.get(module_name).and_then(|entry| {
+    entry
+      .structs
+      .get(struct_name)
+      .map(|struct_index| (entry.module, *struct_index))
   })
 }
 
@@ -257,40 +321,98 @@ pub fn compile_module(module_name: &str, asts: &[AST]) -> Result<CompiledModule,
       _ => None,
     })
     .collect();
+  let structs = asts
+    .iter()
+    .filter_map(|ast| match &ast.kind {
+      ASTKind::DefineStruct(struct_) => Some((struct_.name.clone(), struct_.clone())),
+      _ => None,
+    })
+    .collect::<HashMap<_, _>>();
+  let function_returns = asts
+    .iter()
+    .filter_map(|ast| match &ast.kind {
+      ASTKind::DefineFn(func) => Some((
+        func.name.clone(),
+        func
+          .return_type
+          .as_ref()
+          .and_then(|ty| struct_name_from_type(ty, &structs)),
+      )),
+      _ => None,
+    })
+    .collect();
+  let ctx = CompileContext {
+    module_name,
+    module_functions: &module_functions,
+    function_returns: &function_returns,
+    structs: &structs,
+  };
+  let struct_defs = asts
+    .iter()
+    .filter_map(|ast| match &ast.kind {
+      ASTKind::DefineStruct(struct_) => Some(StructDef {
+        name: struct_.name.clone(),
+        fields: struct_
+          .fields
+          .iter()
+          .map(|(field, _)| field.clone())
+          .collect(),
+      }),
+      _ => None,
+    })
+    .collect();
   let mut functions = vec![];
   for ast in &asts {
     match &ast.kind {
-      ASTKind::DefineFn(func) => {
-        functions.extend(compile_function(module_name, &module_functions, func)?)
-      }
+      ASTKind::DefineStruct(_) => {}
+      ASTKind::DefineFn(func) => functions.extend(compile_function(&ctx, func)?),
       x => return Err(format!("Unexpected form at top-level: {:?}", x)),
     };
   }
-  Ok(functions)
+  Ok(CompiledModule {
+    name: module_name.to_string(),
+    functions,
+    structs: struct_defs,
+  })
+}
+
+struct CompileContext<'a> {
+  module_name: &'a str,
+  module_functions: &'a HashSet<String>,
+  function_returns: &'a HashMap<String, Option<String>>,
+  structs: &'a HashMap<String, parser::Struct>,
+}
+
+#[derive(Clone)]
+struct LocalInfo {
+  index: u16,
+  struct_type: Option<String>,
 }
 
 /// Compile a function.
 /// Returns a vec of functions in case any of them contain nested functions.
 fn compile_function(
-  module_name: &str,
-  module_functions: &HashSet<String>,
+  ctx: &CompileContext<'_>,
   f: &parser::Function,
-) -> Result<CompiledModule, String> {
+) -> Result<Vec<(String, CompiledCallable)>, String> {
   // Map of local-name to local-index
   let mut locals = HashMap::new();
-  for (idx, (param, _)) in f.params.iter().enumerate() {
-    locals.insert(param.clone(), idx as u16);
+  for (idx, (param, annotation)) in f.params.iter().enumerate() {
+    locals.insert(
+      param.clone(),
+      LocalInfo {
+        index: idx as u16,
+        struct_type: annotation
+          .as_ref()
+          .and_then(|ty| struct_name_from_type(ty, ctx.structs)),
+      },
+    );
   }
   let mut instructions = vec![];
   let last_idx = f.code.len().saturating_sub(1);
   let returns_void = f.returns_void();
   for (i, ast) in f.code.iter().enumerate() {
-    instructions.extend(compile_expr(
-      module_name,
-      module_functions,
-      ast,
-      &mut locals,
-    )?);
+    instructions.extend(compile_expr(ctx, ast, &mut locals)?);
     // Non-final body expressions are in statement position: their value is
     // discarded, so pop it off the stack to keep the stack clean. It would be
     // really nice to avoid pushing things to the stack entirely if we know they
@@ -316,38 +438,42 @@ fn compile_function(
 
 /// Compile `ast` into instructions.
 fn compile_expr(
-  module_name: &str,
-  module_functions: &HashSet<String>,
+  ctx: &CompileContext<'_>,
   ast: &AST,
-  locals: &mut HashMap<String, u16>,
+  locals: &mut HashMap<String, LocalInfo>,
 ) -> Result<Vec<CompiledInstruction>, String> {
   let mut instructions = vec![];
   match &ast.kind {
     ASTKind::Call(callable_expr, arg_exprs) => {
       for expr in arg_exprs {
-        instructions.extend(compile_expr(module_name, module_functions, expr, locals)?);
+        instructions.extend(compile_expr(ctx, expr, locals)?);
       }
-      instructions.extend(compile_expr(
-        module_name,
-        module_functions,
-        callable_expr,
-        locals,
-      )?);
+      instructions.extend(compile_expr(ctx, callable_expr, locals)?);
       instructions.push(Instruction::CallDynamic(arg_exprs.len() as u16))
     }
     ASTKind::CallFixed(identifier, arg_exprs) => {
+      if let Identifier::Qualified(receiver, field) = identifier {
+        if arg_exprs.is_empty() {
+          if let Some(local) = locals.get(receiver) {
+            let field_index = field_index(ctx, local, field)?;
+            instructions.push(Instruction::LoadLocal(local.index));
+            instructions.push(Instruction::GetField(field_index));
+            return Ok(instructions);
+          }
+        }
+      }
       for expr in arg_exprs {
-        instructions.extend(compile_expr(module_name, module_functions, expr, locals)?);
+        instructions.extend(compile_expr(ctx, expr, locals)?);
       }
       if let Identifier::Bare(fname) = identifier {
         if let Some(local_index) = locals.get(fname) {
-          instructions.push(Instruction::LoadLocal(*local_index));
+          instructions.push(Instruction::LoadLocal(local_index.index));
           instructions.push(Instruction::CallDynamic(arg_exprs.len() as u16));
           return Ok(instructions);
         }
       }
       let (module_name, function_name) = match identifier {
-        Identifier::Bare(fname) => (module_name.to_string(), fname.to_string()),
+        Identifier::Bare(fname) => (ctx.module_name.to_string(), fname.to_string()),
         Identifier::Qualified(mname, fname) => (mname.to_string(), fname.to_string()),
       };
       instructions.push(Instruction::Call(
@@ -356,26 +482,66 @@ fn compile_expr(
       ))
     }
     ASTKind::FunctionRef(mname, fname) => {
-      instructions.push(Instruction::MakeFunctionRef((
-        mname.to_owned(),
-        fname.to_owned(),
-      )));
+      if let Some(local) = locals.get(mname) {
+        let field_index = field_index(ctx, local, fname)?;
+        instructions.push(Instruction::LoadLocal(local.index));
+        instructions.push(Instruction::GetField(field_index));
+      } else {
+        instructions.push(Instruction::MakeFunctionRef((
+          mname.to_owned(),
+          fname.to_owned(),
+        )));
+      }
     }
     ASTKind::Let(name, _, expr) => {
       if !locals.contains_key(name) {
-        locals.insert(name.clone(), locals.len() as u16);
+        locals.insert(
+          name.clone(),
+          LocalInfo {
+            index: locals.len() as u16,
+            struct_type: None,
+          },
+        );
       }
-      instructions.extend(compile_expr(module_name, module_functions, expr, locals)?);
-      let local_index = locals[name];
+      instructions.extend(compile_expr(ctx, expr, locals)?);
+      let struct_type = infer_struct_type(ctx, expr, locals);
+      let local = locals.get_mut(name).expect("local was inserted above");
+      local.struct_type = struct_type;
+      let local_index = local.index;
       instructions.push(Instruction::SetLocal(local_index));
       instructions.push(Instruction::LoadLocal(local_index));
     }
     ASTKind::PartialApply(expr, args) => {
       for expr in args {
-        instructions.extend(compile_expr(module_name, module_functions, expr, locals)?);
+        instructions.extend(compile_expr(ctx, expr, locals)?);
       }
-      instructions.extend(compile_expr(module_name, module_functions, expr, locals)?);
+      instructions.extend(compile_expr(ctx, expr, locals)?);
       instructions.push(Instruction::PartialApply(args.len() as u16));
+    }
+    ASTKind::NewStruct(name, fields) => {
+      let struct_ = ctx
+        .structs
+        .get(name)
+        .ok_or_else(|| format!("unknown struct `{name}`"))?;
+      for (field_name, _) in &struct_.fields {
+        let expr = fields
+          .iter()
+          .find(|(field, _)| field == field_name)
+          .map(|(_, expr)| expr)
+          .ok_or_else(|| format!("missing initializer for field `{field_name}` of `{name}`"))?;
+        instructions.extend(compile_expr(ctx, expr, locals)?);
+      }
+      instructions.push(Instruction::NewStruct((
+        ctx.module_name.to_string(),
+        name.clone(),
+      )));
+    }
+    ASTKind::FieldAccess(receiver, field) => {
+      let receiver_type = infer_struct_type(ctx, receiver, locals)
+        .ok_or_else(|| format!("field access receiver has no known struct type: {receiver:?}"))?;
+      let field_index = field_index_for_struct(ctx, &receiver_type, field)?;
+      instructions.extend(compile_expr(ctx, receiver, locals)?);
+      instructions.push(Instruction::GetField(field_index));
     }
     ASTKind::If(cond, then, els) => {
       // <cond>; JumpIfFalse(+else); <then>; Jump(+end); <else>; L_end:
@@ -385,15 +551,15 @@ fn compile_expr(
       // relative to the instruction *following* each jump, they depend only on
       // the lengths of the `then` and `else` sub-vectors, not on where this
       // `if` sits in the enclosing function.
-      instructions.extend(compile_expr(module_name, module_functions, cond, locals)?);
+      instructions.extend(compile_expr(ctx, cond, locals)?);
       let jmp_else = instructions.len();
       instructions.push(Instruction::JumpIfFalse(0));
-      instructions.extend(compile_expr(module_name, module_functions, then, locals)?);
+      instructions.extend(compile_expr(ctx, then, locals)?);
       let jmp_end = instructions.len();
       instructions.push(Instruction::Jump(0));
       // L_else:
       let else_start = instructions.len();
-      instructions.extend(compile_expr(module_name, module_functions, els, locals)?);
+      instructions.extend(compile_expr(ctx, els, locals)?);
       // L_end:
       let end_start = instructions.len();
       // The JumpIfFalse at `jmp_else` must skip over the `then` branch and the
@@ -413,7 +579,7 @@ fn compile_expr(
       // and leave the last on the stack as the block's value.
       let last_idx = body.len().saturating_sub(1);
       for (i, expr) in body.iter().enumerate() {
-        instructions.extend(compile_expr(module_name, module_functions, expr, locals)?);
+        instructions.extend(compile_expr(ctx, expr, locals)?);
         if i != last_idx {
           instructions.push(Instruction::Pop);
         }
@@ -421,10 +587,10 @@ fn compile_expr(
     }
     ASTKind::Variable(name) => {
       if let Some(local) = locals.get(name) {
-        instructions.push(Instruction::LoadLocal(*local));
-      } else if module_functions.contains(name) {
+        instructions.push(Instruction::LoadLocal(local.index));
+      } else if ctx.module_functions.contains(name) {
         instructions.push(Instruction::MakeFunctionRef((
-          module_name.to_string(),
+          ctx.module_name.to_string(),
           name.clone(),
         )));
       } else {
@@ -436,9 +602,99 @@ fn compile_expr(
     ASTKind::Float(f) => instructions.push(Instruction::PushFloat(*f)),
     ASTKind::String(s) => instructions.push(Instruction::PushString(s.clone())),
     ASTKind::Bool(b) => instructions.push(Instruction::PushBool(*b)),
+    ASTKind::DefineStruct(_) => {
+      return Err("Unexpected struct definition in expression".to_string())
+    }
     x => return Err(format!("Unexpected form at top-level: {:?}", x)),
   }
   Ok(instructions)
+}
+
+fn struct_name_from_type(
+  ty: &parser::TypeAst,
+  structs: &HashMap<String, parser::Struct>,
+) -> Option<String> {
+  match ty {
+    parser::TypeAst::Named(name) if structs.contains_key(name) => Some(name.clone()),
+    _ => None,
+  }
+}
+
+fn infer_struct_type(
+  ctx: &CompileContext<'_>,
+  ast: &AST,
+  locals: &HashMap<String, LocalInfo>,
+) -> Option<String> {
+  match &ast.kind {
+    ASTKind::NewStruct(name, _) if ctx.structs.contains_key(name) => Some(name.clone()),
+    ASTKind::Variable(name) => locals.get(name).and_then(|local| local.struct_type.clone()),
+    ASTKind::FunctionRef(receiver, field) => locals
+      .get(receiver)
+      .and_then(|local| field_struct_type(ctx, local, field)),
+    ASTKind::FieldAccess(receiver, field) => {
+      let receiver = infer_struct_type(ctx, receiver, locals)?;
+      field_struct_type_for_struct(ctx, &receiver, field)
+    }
+    ASTKind::Let(_, annotation, expr) => annotation
+      .as_ref()
+      .and_then(|ty| struct_name_from_type(ty, ctx.structs))
+      .or_else(|| infer_struct_type(ctx, expr, locals)),
+    ASTKind::CallFixed(Identifier::Bare(name), _) => {
+      ctx.function_returns.get(name).cloned().flatten()
+    }
+    ASTKind::CallFixed(Identifier::Qualified(module, name), _) if module == ctx.module_name => {
+      ctx.function_returns.get(name).cloned().flatten()
+    }
+    ASTKind::Block(body) => body
+      .last()
+      .and_then(|expr| infer_struct_type(ctx, expr, locals)),
+    ASTKind::If(_, then, els) => {
+      let then_type = infer_struct_type(ctx, then, locals)?;
+      let else_type = infer_struct_type(ctx, els, locals)?;
+      (then_type == else_type).then_some(then_type)
+    }
+    _ => None,
+  }
+}
+
+fn field_index(ctx: &CompileContext<'_>, local: &LocalInfo, field: &str) -> Result<u16, String> {
+  let struct_name = local
+    .struct_type
+    .as_ref()
+    .ok_or_else(|| format!("field access receiver has no known struct type for `{field}`"))?;
+  field_index_for_struct(ctx, struct_name, field)
+}
+
+fn field_index_for_struct(
+  ctx: &CompileContext<'_>,
+  struct_name: &str,
+  field: &str,
+) -> Result<u16, String> {
+  let struct_ = ctx
+    .structs
+    .get(struct_name)
+    .ok_or_else(|| format!("unknown struct `{struct_name}`"))?;
+  struct_
+    .fields
+    .iter()
+    .position(|(name, _)| name == field)
+    .map(|index| index as u16)
+    .ok_or_else(|| format!("struct `{struct_name}` has no field `{field}`"))
+}
+
+fn field_struct_type(ctx: &CompileContext<'_>, local: &LocalInfo, field: &str) -> Option<String> {
+  let struct_name = local.struct_type.as_ref()?;
+  field_struct_type_for_struct(ctx, struct_name, field)
+}
+
+fn field_struct_type_for_struct(
+  ctx: &CompileContext<'_>,
+  struct_name: &str,
+  field: &str,
+) -> Option<String> {
+  let struct_ = ctx.structs.get(struct_name)?;
+  let (_, ty) = struct_.fields.iter().find(|(name, _)| name == field)?;
+  struct_name_from_type(ty, ctx.structs)
 }
 
 pub fn compile_executable_from_source(
@@ -466,7 +722,7 @@ fn _compile_from_source(
 fn compile_modules(asts: &[AST]) -> Result<CompiledModules, String> {
   println!("Compiling main module");
   let compiled_module = compile_module("main", asts)?;
-  Ok(vec![("main".to_string(), compiled_module)])
+  Ok(vec![compiled_module])
 }
 
 /// Inject a `Callable::Builtin` entry for each `BuiltinSpec` into the named
@@ -480,13 +736,17 @@ fn inject_builtin_specs(
   for spec in specs {
     let module = modules
       .iter_mut()
-      .find(|(name, _)| name == spec.module)
-      .map(|(_, funcs)| funcs);
+      .find(|module| module.name == spec.module)
+      .map(|module| &mut module.functions);
     let module = match module {
       Some(funcs) => funcs,
       None => {
-        modules.push((spec.module.to_string(), vec![]));
-        &mut modules.last_mut().unwrap().1
+        modules.push(CompiledModule {
+          name: spec.module.to_string(),
+          functions: vec![],
+          structs: vec![],
+        });
+        &mut modules.last_mut().unwrap().functions
       }
     };
     if module.iter().any(|(name, _)| name == spec.name) {
@@ -508,6 +768,21 @@ mod test {
     Some(parser::TypeAst::Named(name.to_string()))
   }
 
+  fn compile_test_function(
+    f: &parser::Function,
+  ) -> Result<Vec<(String, CompiledCallable)>, String> {
+    let module_functions = HashSet::new();
+    let function_returns = HashMap::new();
+    let structs = HashMap::new();
+    let ctx = CompileContext {
+      module_name: "main",
+      module_functions: &module_functions,
+      function_returns: &function_returns,
+      structs: &structs,
+    };
+    compile_function(&ctx, f)
+  }
+
   #[test]
   fn compile_id() {
     let func = parser::Function {
@@ -517,7 +792,7 @@ mod test {
       bounds: vec![],
       code: vec![AST::Variable("a".to_string())],
     };
-    let code = compile_function("main", &HashSet::new(), &func).unwrap();
+    let code = compile_test_function(&func).unwrap();
     assert_eq!(
       code,
       vec![(
@@ -546,7 +821,7 @@ mod test {
         AST::CallFixed(Identifier::Bare("alias".to_string()), vec![]),
       ],
     };
-    let code = compile_function("main", &HashSet::new(), &func).unwrap();
+    let code = compile_test_function(&func).unwrap();
     assert_eq!(
       code,
       vec![(
@@ -577,7 +852,7 @@ mod test {
       bounds: vec![],
       code: vec![AST::Let("a".to_string(), Box::new(AST::Int(1)))],
     };
-    let code = compile_function("main", &HashSet::new(), &func).unwrap();
+    let code = compile_test_function(&func).unwrap();
     assert_eq!(
       code,
       vec![(
@@ -605,7 +880,7 @@ mod test {
       bounds: vec![],
       code: vec![AST::Int(1)],
     };
-    let code = compile_function("main", &HashSet::new(), &func).unwrap();
+    let code = compile_test_function(&func).unwrap();
     assert_eq!(
       code,
       vec![(
@@ -633,8 +908,64 @@ mod test {
       bounds: vec![],
       code: vec![AST::Variable("missing".to_string())],
     };
-    let err = compile_function("main", &HashSet::new(), &func).unwrap_err();
+    let err = compile_test_function(&func).unwrap_err();
     assert_eq!(err, "Function accesses unbound variable missing");
+  }
+
+  #[test]
+  fn linked_struct_bytecode_uses_indices() {
+    let builtins = crate::builtins::default_builtins();
+    let source = "
+      (struct Foo x:Int y:Int)
+      (fn main () ->Int
+        (let foo (new Foo y:2 x:3))
+        foo.x)";
+    let package =
+      compile_executable_from_source(source, ("main", "main"), &builtins.specs()).unwrap();
+    let Callable::Function(main) = package.get_function(0, 0).unwrap() else {
+      panic!("expected main function");
+    };
+    assert_eq!(
+      main.instructions,
+      vec![
+        Instruction::PushInt(3),
+        Instruction::PushInt(2),
+        Instruction::NewStruct((0, 0)),
+        Instruction::SetLocal(0),
+        Instruction::LoadLocal(0),
+        Instruction::Pop,
+        Instruction::LoadLocal(0),
+        Instruction::GetField(0),
+        Instruction::Return,
+      ]
+    );
+    assert_eq!(
+      package.modules[0].structs,
+      vec![StructDef {
+        name: "Foo".to_string(),
+        fields: vec!["x".to_string(), "y".to_string()],
+      }]
+    );
+  }
+
+  #[test]
+  fn field_access_after_function_return_uses_return_annotation() {
+    let builtins = crate::builtins::default_builtins();
+    let source = "
+      (struct Foo x:Int)
+      (fn make () ->Foo (new Foo x:9))
+      (fn main () ->Int
+        (let foo (make))
+        foo.x)";
+    let package =
+      compile_executable_from_source(source, ("main", "main"), &builtins.specs()).unwrap();
+    let Callable::Function(main) = package.get_function(0, 1).unwrap() else {
+      panic!("expected main function");
+    };
+    assert!(main
+      .instructions
+      .iter()
+      .any(|instruction| matches!(instruction, Instruction::GetField(0))));
   }
 
   #[test]

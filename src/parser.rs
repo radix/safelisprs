@@ -19,6 +19,7 @@ impl PartialEq for AST {
 pub enum ASTKind {
   Let(String, Option<TypeAst>, Box<AST>),
   DefineFn(Function),
+  DefineStruct(Struct),
   Call(Box<AST>, Vec<AST>),
   CallFixed(Identifier, Vec<AST>),
   Variable(String),
@@ -26,6 +27,8 @@ pub enum ASTKind {
   Float(f64),
   String(String),
   Bool(bool),
+  NewStruct(String, Vec<(String, AST)>),
+  FieldAccess(Box<AST>, String),
 
   // The following variants aren't represented in the syntax, but are produced
   // by transformations on the previous variants.
@@ -118,6 +121,12 @@ impl Function {
       Some(TypeAst::Apply(_, _) | TypeAst::Fn(_, _, _)) => false,
     }
   }
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct Struct {
+  pub name: String,
+  pub fields: Vec<(String, TypeAst)>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -470,6 +479,14 @@ impl Parser {
         self.advance();
         self.parse_fn(start)
       }
+      TokenKind::Sym(name) if name == "struct" => {
+        self.advance();
+        self.parse_struct(start)
+      }
+      TokenKind::Sym(name) if name == "new" => {
+        self.advance();
+        self.parse_new(start)
+      }
       TokenKind::Sym(name) if name == "if" => {
         self.advance();
         self.parse_if(start)
@@ -584,6 +601,49 @@ impl Parser {
       }),
       span,
     ))
+  }
+
+  fn parse_struct(&mut self, start: usize) -> Result<AST, ParseError> {
+    let name = self.expect_symbol("`struct` name must be a symbol")?;
+    let mut fields = Vec::new();
+    while !matches!(self.peek().kind, TokenKind::RParen) {
+      if matches!(self.peek().kind, TokenKind::Eof) {
+        return Err(
+          ParseError::new(self.peek().span.clone(), "unterminated `struct` form")
+            .expected("a field")
+            .expected("`)`"),
+        );
+      }
+      let field = self.expect_symbol("struct field names must be symbols")?;
+      self.expect_colon("struct fields require a type annotation")?;
+      fields.push((field, self.parse_type()?));
+    }
+    let close = self.advance();
+    let span = start..close.span.end;
+    Ok(AST::new(
+      ASTKind::DefineStruct(Struct { name, fields }),
+      span,
+    ))
+  }
+
+  fn parse_new(&mut self, start: usize) -> Result<AST, ParseError> {
+    let name = self.expect_symbol("`new` requires a struct name")?;
+    let mut fields = Vec::new();
+    while !matches!(self.peek().kind, TokenKind::RParen) {
+      if matches!(self.peek().kind, TokenKind::Eof) {
+        return Err(
+          ParseError::new(self.peek().span.clone(), "unterminated `new` form")
+            .expected("a field initializer")
+            .expected("`)`"),
+        );
+      }
+      let field = self.expect_symbol("struct initializer field names must be symbols")?;
+      self.expect_colon("struct initializer fields require `:`")?;
+      fields.push((field, self.parse_expr()?));
+    }
+    let close = self.advance();
+    let span = start..close.span.end;
+    Ok(AST::new(ASTKind::NewStruct(name, fields), span))
   }
 
   fn parse_if(&mut self, start: usize) -> Result<AST, ParseError> {
