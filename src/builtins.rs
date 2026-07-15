@@ -1153,9 +1153,8 @@ mod test {
     // (std.map (std.range 0 10) (fn roll (_idx:Int) ->Int (rand.roll! rng 20)))
     //
     // `std.map` applies `roll` to each element of `(std.range 0 10)` and
-    // collects the rolls. `roll` ignores its argument (the index) and mutates
-    // the shared `rng` cell via `rand.roll!`. The closure transform wraps
-    // captured `rng` in a cell, so `rand.roll!` can mutate it.
+    // collects the rolls. `roll` ignores its argument (the index) and captures
+    // the explicit `rng` cell, which `rand.roll!` mutates.
     let src = format!(
       "(fn main () ->(List Int)\n\
         (let rng (rand.rng {seed} \"{name}\"))\n\

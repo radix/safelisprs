@@ -1262,21 +1262,6 @@ impl<'gc> ExecRoot<'gc> {
         let v = self.alloc_value(mc, SLVal::FunctionRef(mod_index, func_index));
         self.stack.push(v);
       }
-      Instruction::MakeCell => {
-        let val = self.pop()?;
-        let contents = CellContents::new(val);
-        let cell = self.alloc_value(mc, SLVal::Cell(Gc::new(mc, RefLock::new(contents))));
-        self.stack.push(cell);
-      }
-      Instruction::DerefCell => {
-        let val = self.pop()?;
-        match &val.value {
-          SLVal::Cell(r) => {
-            self.stack.push(r.borrow().value);
-          }
-          other => return Err(format!("Not a cell: {}", other.error_description())),
-        }
-      }
       Instruction::PartialApply(num_args) => {
         self.partial_apply(mc, num_args)?;
       }
@@ -1310,8 +1295,8 @@ impl<'gc> ExecRoot<'gc> {
       }
     }
     // Post-instruction check: catch the allocation made by *this* instruction
-    // (Push/MakeCell/PartialApply/etc.) at the instruction that made it, rather
-    // than one instruction late.
+    // (Push/PartialApply/etc.) at the instruction that made it, rather than
+    // one instruction late.
     self.check_memory_limit(mc)?;
     Ok(())
   }
@@ -1789,7 +1774,6 @@ mod test {
       num_params: 0,
       instructions: vec![
         Instruction::PushInt(42),
-        Instruction::MakeCell,
         Instruction::MakeFunctionRef((0, 0)),
         Instruction::PartialApply(1),
         Instruction::Return,
@@ -1799,11 +1783,7 @@ mod test {
     let inner = compiler::Function {
       num_locals: 1,
       num_params: 0,
-      instructions: vec![
-        Instruction::LoadLocal(0),
-        Instruction::DerefCell,
-        Instruction::Return,
-      ],
+      instructions: vec![Instruction::LoadLocal(0), Instruction::Return],
     };
 
     let pkg = Package {
@@ -1867,6 +1847,23 @@ mod test {
       (fn main () ->Int ((outer 7)))
     ";
     assert_eq!(eval_main(source), SLValue::Int(7));
+  }
+
+  #[test]
+  fn same_named_nested_closures_in_different_factories_do_not_collide() {
+    let source = "
+      (fn make-a () ->(Fn () -> Int)
+        (let x 1)
+        (fn get () ->Int x)
+        get)
+      (fn make-b () ->(Fn () -> Int)
+        (let x 2)
+        (fn get () ->Int (std.+ x 10))
+        get)
+      (fn main () ->Int
+        (std.+ ((make-a)) ((make-b))))
+    ";
+    assert_eq!(eval_main(source), SLValue::Int(13));
   }
 
   #[test]
@@ -1998,21 +1995,6 @@ mod test {
       .push_and_call_dynamic(SLValue::Int(3))
       .expect_err("expected an error calling a non-callable");
     assert!(err.contains("non-callable"), "unexpected error: {}", err);
-  }
-
-  #[test]
-  fn deref_cell_on_non_cell_errors() {
-    let pkg = Package::default();
-    let code = compiler::Function {
-      num_locals: 0,
-      num_params: 0,
-      instructions: vec![Instruction::PushInt(1), Instruction::DerefCell],
-    };
-    let mut exec = Execution::new(pkg, default_builtins());
-    exec.enter_function(code, vec![]).unwrap();
-    exec.step().unwrap(); // PushInt
-    let err = exec.step().unwrap_err(); // DerefCell
-    assert!(err.contains("Not a cell"), "unexpected error: {}", err);
   }
 
   #[test]
@@ -2319,30 +2301,12 @@ mod test {
   #[test]
   fn collect_all_frees_unreachable_values() {
     // A program that creates garbage: `main` builds a Cell holding 42, then
-    // discards it by returning `99`. After execution, the Cell (and its
-    // contents) should be unreachable from the root. Forcing a full
-    // collection cycle should reclaim those allocations.
-    //
-    // We construct this with bytecode directly because there's no surface
-    // syntax for `cell` outside the closure transform.
-    let main = compiler::Function {
-      num_locals: 1,
-      num_params: 0,
-      instructions: vec![
-        Instruction::PushInt(42),
-        Instruction::MakeCell,    // allocate a Cell wrapping 42
-        Instruction::SetLocal(0), // bind it to local 0 ("garbage")
-        Instruction::PushInt(99), // push the real return value
-        Instruction::Return,      // return 99; the Cell in local 0 is now dead
-      ],
-    };
-    let pkg = Package {
-      modules: vec![(
-        "main".to_string(),
-        vec![("main".to_string(), Callable::Function(main))],
-      )],
-      main: Some((0, 0)),
-    };
+    // discards it by returning `99`. After execution, the Cell should be
+    // unreachable from the root. Forcing a full collection cycle should
+    // reclaim those allocations.
+    let source = "(fn main () ->Int (let garbage (std.cell 42)) 99)";
+    let pkg = compile_executable_from_source(source, ("main", "main"), &default_builtins().specs())
+      .unwrap();
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
 
@@ -2352,10 +2316,9 @@ mod test {
     assert_eq!(baseline, 1); // the single Void local for `main`
 
     // Step through the program manually so we can observe allocations before
-    // the final value is popped (which would make it unreachable). The program
-    // is 5 instructions; stepping all 5 leaves the int `99` on the stack and
-    // the Cell dead in local 0.
-    for _ in 0..5 {
+    // the final value is popped (which would make it unreachable). Completion
+    // leaves the int `99` on the stack and the Cell dead in a local.
+    while !exec.is_done() {
       exec.step().unwrap();
     }
     assert!(exec.is_done());
@@ -2390,76 +2353,17 @@ mod test {
     // working, the live allocation count after the run should stay bounded
     // (proportional to the final stack, not to the number of iterations),
     // rather than growing linearly with `n`.
-    //
-    // loop(n): if n == 0 return 0; else let g = cell(n); loop(n-1)
-    //   locals: n (0), g (1)
-    //   0: LoadLocal(0)        # n
-    //   1: PushInt(0)
-    //   2: Call((std_mod, std_eq))  # n == 0
-    //   3: JumpIfFalse(+2)      # if n != 0, skip the then-branch (offset 2)
-    //   4: PushInt(0)
-    //   5: Return
-    //   6: LoadLocal(0)        # n
-    //   7: MakeCell             # cell(n)  -- this is the garbage
-    //   8: SetLocal(1)          # g = cell(n)
-    //   9: LoadLocal(0)         # n
-    //  10: PushInt(1)
-    //  11: Call((std_mod, std_sub)) # n - 1
-    //  12: Call((0, 0))         # loop(n-1)  -- tail-ish recursion
-    //  13: Return
-    let std_mod = 1u32; // "std" is the second module after "main"
-    let std_eq = 2u32;
-    let std_sub = 1u32;
-    let waste = compiler::Function {
-      num_locals: 2,
-      num_params: 1,
-      instructions: vec![
-        Instruction::LoadLocal(0),
-        Instruction::PushInt(0),
-        Instruction::Call((std_mod, std_eq), 2),
-        Instruction::JumpIfFalse(2),
-        Instruction::PushInt(0),
-        Instruction::Return,
-        Instruction::LoadLocal(0),
-        Instruction::MakeCell,
-        Instruction::SetLocal(1),
-        Instruction::LoadLocal(0),
-        Instruction::PushInt(1),
-        Instruction::Call((std_mod, std_sub), 2),
-        Instruction::Call((0, 0), 1),
-        Instruction::Return,
-      ],
-    };
-    let main = compiler::Function {
-      num_locals: 0,
-      num_params: 0,
-      instructions: vec![
-        Instruction::PushInt(1000),
-        Instruction::Call((0, 0), 1), // waste(1000)
-        Instruction::Return,
-      ],
-    };
-    // Build a package with std builtins and the two functions above.
-    let pkg = Package {
-      modules: vec![
-        (
-          "main".to_string(),
-          vec![
-            ("waste".to_string(), Callable::Function(waste)),
-            ("main".to_string(), Callable::Function(main)),
-          ],
-        ),
-        (
-          "std".to_string(),
-          vec![
-            ("+".to_string(), Callable::Builtin),
-            ("-".to_string(), Callable::Builtin),
-            ("==".to_string(), Callable::Builtin),
-          ],
-        ),
-      ],
-      main: Some((0, 1)),
-    };
+    let source = "
+      (fn waste (n:Int) ->Int
+        (if (std.== n 0)
+          0
+          (block
+            (let garbage (std.cell n))
+            (waste (std.- n 1)))))
+      (fn main () ->Int (waste 1000))
+    ";
+    let pkg = compile_executable_from_source(source, ("main", "main"), &default_builtins().specs())
+      .unwrap();
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
 
@@ -2485,28 +2389,15 @@ mod test {
   fn live_values_survive_collection() {
     // A program that returns a Cell: the Cell must survive a forced
     // collection, proving that reachable `Gc` pointers are not reclaimed.
-    let main = compiler::Function {
-      num_locals: 0,
-      num_params: 0,
-      instructions: vec![
-        Instruction::PushInt(3),
-        Instruction::MakeCell, // cell(3)
-        Instruction::Return,
-      ],
-    };
-    let pkg = Package {
-      modules: vec![(
-        "main".to_string(),
-        vec![("main".to_string(), Callable::Function(main))],
-      )],
-      main: Some((0, 0)),
-    };
+    let source = "(fn main () ->(Cell Int) (std.cell 3))";
+    let pkg = compile_executable_from_source(source, ("main", "main"), &default_builtins().specs())
+      .unwrap();
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
 
-    // Step through all 3 instructions. The Cell ends up on the stack as the
-    // result (is_done() is true, but we haven't popped it).
-    for _ in 0..3 {
+    // Step to completion. The Cell ends up on the stack as the result
+    // (is_done() is true, but we haven't popped it).
+    while !exec.is_done() {
       exec.step().unwrap();
     }
     assert!(exec.is_done());
@@ -2541,27 +2432,9 @@ mod test {
 
   #[test]
   fn memory_limit_errors_when_exceeded() {
-    // Allocate one Cell wrapping an Int. With a limit lower than the resulting
-    // live GC heap, the very first `step` (which allocates the void local on
-    // `enter_function`) or a later step should error before completing.
-    let main = compiler::Function {
-      num_locals: 1,
-      num_params: 0,
-      instructions: vec![
-        Instruction::PushInt(42),
-        Instruction::MakeCell,
-        Instruction::SetLocal(0),
-        Instruction::PushInt(99),
-        Instruction::Return,
-      ],
-    };
-    let pkg = Package {
-      modules: vec![(
-        "main".to_string(),
-        vec![("main".to_string(), Callable::Function(main))],
-      )],
-      main: Some((0, 0)),
-    };
+    let source = "(fn main () ->Int (let garbage (std.cell 42)) 99)";
+    let pkg = compile_executable_from_source(source, ("main", "main"), &default_builtins().specs())
+      .unwrap();
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
     // 1 byte is far below any allocation; the first step after entering main
@@ -2728,20 +2601,14 @@ mod test {
   }
 
   #[test]
-  fn memory_limit_catches_large_string_in_cell() {
-    // A cell holding a large string must be charged for the string's bytes.
-    // `CellContents` retains the string's original `Gc<Accounted>` handle, so
-    // that one value object and its `MemoryCharge` remain reachable without
-    // cloning or double-counting the string buffer.
-    //
-    // The program builds a 2^20 = 1 MiB string, then a closure that captures it
-    // (the closure transform wraps the captured variable in a `Cell`). `main`
-    // returns the closure so the cell stays reachable. We step `main` to
-    // completion *without* a limit (so the string builds unhindered) — but use
-    // `step` rather than `run_until_done` so the closure (and its captured
-    // cell) stays live on the arena's value stack rather than being popped out.
-    // Then we force collection of transient garbage and check that the
-    // original string object remains reachable and charged through the cell.
+  fn memory_limit_catches_large_string_in_closure_capture() {
+    // The program builds a 2^20 = 1 MiB string, then a closure that captures it.
+    // `main` returns the closure, so the captured string stays reachable. We
+    // step `main` to completion *without* a limit (so the string builds
+    // unhindered) — but use `step` rather than `run_until_done` so the closure
+    // stays live on the arena's value stack rather than being popped out. Then
+    // we force collection of transient garbage and check that the original
+    // string object remains reachable and charged through the closure.
     let source = "
       (fn grow (s:String n:Int) ->String
         (if (std.== n 0)
@@ -2758,20 +2625,20 @@ mod test {
       .unwrap();
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
-    // Step to completion with no limit: builds the 1 MiB string and the cell.
+    // Step to completion with no limit: builds the 1 MiB string and closure.
     // Stepping leaves the final value (the closure) on the arena's value stack,
-    // so the captured cell stays reachable for the subsequent collection + check.
+    // so the captured string stays reachable for the subsequent collection + check.
     while !exec.is_done() {
       exec.step().unwrap();
     }
     // The closure (Partial) is now on top of the arena's value stack, holding
-    // the captured cell, which holds the 1 MiB string.
+    // the captured 1 MiB string.
     assert!(
       matches!(exec.peek_value().unwrap(), SLValue::Partial { .. }),
       "expected a closure (Partial) on the stack from main",
     );
     // Force collection to reclaim intermediate strings from `grow`. The
-    // original `Accounted` for `big` must survive because the cell points to it.
+    // original `Accounted` for `big` must survive because the closure points to it.
     exec.collect_all();
     let usage_after = exec.memory_usage();
     // gc-arena's `total_gc_allocation` contributes only a few hundred bytes of
@@ -2779,7 +2646,7 @@ mod test {
     // remaining external bytes.
     assert!(
       usage_after >= 1_000_000,
-      "expected the cell's 1 MiB string to be charged, but memory_usage was only {} bytes",
+      "expected the captured 1 MiB string to be charged, but memory_usage was only {} bytes",
       usage_after,
     );
     // Sanity: the gc-arena-reported portion is tiny (box headers only).
@@ -2793,43 +2660,26 @@ mod test {
     let external = exec.memory_usage() - gc_only;
     assert!(
       external >= 1_000_000,
-      "expected >= 1 MiB of external (cell-contents) bytes, got {}",
+      "expected >= 1 MiB of captured external bytes, got {}",
       external,
     );
   }
 
   #[test]
   fn cell_operations_do_not_clone_large_string_payloads() {
-    let function = compiler::Function {
-      num_locals: 0,
-      num_params: 0,
-      instructions: vec![
-        Instruction::PushString("x".repeat(64 * 1024)),
-        Instruction::MakeCell,
-        Instruction::DerefCell,
-        Instruction::Return,
-      ],
-    };
-    let mut exec = Execution::new(Package::default(), default_builtins());
-    exec.enter_function(function, vec![]).unwrap();
+    let large = "x".repeat(64 * 1024);
+    let source = format!("(fn main () ->String (let c (std.cell \"{large}\")) (std.get c))");
+    let pkg =
+      compile_executable_from_source(&source, ("main", "main"), &default_builtins().specs())
+        .unwrap();
+    let interp = Interpreter::new(pkg);
+    let mut exec = interp.call_main().unwrap();
 
-    exec.step().unwrap(); // PushString
-    let usage_with_string = exec.memory_usage();
-    exec.set_memory_limit(Some(usage_with_string + 4096));
-
-    // Making and dereferencing a cell should add only small GC boxes and
-    // pointers. The 64 KiB string allocation must remain shared.
-    exec.step().unwrap(); // MakeCell
-    let gc_with_cell = exec.gc_count();
-    exec.step().unwrap(); // DerefCell
-    assert!(
-      exec.gc_count() <= gc_with_cell,
-      "DerefCell allocated a duplicate value object"
-    );
-    assert_eq!(
-      exec.peek_value().unwrap(),
-      SLValue::String("x".repeat(64 * 1024))
-    );
+    // `std.get` should return the existing string value from the cell. If it
+    // cloned the 64 KiB payload, this tight-but-sufficient limit would be
+    // exceeded by the duplicate external allocation.
+    exec.set_memory_limit(Some(96 * 1024));
+    assert_eq!(exec.run_until_done().unwrap(), SLValue::String(large));
   }
 
   #[test]

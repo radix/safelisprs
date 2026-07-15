@@ -65,10 +65,6 @@ pub enum Instruction<CallType> {
   CallDynamic(u16),
   /// Exit the current function, returning the TOS to the caller
   Return,
-  /// Wrap the TOS in a Cell, which is pushed.
-  MakeCell,
-  /// Extract the underlying SLVal from the Cell that's on TOS.
-  DerefCell,
   /// Push a reference to a function
   MakeFunctionRef(CallType),
   /// Partially apply some arguments to a function.
@@ -234,8 +230,6 @@ fn link_instruction(
     Instruction::PushVoid => Instruction::PushVoid,
     Instruction::Pop => Instruction::Pop,
     Instruction::Return => Instruction::Return,
-    Instruction::MakeCell => Instruction::MakeCell,
-    Instruction::DerefCell => Instruction::DerefCell,
     Instruction::PartialApply(size) => Instruction::PartialApply(size),
     Instruction::Jump(target) => Instruction::Jump(target),
     Instruction::JumpIfFalse(target) => Instruction::JumpIfFalse(target),
@@ -360,14 +354,6 @@ fn compile_expr(
         (module_name, function_name),
         arg_exprs.len() as u16,
       ))
-    }
-    ASTKind::Cell(expr) => {
-      instructions.extend(compile_expr(module_name, module_functions, expr, locals)?);
-      instructions.push(Instruction::MakeCell);
-    }
-    ASTKind::DerefCell(expr) => {
-      instructions.extend(compile_expr(module_name, module_functions, expr, locals)?);
-      instructions.push(Instruction::DerefCell);
     }
     ASTKind::FunctionRef(mname, fname) => {
       instructions.push(Instruction::MakeFunctionRef((

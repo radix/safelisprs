@@ -29,12 +29,7 @@ pub enum ASTKind {
 
   // The following variants aren't represented in the syntax, but are produced
   // by transformations on the previous variants.
-  /// A Cell wraps a value in a box. This is used to provide closures with
-  /// access to values in outer variables.
-  Cell(Box<AST>),
-  /// And we can deref these cells to get their inner value.
-  DerefCell(Box<AST>),
-  /// Bind up some arguments with a callable. (this is used for passing cells to closures!)
+  /// Bind up some arguments with a callable. This is used for closure captures.
   PartialApply(Box<AST>, Vec<AST>),
   /// Get a reference to a function.
   FunctionRef(String, String),
@@ -89,14 +84,6 @@ impl AST {
 
   pub(crate) fn String(value: String) -> Self {
     Self::synthetic(ASTKind::String(value))
-  }
-
-  pub(crate) fn Cell(value: Box<AST>) -> Self {
-    Self::synthetic(ASTKind::Cell(value))
-  }
-
-  pub(crate) fn DerefCell(value: Box<AST>) -> Self {
-    Self::synthetic(ASTKind::DerefCell(value))
   }
 
   pub(crate) fn PartialApply(callable: Box<AST>, args: Vec<AST>) -> Self {

@@ -4,8 +4,6 @@
 
 - [ ] **consider an AST `Folder`/visitor** to deduplicate the AST walkers (closure transform, patch_cell_access, wasm discover/count/compile_expr, compiler compile_expr). Only go with this if it actually reduces lines of code
 - [ ] support imports or a prelude. it's dumb to require people to use `std.+`.
-- [ ] **simplify closure captures** now that bindings are immutable. Captured variables no longer need source-visible reassignment support, so the closure transform may be able to pass captures as plain values instead of wrapping them in cells.
-- [ ] **make lifted closure names collision-free**. `mangle_closure_name` uses only the nested function's local name, so same-named nested functions in different lexical scopes can collide. Generate lifted names from a unique lexical path or transform-owned ID, and add a regression with two closure factories that both define `get`.
 - [ ] **support nested self-recursion**. Nested `fn` currently cannot call itself because the transform lifts it under a mangled name and the checker refuses to bind the nested function's own name. Fix transform name resolution, then bind the self name in the checker.
 - [ ] **consider expression-level type ascription**, e.g. `(the (List Int) expr)`, if ambiguous non-`let` expressions ever become useful. Today ambiguity can usually be fixed with a `let` annotation or by deleting dead code.
 - [ ] **consider opaque nominal host-handle types**, e.g. `Rng` instead of `(Cell Int)` for `rand.rng`, if exposing RNG state as a mutable cell turns out to be a footgun.
