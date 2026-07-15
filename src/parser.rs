@@ -34,10 +34,6 @@ pub enum ASTKind {
   Cell(Box<AST>),
   /// And we can deref these cells to get their inner value.
   DerefCell(Box<AST>),
-  /// Set the contents of a Cell. The first expression must evaluate to a
-  /// Cell; the second is the new value to store in it. Evaluates to the new
-  /// value.
-  SetCell(Box<AST>, Box<AST>),
   /// Bind up some arguments with a callable. (this is used for passing cells to closures!)
   PartialApply(Box<AST>, Vec<AST>),
   /// Get a reference to a function.

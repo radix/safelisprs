@@ -336,12 +336,9 @@ impl Checker {
         }
         Ok(result)
       }
-      ASTKind::Cell(_)
-      | ASTKind::DerefCell(_)
-      | ASTKind::SetCell(_, _)
-      | ASTKind::PartialApply(_, _) => Err(TypeError::new(
-        "internal transformed AST reached the source typechecker",
-      )),
+      ASTKind::Cell(_) | ASTKind::DerefCell(_) | ASTKind::PartialApply(_, _) => Err(
+        TypeError::new("internal transformed AST reached the source typechecker"),
+      ),
     }
   }
 
