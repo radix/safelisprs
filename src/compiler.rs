@@ -4,7 +4,7 @@ use crate::builtins::BuiltinSpec;
 use crate::closure::transform_closures_in_module;
 use crate::parser::{self, ASTKind, BindingId, Identifier, AST};
 use crate::prelude::resolve_module_names;
-use crate::typecheck::TypecheckInfo;
+use crate::typecheck::{CheckedModule, TypecheckInfo};
 
 /// A Package can either represent a "program" or a "library".
 /// If a `main` is provided, then it can be executed as a program directly.
@@ -309,11 +309,10 @@ fn find_struct(index: &ModuleIndex, module_name: &str, struct_name: &str) -> Opt
 
 fn compile_resolved_module(
   module_name: &str,
-  asts: &[AST],
-  type_info: &TypecheckInfo,
+  checked: &CheckedModule,
 ) -> Result<CompiledModule, String> {
-  let asts = transform_closures_in_module(module_name, asts)?;
-  ModuleCompiler::new(module_name, &asts, type_info).compile(&asts)
+  let asts = transform_closures_in_module(module_name, checked.asts())?;
+  ModuleCompiler::new(module_name, &asts, checked.type_info()).compile(&asts)
 }
 
 struct ModuleCompiler<'types> {
@@ -602,9 +601,9 @@ fn _compile_from_source(
     .map(|spec| spec.name)
     .collect::<Vec<_>>();
   let asts = resolve_module_names("main", &asts, prelude, &module_symbols)?;
-  let type_info =
-    crate::typecheck::typecheck(&asts, specs).map_err(|error| error.render(module_source))?;
-  Ok(vec![compile_resolved_module("main", &asts, &type_info)?])
+  let checked =
+    crate::typecheck::typecheck(asts, specs).map_err(|error| error.render(module_source))?;
+  Ok(vec![compile_resolved_module("main", &checked)?])
 }
 
 /// Inject a `Callable::Builtin` entry for each `BuiltinSpec` into the named

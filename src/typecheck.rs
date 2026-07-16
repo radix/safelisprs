@@ -139,6 +139,13 @@ enum Binding {
 type Env = HashMap<BindingId, Binding>;
 type TypeVars = HashMap<String, TvRef>;
 
+/// A resolved AST bundled with the semantic facts established by typechecking.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CheckedModule {
+  asts: Vec<AST>,
+  type_info: TypecheckInfo,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TypecheckInfo {
   field_accesses: HashMap<AstId, FieldAccessInfo>,
@@ -148,6 +155,16 @@ pub struct TypecheckInfo {
 pub struct FieldAccessInfo {
   receiver_type: String,
   field_index: u16,
+}
+
+impl CheckedModule {
+  pub fn asts(&self) -> &[AST] {
+    &self.asts
+  }
+
+  pub fn type_info(&self) -> &TypecheckInfo {
+    &self.type_info
+  }
 }
 
 impl TypecheckInfo {
@@ -166,7 +183,7 @@ impl FieldAccessInfo {
   }
 }
 
-pub fn typecheck(asts: &[AST], builtins: &[BuiltinSpec]) -> Result<TypecheckInfo, TypeError> {
+pub fn typecheck(asts: Vec<AST>, builtins: &[BuiltinSpec]) -> Result<CheckedModule, TypeError> {
   typecheck_named(
     asts,
     builtins
@@ -176,10 +193,11 @@ pub fn typecheck(asts: &[AST], builtins: &[BuiltinSpec]) -> Result<TypecheckInfo
 }
 
 pub fn typecheck_named<'a>(
-  asts: &[AST],
+  asts: Vec<AST>,
   builtins: impl IntoIterator<Item = (&'a str, &'a str, &'a BuiltinSignature)>,
-) -> Result<TypecheckInfo, TypeError> {
-  Checker::new(builtins).check(asts)
+) -> Result<CheckedModule, TypeError> {
+  let type_info = Checker::new(builtins).check(&asts)?;
+  Ok(CheckedModule { asts, type_info })
 }
 
 struct Checker {

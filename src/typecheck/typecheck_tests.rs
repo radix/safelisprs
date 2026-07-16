@@ -6,7 +6,7 @@ use crate::prelude::resolve_module_names;
 fn check(source: &str) -> Result<(), TypeError> {
   let asts = read_multiple(source).unwrap();
   let asts = resolve_module_names("main", &asts, &[], &[]).unwrap();
-  typecheck(&asts, &default_builtins().specs()).map(|_| ())
+  typecheck(asts, &default_builtins().specs()).map(|_| ())
 }
 
 #[test]
@@ -51,7 +51,9 @@ fn records_receiver_types_for_field_accesses() {
       b.origin.x)";
   let asts = read_multiple(source).unwrap();
   let asts = resolve_module_names("main", &asts, &[], &[]).unwrap();
-  let info = typecheck(&asts, &default_builtins().specs()).unwrap();
+  let checked = typecheck(asts, &default_builtins().specs()).unwrap();
+  let asts = checked.asts();
+  let info = checked.type_info();
 
   let ASTKind::DefineFn(main) = &asts[2].kind else {
     panic!("expected main function");

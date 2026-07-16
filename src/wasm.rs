@@ -224,8 +224,8 @@ pub fn compile(
     .map(|builtin| builtin.name.as_str())
     .collect::<Vec<_>>();
   let asts = resolve_module_names("main", &asts, prelude, &module_symbols)?;
-  check_types(&asts, builtins).map_err(|error| error.render(source))?;
-  ModuleCompiler::new(builtins).compile(&asts)
+  let checked = check_types(asts, builtins).map_err(|error| error.render(source))?;
+  ModuleCompiler::new(builtins).compile(checked.asts())
 }
 
 /// Compile a slice of already-parsed top-level AST into a WASM binary.
@@ -240,11 +240,14 @@ pub fn compile_asts(
     .map(|builtin| builtin.name.as_str())
     .collect::<Vec<_>>();
   let asts = resolve_module_names("main", asts, prelude, &module_symbols)?;
-  check_types(&asts, builtins).map_err(|error| error.to_string())?;
-  ModuleCompiler::new(builtins).compile(&asts)
+  let checked = check_types(asts, builtins).map_err(|error| error.to_string())?;
+  ModuleCompiler::new(builtins).compile(checked.asts())
 }
 
-fn check_types(asts: &[AST], builtins: &Builtins) -> Result<(), crate::typecheck::TypeError> {
+fn check_types(
+  asts: Vec<AST>,
+  builtins: &Builtins,
+) -> Result<crate::typecheck::CheckedModule, crate::typecheck::TypeError> {
   crate::typecheck::typecheck_named(
     asts,
     builtins.iter().map(|builtin| {
@@ -255,7 +258,6 @@ fn check_types(asts: &[AST], builtins: &Builtins) -> Result<(), crate::typecheck
       )
     }),
   )
-  .map(|_| ())
 }
 
 /// Metadata for a top-level function definition, collected during the first
