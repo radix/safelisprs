@@ -396,179 +396,286 @@ fn compile_function(
   ctx: &CompileContext<'_>,
   f: &parser::Function,
 ) -> Result<Vec<(String, CompiledCallable)>, String> {
-  // Map of local-name to local-index
-  let mut locals = HashMap::new();
-  for (idx, (param, annotation)) in f.params.iter().enumerate() {
-    locals.insert(
-      param.binding,
-      LocalInfo {
-        index: idx as u16,
-        struct_type: annotation
-          .as_ref()
-          .and_then(|ty| struct_name_from_type(ty, ctx.structs)),
-      },
-    );
-  }
-  let mut instructions = vec![];
-  let last_idx = f.code.len().saturating_sub(1);
-  let returns_void = f.returns_void();
-  for (i, ast) in f.code.iter().enumerate() {
-    compile_expr(ctx, ast, &mut locals, &mut instructions)?;
-    // Non-final body expressions are in statement position: their value is
-    // discarded, so pop it off the stack to keep the stack clean. It would be
-    // really nice to avoid pushing things to the stack entirely if we know they
-    // are not going to be used, but that will probably take some more
-    // thought/refactoring.
-    if i != last_idx || returns_void {
-      instructions.push(Instruction::Pop);
-    }
-  }
-  if returns_void {
-    instructions.push(Instruction::PushVoid);
-  }
-  instructions.push(Instruction::Return);
-  Ok(vec![(
-    f.name.name.clone(),
-    Callable::Function(Function {
-      num_params: f.params.len() as u16,
-      num_locals: locals.len() as u16,
-      instructions,
-    }),
-  )])
+  FunctionCompiler::new(ctx, f).compile(f)
 }
 
-/// Compile `ast` into instructions.
-fn compile_expr(
-  ctx: &CompileContext<'_>,
-  ast: &AST,
-  locals: &mut HashMap<BindingId, LocalInfo>,
-  instructions: &mut Vec<CompiledInstruction>,
-) -> Result<(), String> {
-  match &ast.kind {
-    ASTKind::Call(callable, args) => {
-      // CallDynamic expects the callable above its arguments on the stack, so
-      // dynamic calls intentionally evaluate arguments before the callable.
-      for argument in args {
-        compile_expr(ctx, argument, locals, instructions)?;
+struct FunctionCompiler<'ctx, 'module> {
+  ctx: &'ctx CompileContext<'module>,
+  locals: HashMap<BindingId, LocalInfo>,
+  instructions: Vec<CompiledInstruction>,
+}
+
+impl<'ctx, 'module> FunctionCompiler<'ctx, 'module> {
+  fn new(ctx: &'ctx CompileContext<'module>, f: &parser::Function) -> Self {
+    let mut locals = HashMap::new();
+    for (idx, (param, annotation)) in f.params.iter().enumerate() {
+      locals.insert(
+        param.binding,
+        LocalInfo {
+          index: idx as u16,
+          struct_type: annotation
+            .as_ref()
+            .and_then(|ty| struct_name_from_type(ty, ctx.structs)),
+        },
+      );
+    }
+    Self {
+      ctx,
+      locals,
+      instructions: vec![],
+    }
+  }
+
+  fn compile(mut self, f: &parser::Function) -> Result<Vec<(String, CompiledCallable)>, String> {
+    let last_idx = f.code.len().saturating_sub(1);
+    let returns_void = f.returns_void();
+    for (i, ast) in f.code.iter().enumerate() {
+      self.compile_expr(ast)?;
+      // Non-final body expressions are in statement position: their value is
+      // discarded, so pop it off the stack to keep the stack clean. It would be
+      // really nice to avoid pushing things to the stack entirely if we know they
+      // are not going to be used, but that will probably take some more
+      // thought/refactoring.
+      if i != last_idx || returns_void {
+        self.emit(Instruction::Pop);
       }
-      compile_expr(ctx, callable, locals, instructions)?;
-      instructions.push(Instruction::CallDynamic(args.len() as u16));
     }
-    ASTKind::CallFixed(identifier, args) => {
-      for argument in args {
-        compile_expr(ctx, argument, locals, instructions)?;
+    if returns_void {
+      self.emit(Instruction::PushVoid);
+    }
+    self.emit(Instruction::Return);
+    Ok(vec![(
+      f.name.name.clone(),
+      Callable::Function(Function {
+        num_params: f.params.len() as u16,
+        num_locals: self.locals.len() as u16,
+        instructions: self.instructions,
+      }),
+    )])
+  }
+
+  fn emit(&mut self, instruction: CompiledInstruction) -> usize {
+    let position = self.instructions.len();
+    self.instructions.push(instruction);
+    position
+  }
+
+  fn patch_jump_to_here(&mut self, position: usize) -> Result<(), String> {
+    let offset = self
+      .instructions
+      .len()
+      .checked_sub(position + 1)
+      .ok_or_else(|| format!("jump position {position} is past the instruction stream"))?
+      as u32;
+    match &mut self.instructions[position] {
+      Instruction::Jump(target) | Instruction::JumpIfFalse(target) => {
+        *target = offset;
+        Ok(())
       }
-      let (module_name, function_name) = match identifier {
-        Identifier::Qualified(module, function) => (module.clone(), function.clone()),
-        Identifier::Bare(function) => return Err(format!("call to unknown function: {function}")),
-      };
-      instructions.push(Instruction::Call(
-        (module_name, function_name),
-        args.len() as u16,
-      ));
+      instruction => Err(format!(
+        "cannot patch non-jump instruction at {position}: {instruction:?}"
+      )),
     }
-    ASTKind::FunctionRef(module, name) => {
-      instructions.push(Instruction::MakeFunctionRef((module.clone(), name.clone())));
-    }
-    ASTKind::Let(name, annotation, expression) => {
-      if !locals.contains_key(&name.binding) {
-        locals.insert(
-          name.binding,
-          LocalInfo {
-            index: locals.len() as u16,
-            struct_type: None,
-          },
-        );
+  }
+
+  /// Compile `ast` into instructions.
+  fn compile_expr(&mut self, ast: &AST) -> Result<(), String> {
+    match &ast.kind {
+      ASTKind::Call(callable, args) => {
+        // CallDynamic expects the callable above its arguments on the stack, so
+        // dynamic calls intentionally evaluate arguments before the callable.
+        for argument in args {
+          self.compile_expr(argument)?;
+        }
+        self.compile_expr(callable)?;
+        self.emit(Instruction::CallDynamic(args.len() as u16));
       }
-      compile_expr(ctx, expression, locals, instructions)?;
-      let struct_type = annotation
-        .as_ref()
-        .and_then(|ty| struct_name_from_type(ty, ctx.structs))
-        .or_else(|| infer_struct_type(ctx, expression, locals));
-      let local = locals
-        .get_mut(&name.binding)
-        .expect("local was inserted above");
-      local.struct_type = struct_type;
-      let local_index = local.index;
-      instructions.push(Instruction::SetLocal(local_index));
-      instructions.push(Instruction::LoadLocal(local_index));
-    }
-    ASTKind::PartialApply(callable, args) => {
-      // PartialApply uses the same stack layout as CallDynamic.
-      for argument in args {
-        compile_expr(ctx, argument, locals, instructions)?;
+      ASTKind::CallFixed(identifier, args) => {
+        for argument in args {
+          self.compile_expr(argument)?;
+        }
+        let (module_name, function_name) = match identifier {
+          Identifier::Qualified(module, function) => (module.clone(), function.clone()),
+          Identifier::Bare(function) => {
+            return Err(format!("call to unknown function: {function}"))
+          }
+        };
+        self.emit(Instruction::Call(
+          (module_name, function_name),
+          args.len() as u16,
+        ));
       }
-      compile_expr(ctx, callable, locals, instructions)?;
-      instructions.push(Instruction::PartialApply(args.len() as u16));
-    }
-    ASTKind::NewStruct(name, fields) => {
-      let struct_ = ctx
-        .structs
-        .get(name)
-        .ok_or_else(|| format!("unknown struct `{name}`"))?;
-      for (field_name, _) in &struct_.fields {
-        let expression = fields
+      ASTKind::FunctionRef(module, name) => {
+        self.emit(Instruction::MakeFunctionRef((module.clone(), name.clone())));
+      }
+      ASTKind::Let(name, annotation, expression) => {
+        if !self.locals.contains_key(&name.binding) {
+          self.locals.insert(
+            name.binding,
+            LocalInfo {
+              index: self.locals.len() as u16,
+              struct_type: None,
+            },
+          );
+        }
+        self.compile_expr(expression)?;
+        let struct_type = annotation
+          .as_ref()
+          .and_then(|ty| struct_name_from_type(ty, self.ctx.structs))
+          .or_else(|| self.infer_struct_type(expression));
+        let local = self
+          .locals
+          .get_mut(&name.binding)
+          .expect("local was inserted above");
+        local.struct_type = struct_type;
+        let local_index = local.index;
+        self.emit(Instruction::SetLocal(local_index));
+        self.emit(Instruction::LoadLocal(local_index));
+      }
+      ASTKind::PartialApply(callable, args) => {
+        // PartialApply uses the same stack layout as CallDynamic.
+        for argument in args {
+          self.compile_expr(argument)?;
+        }
+        self.compile_expr(callable)?;
+        self.emit(Instruction::PartialApply(args.len() as u16));
+      }
+      ASTKind::NewStruct(name, fields) => {
+        let field_names = self
+          .ctx
+          .structs
+          .get(name)
+          .ok_or_else(|| format!("unknown struct `{name}`"))?
+          .fields
           .iter()
-          .find(|(field, _)| field == field_name)
-          .map(|(_, expression)| expression)
-          .ok_or_else(|| format!("missing initializer for field `{field_name}` of `{name}`"))?;
-        compile_expr(ctx, expression, locals, instructions)?;
+          .map(|(field_name, _)| field_name.clone())
+          .collect::<Vec<_>>();
+        for field_name in field_names {
+          let expression = fields
+            .iter()
+            .find(|(field, _)| field == &field_name)
+            .map(|(_, expression)| expression)
+            .ok_or_else(|| format!("missing initializer for field `{field_name}` of `{name}`"))?;
+          self.compile_expr(expression)?;
+        }
+        self.emit(Instruction::NewStruct((
+          self.ctx.module_name.to_string(),
+          name.clone(),
+        )));
       }
-      instructions.push(Instruction::NewStruct((
-        ctx.module_name.to_string(),
-        name.clone(),
-      )));
-    }
-    ASTKind::FieldAccess(receiver, field) => {
-      let receiver_type = infer_struct_type(ctx, receiver, locals)
-        .ok_or_else(|| format!("field access receiver has no known struct type: {receiver:?}"))?;
-      let (field_index, _) = field_for_struct(ctx, &receiver_type, field)?;
-      compile_expr(ctx, receiver, locals, instructions)?;
-      instructions.push(Instruction::GetField(field_index));
-    }
-    ASTKind::If(condition, then_branch, else_branch) => {
-      // Emit placeholder jumps, then patch their relative offsets once both
-      // branch lengths are known.
-      compile_expr(ctx, condition, locals, instructions)?;
-      let jump_else = instructions.len();
-      instructions.push(Instruction::JumpIfFalse(0));
-      compile_expr(ctx, then_branch, locals, instructions)?;
-      let jump_end = instructions.len();
-      instructions.push(Instruction::Jump(0));
-      let else_start = instructions.len();
-      compile_expr(ctx, else_branch, locals, instructions)?;
-      let end_start = instructions.len();
-      let else_offset = (else_start - jump_else - 1) as u32;
-      let end_offset = (end_start - jump_end - 1) as u32;
-      instructions[jump_else] = Instruction::JumpIfFalse(else_offset);
-      instructions[jump_end] = Instruction::Jump(end_offset);
-    }
-    ASTKind::Block(body) => {
-      // Leave only the final expression's value on the stack.
-      let last_index = body.len().saturating_sub(1);
-      for (index, expression) in body.iter().enumerate() {
-        compile_expr(ctx, expression, locals, instructions)?;
-        if index != last_index {
-          instructions.push(Instruction::Pop);
+      ASTKind::FieldAccess(receiver, field) => {
+        let receiver_type = self
+          .infer_struct_type(receiver)
+          .ok_or_else(|| format!("field access receiver has no known struct type: {receiver:?}"))?;
+        let (field_index, _) = self.field_for_struct(&receiver_type, field)?;
+        self.compile_expr(receiver)?;
+        self.emit(Instruction::GetField(field_index));
+      }
+      ASTKind::If(condition, then_branch, else_branch) => {
+        // Emit placeholder jumps, then patch their relative offsets once both
+        // branch lengths are known.
+        self.compile_expr(condition)?;
+        let jump_else = self.emit(Instruction::JumpIfFalse(0));
+        self.compile_expr(then_branch)?;
+        let jump_end = self.emit(Instruction::Jump(0));
+        self.patch_jump_to_here(jump_else)?;
+        self.compile_expr(else_branch)?;
+        self.patch_jump_to_here(jump_end)?;
+      }
+      ASTKind::Block(body) => {
+        // Leave only the final expression's value on the stack.
+        let last_index = body.len().saturating_sub(1);
+        for (index, expression) in body.iter().enumerate() {
+          self.compile_expr(expression)?;
+          if index != last_index {
+            self.emit(Instruction::Pop);
+          }
         }
       }
+      ASTKind::Variable(name) => {
+        let local = self
+          .locals
+          .get(&name.binding)
+          .ok_or_else(|| format!("Function accesses unbound variable {name}"))?;
+        self.emit(Instruction::LoadLocal(local.index));
+      }
+      ASTKind::Int(value) => {
+        self.emit(Instruction::PushInt(*value));
+      }
+      ASTKind::Float(value) => {
+        self.emit(Instruction::PushFloat(*value));
+      }
+      ASTKind::String(value) => {
+        self.emit(Instruction::PushString(value.clone()));
+      }
+      ASTKind::Bool(value) => {
+        self.emit(Instruction::PushBool(*value));
+      }
+      ASTKind::DefineStruct(_) => {
+        return Err("Unexpected struct definition in expression".to_string())
+      }
+      kind => return Err(format!("Unexpected form at top-level: {kind:?}")),
     }
-    ASTKind::Variable(name) => {
-      let local = locals
-        .get(&name.binding)
-        .ok_or_else(|| format!("Function accesses unbound variable {name}"))?;
-      instructions.push(Instruction::LoadLocal(local.index));
-    }
-    ASTKind::Int(value) => instructions.push(Instruction::PushInt(*value)),
-    ASTKind::Float(value) => instructions.push(Instruction::PushFloat(*value)),
-    ASTKind::String(value) => instructions.push(Instruction::PushString(value.clone())),
-    ASTKind::Bool(value) => instructions.push(Instruction::PushBool(*value)),
-    ASTKind::DefineStruct(_) => {
-      return Err("Unexpected struct definition in expression".to_string())
-    }
-    kind => return Err(format!("Unexpected form at top-level: {kind:?}")),
+    Ok(())
   }
-  Ok(())
+
+  fn infer_struct_type(&self, ast: &AST) -> Option<String> {
+    match &ast.kind {
+      ASTKind::NewStruct(name, _) if self.ctx.structs.contains_key(name) => Some(name.clone()),
+      ASTKind::Variable(name) => self
+        .locals
+        .get(&name.binding)
+        .and_then(|local| local.struct_type.clone()),
+      ASTKind::FieldAccess(receiver, field) => {
+        let receiver = self.infer_struct_type(receiver)?;
+        self.field_struct_type_for_struct(&receiver, field)
+      }
+      ASTKind::Let(_, annotation, expr) => annotation
+        .as_ref()
+        .and_then(|ty| struct_name_from_type(ty, self.ctx.structs))
+        .or_else(|| self.infer_struct_type(expr)),
+      ASTKind::CallFixed(Identifier::Bare(_), _) => None,
+      ASTKind::CallFixed(Identifier::Qualified(module, name), _)
+        if module == self.ctx.module_name =>
+      {
+        self.ctx.function_returns.get(name).cloned().flatten()
+      }
+      ASTKind::Block(body) => body.last().and_then(|expr| self.infer_struct_type(expr)),
+      ASTKind::If(_, then, els) => {
+        let then_type = self.infer_struct_type(then)?;
+        let else_type = self.infer_struct_type(els)?;
+        (then_type == else_type).then_some(then_type)
+      }
+      _ => None,
+    }
+  }
+
+  fn field_for_struct(
+    &self,
+    struct_name: &str,
+    field: &str,
+  ) -> Result<(u16, Option<String>), String> {
+    let struct_ = self
+      .ctx
+      .structs
+      .get(struct_name)
+      .ok_or_else(|| format!("unknown struct `{struct_name}`"))?;
+    let (index, ty) = struct_
+      .fields
+      .iter()
+      .enumerate()
+      .find(|(_, (name, _))| name == field)
+      .map(|(index, (_, ty))| (index as u16, ty))
+      .ok_or_else(|| format!("struct `{struct_name}` has no field `{field}`"))?;
+    Ok((index, struct_name_from_type(ty, self.ctx.structs)))
+  }
+
+  fn field_struct_type_for_struct(&self, struct_name: &str, field: &str) -> Option<String> {
+    self
+      .field_for_struct(struct_name, field)
+      .ok()
+      .and_then(|(_, struct_name)| struct_name)
+  }
 }
 
 fn struct_name_from_type(
@@ -579,69 +686,6 @@ fn struct_name_from_type(
     parser::TypeAst::Named(name) if structs.contains_key(name) => Some(name.clone()),
     _ => None,
   }
-}
-
-fn infer_struct_type(
-  ctx: &CompileContext<'_>,
-  ast: &AST,
-  locals: &HashMap<BindingId, LocalInfo>,
-) -> Option<String> {
-  match &ast.kind {
-    ASTKind::NewStruct(name, _) if ctx.structs.contains_key(name) => Some(name.clone()),
-    ASTKind::Variable(name) => locals
-      .get(&name.binding)
-      .and_then(|local| local.struct_type.clone()),
-    ASTKind::FieldAccess(receiver, field) => {
-      let receiver = infer_struct_type(ctx, receiver, locals)?;
-      field_struct_type_for_struct(ctx, &receiver, field)
-    }
-    ASTKind::Let(_, annotation, expr) => annotation
-      .as_ref()
-      .and_then(|ty| struct_name_from_type(ty, ctx.structs))
-      .or_else(|| infer_struct_type(ctx, expr, locals)),
-    ASTKind::CallFixed(Identifier::Bare(_), _) => None,
-    ASTKind::CallFixed(Identifier::Qualified(module, name), _) if module == ctx.module_name => {
-      ctx.function_returns.get(name).cloned().flatten()
-    }
-    ASTKind::Block(body) => body
-      .last()
-      .and_then(|expr| infer_struct_type(ctx, expr, locals)),
-    ASTKind::If(_, then, els) => {
-      let then_type = infer_struct_type(ctx, then, locals)?;
-      let else_type = infer_struct_type(ctx, els, locals)?;
-      (then_type == else_type).then_some(then_type)
-    }
-    _ => None,
-  }
-}
-
-fn field_for_struct(
-  ctx: &CompileContext<'_>,
-  struct_name: &str,
-  field: &str,
-) -> Result<(u16, Option<String>), String> {
-  let struct_ = ctx
-    .structs
-    .get(struct_name)
-    .ok_or_else(|| format!("unknown struct `{struct_name}`"))?;
-  let (index, ty) = struct_
-    .fields
-    .iter()
-    .enumerate()
-    .find(|(_, (name, _))| name == field)
-    .map(|(index, (_, ty))| (index as u16, ty))
-    .ok_or_else(|| format!("struct `{struct_name}` has no field `{field}`"))?;
-  Ok((index, struct_name_from_type(ty, ctx.structs)))
-}
-
-fn field_struct_type_for_struct(
-  ctx: &CompileContext<'_>,
-  struct_name: &str,
-  field: &str,
-) -> Option<String> {
-  field_for_struct(ctx, struct_name, field)
-    .ok()
-    .and_then(|(_, struct_name)| struct_name)
 }
 
 pub fn compile_executable_from_source(
