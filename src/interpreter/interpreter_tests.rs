@@ -1845,6 +1845,19 @@ fn block_discards_non_final_values() {
 }
 
 #[test]
+fn dynamic_calls_evaluate_arguments_before_the_callable() {
+  let source = "
+    (fn id (x:Int) ->Int x)
+    (fn main () ->Int
+      (let cell (std::cell 0))
+      ((block (std::set! cell 1) id)
+        (block (std::set! cell 2) 0))
+      (std::get cell))
+  ";
+  assert_eq!(eval_main(source), SLValue::Int(1));
+}
+
+#[test]
 fn block_in_if_else_branch() {
   // The else branch uses `block` to sequence two expressions; only the last
   // is returned as the if's (and main's) value.

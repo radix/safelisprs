@@ -413,7 +413,7 @@ fn compile_function(
   let last_idx = f.code.len().saturating_sub(1);
   let returns_void = f.returns_void();
   for (i, ast) in f.code.iter().enumerate() {
-    instructions.extend(compile_expr(ctx, ast, &mut locals)?);
+    compile_expr(ctx, ast, &mut locals, &mut instructions)?;
     // Non-final body expressions are in statement position: their value is
     // discarded, so pop it off the stack to keep the stack clean. It would be
     // really nice to avoid pushing things to the stack entirely if we know they
@@ -442,36 +442,35 @@ fn compile_expr(
   ctx: &CompileContext<'_>,
   ast: &AST,
   locals: &mut HashMap<BindingId, LocalInfo>,
-) -> Result<Vec<CompiledInstruction>, String> {
-  let mut instructions = vec![];
+  instructions: &mut Vec<CompiledInstruction>,
+) -> Result<(), String> {
   match &ast.kind {
-    ASTKind::Call(callable_expr, arg_exprs) => {
-      for expr in arg_exprs {
-        instructions.extend(compile_expr(ctx, expr, locals)?);
+    ASTKind::Call(callable, args) => {
+      // CallDynamic expects the callable above its arguments on the stack, so
+      // dynamic calls intentionally evaluate arguments before the callable.
+      for argument in args {
+        compile_expr(ctx, argument, locals, instructions)?;
       }
-      instructions.extend(compile_expr(ctx, callable_expr, locals)?);
-      instructions.push(Instruction::CallDynamic(arg_exprs.len() as u16))
+      compile_expr(ctx, callable, locals, instructions)?;
+      instructions.push(Instruction::CallDynamic(args.len() as u16));
     }
-    ASTKind::CallFixed(identifier, arg_exprs) => {
-      for expr in arg_exprs {
-        instructions.extend(compile_expr(ctx, expr, locals)?);
+    ASTKind::CallFixed(identifier, args) => {
+      for argument in args {
+        compile_expr(ctx, argument, locals, instructions)?;
       }
       let (module_name, function_name) = match identifier {
-        Identifier::Qualified(mname, fname) => (mname.to_string(), fname.to_string()),
-        Identifier::Bare(fname) => return Err(format!("call to unknown function: {fname}")),
+        Identifier::Qualified(module, function) => (module.clone(), function.clone()),
+        Identifier::Bare(function) => return Err(format!("call to unknown function: {function}")),
       };
       instructions.push(Instruction::Call(
         (module_name, function_name),
-        arg_exprs.len() as u16,
-      ))
+        args.len() as u16,
+      ));
     }
-    ASTKind::FunctionRef(mname, fname) => {
-      instructions.push(Instruction::MakeFunctionRef((
-        mname.to_owned(),
-        fname.to_owned(),
-      )));
+    ASTKind::FunctionRef(module, name) => {
+      instructions.push(Instruction::MakeFunctionRef((module.clone(), name.clone())));
     }
-    ASTKind::Let(name, annotation, expr) => {
+    ASTKind::Let(name, annotation, expression) => {
       if !locals.contains_key(&name.binding) {
         locals.insert(
           name.binding,
@@ -481,11 +480,11 @@ fn compile_expr(
           },
         );
       }
-      instructions.extend(compile_expr(ctx, expr, locals)?);
+      compile_expr(ctx, expression, locals, instructions)?;
       let struct_type = annotation
         .as_ref()
         .and_then(|ty| struct_name_from_type(ty, ctx.structs))
-        .or_else(|| infer_struct_type(ctx, expr, locals));
+        .or_else(|| infer_struct_type(ctx, expression, locals));
       let local = locals
         .get_mut(&name.binding)
         .expect("local was inserted above");
@@ -494,11 +493,12 @@ fn compile_expr(
       instructions.push(Instruction::SetLocal(local_index));
       instructions.push(Instruction::LoadLocal(local_index));
     }
-    ASTKind::PartialApply(expr, args) => {
-      for expr in args {
-        instructions.extend(compile_expr(ctx, expr, locals)?);
+    ASTKind::PartialApply(callable, args) => {
+      // PartialApply uses the same stack layout as CallDynamic.
+      for argument in args {
+        compile_expr(ctx, argument, locals, instructions)?;
       }
-      instructions.extend(compile_expr(ctx, expr, locals)?);
+      compile_expr(ctx, callable, locals, instructions)?;
       instructions.push(Instruction::PartialApply(args.len() as u16));
     }
     ASTKind::NewStruct(name, fields) => {
@@ -507,12 +507,12 @@ fn compile_expr(
         .get(name)
         .ok_or_else(|| format!("unknown struct `{name}`"))?;
       for (field_name, _) in &struct_.fields {
-        let expr = fields
+        let expression = fields
           .iter()
           .find(|(field, _)| field == field_name)
-          .map(|(_, expr)| expr)
+          .map(|(_, expression)| expression)
           .ok_or_else(|| format!("missing initializer for field `{field_name}` of `{name}`"))?;
-        instructions.extend(compile_expr(ctx, expr, locals)?);
+        compile_expr(ctx, expression, locals, instructions)?;
       }
       instructions.push(Instruction::NewStruct((
         ctx.module_name.to_string(),
@@ -523,69 +523,52 @@ fn compile_expr(
       let receiver_type = infer_struct_type(ctx, receiver, locals)
         .ok_or_else(|| format!("field access receiver has no known struct type: {receiver:?}"))?;
       let (field_index, _) = field_for_struct(ctx, &receiver_type, field)?;
-      instructions.extend(compile_expr(ctx, receiver, locals)?);
+      compile_expr(ctx, receiver, locals, instructions)?;
       instructions.push(Instruction::GetField(field_index));
     }
-    ASTKind::If(cond, then, els) => {
-      // <cond>; JumpIfFalse(+else); <then>; Jump(+end); <else>; L_end:
-      //
-      // We generate the code with placeholder jumps, remember their indices,
-      // then patch them with the real relative offsets. Because the offsets are
-      // relative to the instruction *following* each jump, they depend only on
-      // the lengths of the `then` and `else` sub-vectors, not on where this
-      // `if` sits in the enclosing function.
-      instructions.extend(compile_expr(ctx, cond, locals)?);
-      let jmp_else = instructions.len();
+    ASTKind::If(condition, then_branch, else_branch) => {
+      // Emit placeholder jumps, then patch their relative offsets once both
+      // branch lengths are known.
+      compile_expr(ctx, condition, locals, instructions)?;
+      let jump_else = instructions.len();
       instructions.push(Instruction::JumpIfFalse(0));
-      instructions.extend(compile_expr(ctx, then, locals)?);
-      let jmp_end = instructions.len();
+      compile_expr(ctx, then_branch, locals, instructions)?;
+      let jump_end = instructions.len();
       instructions.push(Instruction::Jump(0));
-      // L_else:
       let else_start = instructions.len();
-      instructions.extend(compile_expr(ctx, els, locals)?);
-      // L_end:
+      compile_expr(ctx, else_branch, locals, instructions)?;
       let end_start = instructions.len();
-      // The JumpIfFalse at `jmp_else` must skip over the `then` branch and the
-      // trailing `Jump`. When it executes, IP has already been advanced past
-      // the JumpIfFalse itself (to jmp_else + 1), so the offset is
-      // (else_start - (jmp_else + 1)).
-      let else_offset = (else_start - jmp_else - 1) as u32;
-      // The Jump at `jmp_end` must skip over the `else` branch. When it
-      // executes, IP has already been advanced past the Jump itself
-      // (to jmp_end + 1), so the offset is (end_start - (jmp_end + 1)).
-      let end_offset = (end_start - jmp_end - 1) as u32;
-      instructions[jmp_else] = Instruction::JumpIfFalse(else_offset);
-      instructions[jmp_end] = Instruction::Jump(end_offset);
+      let else_offset = (else_start - jump_else - 1) as u32;
+      let end_offset = (end_start - jump_end - 1) as u32;
+      instructions[jump_else] = Instruction::JumpIfFalse(else_offset);
+      instructions[jump_end] = Instruction::Jump(end_offset);
     }
     ASTKind::Block(body) => {
-      // Evaluate each sub-expression; discard all but the last by popping,
-      // and leave the last on the stack as the block's value.
-      let last_idx = body.len().saturating_sub(1);
-      for (i, expr) in body.iter().enumerate() {
-        instructions.extend(compile_expr(ctx, expr, locals)?);
-        if i != last_idx {
+      // Leave only the final expression's value on the stack.
+      let last_index = body.len().saturating_sub(1);
+      for (index, expression) in body.iter().enumerate() {
+        compile_expr(ctx, expression, locals, instructions)?;
+        if index != last_index {
           instructions.push(Instruction::Pop);
         }
       }
     }
     ASTKind::Variable(name) => {
-      if let Some(local) = locals.get(&name.binding) {
-        instructions.push(Instruction::LoadLocal(local.index));
-      } else {
-        return Err(format!("Function accesses unbound variable {}", name));
-      }
+      let local = locals
+        .get(&name.binding)
+        .ok_or_else(|| format!("Function accesses unbound variable {name}"))?;
+      instructions.push(Instruction::LoadLocal(local.index));
     }
-
-    ASTKind::Int(i) => instructions.push(Instruction::PushInt(*i)),
-    ASTKind::Float(f) => instructions.push(Instruction::PushFloat(*f)),
-    ASTKind::String(s) => instructions.push(Instruction::PushString(s.clone())),
-    ASTKind::Bool(b) => instructions.push(Instruction::PushBool(*b)),
+    ASTKind::Int(value) => instructions.push(Instruction::PushInt(*value)),
+    ASTKind::Float(value) => instructions.push(Instruction::PushFloat(*value)),
+    ASTKind::String(value) => instructions.push(Instruction::PushString(value.clone())),
+    ASTKind::Bool(value) => instructions.push(Instruction::PushBool(*value)),
     ASTKind::DefineStruct(_) => {
       return Err("Unexpected struct definition in expression".to_string())
     }
-    x => return Err(format!("Unexpected form at top-level: {:?}", x)),
+    kind => return Err(format!("Unexpected form at top-level: {kind:?}")),
   }
-  Ok(instructions)
+  Ok(())
 }
 
 fn struct_name_from_type(
