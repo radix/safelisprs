@@ -324,64 +324,111 @@ pub fn compile_module(
 
 fn compile_resolved_module(module_name: &str, asts: &[AST]) -> Result<CompiledModule, String> {
   let asts = transform_closures_in_module(module_name, asts)?;
-  let structs = asts
-    .iter()
-    .filter_map(|ast| match &ast.kind {
-      ASTKind::DefineStruct(struct_) => Some((struct_.name.clone(), struct_.clone())),
-      _ => None,
-    })
-    .collect::<HashMap<_, _>>();
-  let function_returns = asts
-    .iter()
-    .filter_map(|ast| match &ast.kind {
-      ASTKind::DefineFn(func) => Some((
-        func.name.name.clone(),
-        func
-          .return_type
-          .as_ref()
-          .and_then(|ty| struct_name_from_type(ty, &structs)),
-      )),
-      _ => None,
-    })
-    .collect();
-  let ctx = CompileContext {
-    module_name,
-    function_returns: &function_returns,
-    structs: &structs,
-  };
-  let struct_defs = asts
-    .iter()
-    .filter_map(|ast| match &ast.kind {
-      ASTKind::DefineStruct(struct_) => Some(StructDef {
-        name: struct_.name.clone(),
-        fields: struct_
-          .fields
-          .iter()
-          .map(|(field, _)| field.clone())
-          .collect(),
-      }),
-      _ => None,
-    })
-    .collect();
-  let mut functions = vec![];
-  for ast in &asts {
-    match &ast.kind {
-      ASTKind::DefineStruct(_) => {}
-      ASTKind::DefineFn(func) => functions.extend(compile_function(&ctx, func)?),
-      x => return Err(format!("Unexpected form at top-level: {:?}", x)),
-    };
-  }
-  Ok(CompiledModule {
-    name: module_name.to_string(),
-    functions,
-    structs: struct_defs,
-  })
+  ModuleCompiler::new(module_name, &asts).compile(&asts)
 }
 
-struct CompileContext<'a> {
-  module_name: &'a str,
-  function_returns: &'a HashMap<String, Option<String>>,
-  structs: &'a HashMap<String, parser::Struct>,
+struct ModuleCompiler {
+  module_name: String,
+  function_returns: HashMap<String, Option<String>>,
+  structs: HashMap<String, parser::Struct>,
+}
+
+impl ModuleCompiler {
+  fn new(module_name: &str, asts: &[AST]) -> Self {
+    let structs = asts
+      .iter()
+      .filter_map(|ast| match &ast.kind {
+        ASTKind::DefineStruct(struct_) => Some((struct_.name.clone(), struct_.clone())),
+        _ => None,
+      })
+      .collect::<HashMap<_, _>>();
+    let function_returns = asts
+      .iter()
+      .filter_map(|ast| match &ast.kind {
+        ASTKind::DefineFn(func) => Some((
+          func.name.name.clone(),
+          func
+            .return_type
+            .as_ref()
+            .and_then(|ty| struct_name_from_type(ty, &structs)),
+        )),
+        _ => None,
+      })
+      .collect();
+
+    Self {
+      module_name: module_name.to_string(),
+      function_returns,
+      structs,
+    }
+  }
+
+  fn compile(&self, asts: &[AST]) -> Result<CompiledModule, String> {
+    let struct_defs = asts
+      .iter()
+      .filter_map(|ast| match &ast.kind {
+        ASTKind::DefineStruct(struct_) => Some(StructDef {
+          name: struct_.name.clone(),
+          fields: struct_
+            .fields
+            .iter()
+            .map(|(field, _)| field.clone())
+            .collect(),
+        }),
+        _ => None,
+      })
+      .collect();
+    let mut functions = vec![];
+    for ast in asts {
+      match &ast.kind {
+        ASTKind::DefineStruct(_) => {}
+        ASTKind::DefineFn(func) => functions.extend(self.compile_function(func)?),
+        x => return Err(format!("Unexpected form at top-level: {:?}", x)),
+      };
+    }
+    Ok(CompiledModule {
+      name: self.module_name.clone(),
+      functions,
+      structs: struct_defs,
+    })
+  }
+
+  fn compile_function(
+    &self,
+    f: &parser::Function,
+  ) -> Result<Vec<(String, CompiledCallable)>, String> {
+    FunctionCompiler::new(self, f).compile(f)
+  }
+
+  fn struct_name_from_type(&self, ty: &parser::TypeAst) -> Option<String> {
+    struct_name_from_type(ty, &self.structs)
+  }
+
+  fn field_for_struct(
+    &self,
+    struct_name: &str,
+    field: &str,
+  ) -> Result<(u16, Option<String>), String> {
+    let struct_ = self
+      .structs
+      .get(struct_name)
+      .ok_or_else(|| format!("unknown struct `{struct_name}`"))?;
+    let (index, ty) = struct_
+      .fields
+      .iter()
+      .enumerate()
+      .find(|(_, (name, _))| name == field)
+      .map(|(index, (_, ty))| (index as u16, ty))
+      .ok_or_else(|| format!("struct `{struct_name}` has no field `{field}`"))?;
+    Ok((index, self.struct_name_from_type(ty)))
+  }
+
+  fn field_struct_type_for_struct(&self, struct_name: &str, field: &str) -> Option<String> {
+    self
+      .field_for_struct(struct_name, field)
+      .ok()
+      .and_then(|(_, struct_name)| struct_name)
+  }
 }
 
 #[derive(Clone)]
@@ -390,23 +437,14 @@ struct LocalInfo {
   struct_type: Option<String>,
 }
 
-/// Compile a function.
-/// Returns a vec of functions in case any of them contain nested functions.
-fn compile_function(
-  ctx: &CompileContext<'_>,
-  f: &parser::Function,
-) -> Result<Vec<(String, CompiledCallable)>, String> {
-  FunctionCompiler::new(ctx, f).compile(f)
-}
-
-struct FunctionCompiler<'ctx, 'module> {
-  ctx: &'ctx CompileContext<'module>,
+struct FunctionCompiler<'module> {
+  module: &'module ModuleCompiler,
   locals: HashMap<BindingId, LocalInfo>,
   instructions: Vec<CompiledInstruction>,
 }
 
-impl<'ctx, 'module> FunctionCompiler<'ctx, 'module> {
-  fn new(ctx: &'ctx CompileContext<'module>, f: &parser::Function) -> Self {
+impl<'module> FunctionCompiler<'module> {
+  fn new(module: &'module ModuleCompiler, f: &parser::Function) -> Self {
     let mut locals = HashMap::new();
     for (idx, (param, annotation)) in f.params.iter().enumerate() {
       locals.insert(
@@ -415,12 +453,12 @@ impl<'ctx, 'module> FunctionCompiler<'ctx, 'module> {
           index: idx as u16,
           struct_type: annotation
             .as_ref()
-            .and_then(|ty| struct_name_from_type(ty, ctx.structs)),
+            .and_then(|ty| module.struct_name_from_type(ty)),
         },
       );
     }
     Self {
-      ctx,
+      module,
       locals,
       instructions: vec![],
     }
@@ -521,7 +559,7 @@ impl<'ctx, 'module> FunctionCompiler<'ctx, 'module> {
         self.compile_expr(expression)?;
         let struct_type = annotation
           .as_ref()
-          .and_then(|ty| struct_name_from_type(ty, self.ctx.structs))
+          .and_then(|ty| self.module.struct_name_from_type(ty))
           .or_else(|| self.infer_struct_type(expression));
         let local = self
           .locals
@@ -542,7 +580,7 @@ impl<'ctx, 'module> FunctionCompiler<'ctx, 'module> {
       }
       ASTKind::NewStruct(name, fields) => {
         let field_names = self
-          .ctx
+          .module
           .structs
           .get(name)
           .ok_or_else(|| format!("unknown struct `{name}`"))?
@@ -559,7 +597,7 @@ impl<'ctx, 'module> FunctionCompiler<'ctx, 'module> {
           self.compile_expr(expression)?;
         }
         self.emit(Instruction::NewStruct((
-          self.ctx.module_name.to_string(),
+          self.module.module_name.clone(),
           name.clone(),
         )));
       }
@@ -567,7 +605,7 @@ impl<'ctx, 'module> FunctionCompiler<'ctx, 'module> {
         let receiver_type = self
           .infer_struct_type(receiver)
           .ok_or_else(|| format!("field access receiver has no known struct type: {receiver:?}"))?;
-        let (field_index, _) = self.field_for_struct(&receiver_type, field)?;
+        let (field_index, _) = self.module.field_for_struct(&receiver_type, field)?;
         self.compile_expr(receiver)?;
         self.emit(Instruction::GetField(field_index));
       }
@@ -621,24 +659,24 @@ impl<'ctx, 'module> FunctionCompiler<'ctx, 'module> {
 
   fn infer_struct_type(&self, ast: &AST) -> Option<String> {
     match &ast.kind {
-      ASTKind::NewStruct(name, _) if self.ctx.structs.contains_key(name) => Some(name.clone()),
+      ASTKind::NewStruct(name, _) if self.module.structs.contains_key(name) => Some(name.clone()),
       ASTKind::Variable(name) => self
         .locals
         .get(&name.binding)
         .and_then(|local| local.struct_type.clone()),
       ASTKind::FieldAccess(receiver, field) => {
         let receiver = self.infer_struct_type(receiver)?;
-        self.field_struct_type_for_struct(&receiver, field)
+        self.module.field_struct_type_for_struct(&receiver, field)
       }
       ASTKind::Let(_, annotation, expr) => annotation
         .as_ref()
-        .and_then(|ty| struct_name_from_type(ty, self.ctx.structs))
+        .and_then(|ty| self.module.struct_name_from_type(ty))
         .or_else(|| self.infer_struct_type(expr)),
       ASTKind::CallFixed(Identifier::Bare(_), _) => None,
       ASTKind::CallFixed(Identifier::Qualified(module, name), _)
-        if module == self.ctx.module_name =>
+        if module == &self.module.module_name =>
       {
-        self.ctx.function_returns.get(name).cloned().flatten()
+        self.module.function_returns.get(name).cloned().flatten()
       }
       ASTKind::Block(body) => body.last().and_then(|expr| self.infer_struct_type(expr)),
       ASTKind::If(_, then, els) => {
@@ -648,33 +686,6 @@ impl<'ctx, 'module> FunctionCompiler<'ctx, 'module> {
       }
       _ => None,
     }
-  }
-
-  fn field_for_struct(
-    &self,
-    struct_name: &str,
-    field: &str,
-  ) -> Result<(u16, Option<String>), String> {
-    let struct_ = self
-      .ctx
-      .structs
-      .get(struct_name)
-      .ok_or_else(|| format!("unknown struct `{struct_name}`"))?;
-    let (index, ty) = struct_
-      .fields
-      .iter()
-      .enumerate()
-      .find(|(_, (name, _))| name == field)
-      .map(|(index, (_, ty))| (index as u16, ty))
-      .ok_or_else(|| format!("struct `{struct_name}` has no field `{field}`"))?;
-    Ok((index, struct_name_from_type(ty, self.ctx.structs)))
-  }
-
-  fn field_struct_type_for_struct(&self, struct_name: &str, field: &str) -> Option<String> {
-    self
-      .field_for_struct(struct_name, field)
-      .ok()
-      .and_then(|(_, struct_name)| struct_name)
   }
 }
 

@@ -6,18 +6,12 @@ fn returns(name: &str) -> Option<parser::TypeAst> {
 }
 
 fn compile_test_function(f: &parser::Function) -> Result<Vec<(String, CompiledCallable)>, String> {
-  let function_returns = HashMap::new();
-  let structs = HashMap::new();
-  let ctx = CompileContext {
-    module_name: "main",
-    function_returns: &function_returns,
-    structs: &structs,
-  };
   let asts = resolve_module_names("main", &[AST::DefineFn(f.clone())], &[], &[])?;
+  let module = ModuleCompiler::new("main", &asts);
   let ASTKind::DefineFn(f) = &asts[0].kind else {
     unreachable!("the test input is a function");
   };
-  compile_function(&ctx, f)
+  module.compile_function(f)
 }
 
 #[test]
