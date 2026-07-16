@@ -331,17 +331,26 @@ struct ModuleCompiler {
   module_name: String,
   function_returns: HashMap<String, Option<String>>,
   structs: HashMap<String, parser::Struct>,
+  struct_defs: Vec<StructDef>,
 }
 
 impl ModuleCompiler {
   fn new(module_name: &str, asts: &[AST]) -> Self {
-    let structs = asts
-      .iter()
-      .filter_map(|ast| match &ast.kind {
-        ASTKind::DefineStruct(struct_) => Some((struct_.name.clone(), struct_.clone())),
-        _ => None,
-      })
-      .collect::<HashMap<_, _>>();
+    let mut structs = HashMap::new();
+    let mut struct_defs = vec![];
+    for ast in asts {
+      if let ASTKind::DefineStruct(struct_) = &ast.kind {
+        structs.insert(struct_.name.clone(), struct_.clone());
+        struct_defs.push(StructDef {
+          name: struct_.name.clone(),
+          fields: struct_
+            .fields
+            .iter()
+            .map(|(field, _)| field.clone())
+            .collect(),
+        });
+      }
+    }
     let function_returns = asts
       .iter()
       .filter_map(|ast| match &ast.kind {
@@ -360,24 +369,11 @@ impl ModuleCompiler {
       module_name: module_name.to_string(),
       function_returns,
       structs,
+      struct_defs,
     }
   }
 
-  fn compile(&self, asts: &[AST]) -> Result<CompiledModule, String> {
-    let struct_defs = asts
-      .iter()
-      .filter_map(|ast| match &ast.kind {
-        ASTKind::DefineStruct(struct_) => Some(StructDef {
-          name: struct_.name.clone(),
-          fields: struct_
-            .fields
-            .iter()
-            .map(|(field, _)| field.clone())
-            .collect(),
-        }),
-        _ => None,
-      })
-      .collect();
+  fn compile(self, asts: &[AST]) -> Result<CompiledModule, String> {
     let mut functions = vec![];
     for ast in asts {
       match &ast.kind {
@@ -387,9 +383,9 @@ impl ModuleCompiler {
       };
     }
     Ok(CompiledModule {
-      name: self.module_name.clone(),
+      name: self.module_name,
       functions,
-      structs: struct_defs,
+      structs: self.struct_defs,
     })
   }
 
