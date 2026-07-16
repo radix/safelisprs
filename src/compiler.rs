@@ -382,7 +382,7 @@ impl ModuleCompiler {
     for ast in asts {
       match &ast.kind {
         ASTKind::DefineStruct(_) => {}
-        ASTKind::DefineFn(func) => functions.extend(self.compile_function(func)?),
+        ASTKind::DefineFn(func) => functions.push(self.compile_function(func)?),
         x => return Err(format!("Unexpected form at top-level: {:?}", x)),
       };
     }
@@ -393,10 +393,7 @@ impl ModuleCompiler {
     })
   }
 
-  fn compile_function(
-    &self,
-    f: &parser::Function,
-  ) -> Result<Vec<(String, CompiledCallable)>, String> {
+  fn compile_function(&self, f: &parser::Function) -> Result<(String, CompiledCallable), String> {
     FunctionCompiler::new(self, f).compile(f)
   }
 
@@ -464,7 +461,7 @@ impl<'module> FunctionCompiler<'module> {
     }
   }
 
-  fn compile(mut self, f: &parser::Function) -> Result<Vec<(String, CompiledCallable)>, String> {
+  fn compile(mut self, f: &parser::Function) -> Result<(String, CompiledCallable), String> {
     let last_idx = f.code.len().saturating_sub(1);
     let returns_void = f.returns_void();
     for (i, ast) in f.code.iter().enumerate() {
@@ -482,14 +479,14 @@ impl<'module> FunctionCompiler<'module> {
       self.emit(Instruction::PushVoid);
     }
     self.emit(Instruction::Return);
-    Ok(vec![(
+    Ok((
       f.name.name.clone(),
       Callable::Function(Function {
         num_params: f.params.len() as u16,
         num_locals: self.locals.len() as u16,
         instructions: self.instructions,
       }),
-    )])
+    ))
   }
 
   fn emit(&mut self, instruction: CompiledInstruction) -> usize {
@@ -733,14 +730,7 @@ fn _compile_from_source(
     .collect::<Vec<_>>();
   let asts = resolve_module_names("main", &asts, prelude, &module_symbols)?;
   crate::typecheck::typecheck(&asts, specs).map_err(|error| error.render(module_source))?;
-  let compiled_modules = compile_modules(&asts)?;
-  Ok(compiled_modules)
-}
-
-fn compile_modules(asts: &[AST]) -> Result<CompiledModules, String> {
-  println!("Compiling main module");
-  let compiled_module = compile_resolved_module("main", asts)?;
-  Ok(vec![compiled_module])
+  Ok(vec![compile_resolved_module("main", &asts)?])
 }
 
 /// Inject a `Callable::Builtin` entry for each `BuiltinSpec` into the named

@@ -5,7 +5,7 @@ fn returns(name: &str) -> Option<parser::TypeAst> {
   Some(parser::TypeAst::Named(name.to_string()))
 }
 
-fn compile_test_function(f: &parser::Function) -> Result<Vec<(String, CompiledCallable)>, String> {
+fn compile_test_function(f: &parser::Function) -> Result<(String, CompiledCallable), String> {
   let asts = resolve_module_names("main", &[AST::DefineFn(f.clone())], &[], &[])?;
   let module = ModuleCompiler::new("main", &asts);
   let ASTKind::DefineFn(f) = &asts[0].kind else {
@@ -26,14 +26,14 @@ fn compile_id() {
   let code = compile_test_function(&func).unwrap();
   assert_eq!(
     code,
-    vec![(
+    (
       "id".to_string(),
       Callable::Function(Function {
         num_params: 1,
         num_locals: 1,
         instructions: vec![Instruction::LoadLocal(0), Instruction::Return],
       }),
-    )]
+    )
   );
 }
 
@@ -55,7 +55,7 @@ fn compile_call_to_local_function_ref() {
   let code = compile_test_function(&func).unwrap();
   assert_eq!(
     code,
-    vec![(
+    (
       "main".to_string(),
       Callable::Function(Function {
         num_params: 0,
@@ -70,7 +70,7 @@ fn compile_call_to_local_function_ref() {
           Instruction::Return,
         ],
       }),
-    )]
+    )
   );
 }
 
@@ -86,7 +86,7 @@ fn compile_let_returns_bound_value() {
   let code = compile_test_function(&func).unwrap();
   assert_eq!(
     code,
-    vec![(
+    (
       "main".to_string(),
       Callable::Function(Function {
         num_params: 0,
@@ -98,7 +98,7 @@ fn compile_let_returns_bound_value() {
           Instruction::Return,
         ],
       }),
-    )]
+    )
   );
 }
 
@@ -114,7 +114,7 @@ fn compile_void_discards_body_value() {
   let code = compile_test_function(&func).unwrap();
   assert_eq!(
     code,
-    vec![(
+    (
       "main".to_string(),
       Callable::Function(Function {
         num_params: 0,
@@ -126,7 +126,7 @@ fn compile_void_discards_body_value() {
           Instruction::Return,
         ],
       }),
-    )]
+    )
   );
 }
 
