@@ -461,12 +461,8 @@ impl Checker {
     identifier: &Identifier,
     args: &[AST],
   ) -> Result<Type, TypeError> {
-    let label = match identifier {
-      Identifier::Bare(name) => name.clone(),
-      Identifier::Qualified(module, name) => format!("{module}::{name}"),
-    };
-
     if let Identifier::Bare(name) = identifier {
+      let label = name.clone();
       if let Some(binding) = env.get(name).cloned() {
         let callee = self.instantiate_binding(binding, Some(format!("call to `{label}`")))?;
         let arg_types = args
@@ -488,6 +484,11 @@ impl Checker {
         return Ok(ret);
       }
     }
+
+    let label = match identifier {
+      Identifier::Bare(name) => name.clone(),
+      Identifier::Qualified(module, name) => format!("{module}::{name}"),
+    };
 
     let scheme = match identifier {
       Identifier::Bare(name) => self
@@ -1434,7 +1435,7 @@ mod tests {
   }
 
   #[test]
-  fn bare_builtin_call_requires_qualification() {
+  fn bare_builtin_call_requires_prelude_resolution_before_typecheck() {
     let error = check("(fn main () ->Int (+ 1 2))").unwrap_err();
     assert_eq!(error.message, "unknown function `+`");
   }

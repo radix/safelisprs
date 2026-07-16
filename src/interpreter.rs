@@ -1763,7 +1763,8 @@ mod test {
 
   /// Like `eval_main`, but with a custom builtin registry.
   fn eval_main_with(source: &str, builtins: Builtins) -> SLValue {
-    let pkg = compile_executable_from_source(source, ("main", "main"), &builtins.specs()).unwrap();
+    let pkg =
+      compile_executable_from_source(source, ("main", "main"), &builtins.specs(), &[]).unwrap();
     let interp = Interpreter::with_builtins(pkg, builtins);
     let mut exec = interp.call_main().unwrap();
     exec.run_until_done().unwrap()
@@ -1903,7 +1904,7 @@ mod test {
     ));
     let source = "(fn main () ->Int (add2 3))".to_string();
     let package =
-      compile_executable_from_source(&source, ("main", "main"), &builtins.specs()).unwrap();
+      compile_executable_from_source(&source, ("main", "main"), &builtins.specs(), &[]).unwrap();
 
     let interpreter = Interpreter::with_builtins(package, builtins);
     let mut exec = interpreter.call_main().unwrap();
@@ -1960,7 +1961,7 @@ mod test {
     "
     .to_string();
     let pkg =
-      compile_executable_from_source(&source, ("main", "main"), &default_builtins().specs())
+      compile_executable_from_source(&source, ("main", "main"), &default_builtins().specs(), &[])
         .unwrap();
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
@@ -2267,8 +2268,9 @@ mod test {
     // `+` is a fixed binary builtin; calling it with one arg should now be
     // caught at the call site via the carried arity.
     let src = "(fn main () ->Int (std::+ 1))";
-    let err = compile_executable_from_source(src, ("main", "main"), &default_builtins().specs())
-      .unwrap_err();
+    let err =
+      compile_executable_from_source(src, ("main", "main"), &default_builtins().specs(), &[])
+        .unwrap_err();
     assert!(
       err.contains("expects 2 arguments, got 1"),
       "unexpected error: {}",
@@ -2325,8 +2327,9 @@ mod test {
         b)
       (fn main () ->Int (waste) (waste) (waste))
     ";
-    let pkg = compile_executable_from_source(source, ("main", "main"), &default_builtins().specs())
-      .unwrap();
+    let pkg =
+      compile_executable_from_source(source, ("main", "main"), &default_builtins().specs(), &[])
+        .unwrap();
     let (mod_idx, fn_idx) = pkg.main.unwrap();
     let function = pkg.get_function(mod_idx, fn_idx).unwrap().clone();
     if let Callable::Function(function) = function {
@@ -2353,7 +2356,8 @@ mod test {
       sig(&[], vec![TypeConst::Int], None, TypeConst::Int),
       |_| Err("boom".into()),
     ));
-    let pkg = compile_executable_from_source(source, ("main", "main"), &builtins.specs()).unwrap();
+    let pkg =
+      compile_executable_from_source(source, ("main", "main"), &builtins.specs(), &[]).unwrap();
     let interp = Interpreter::with_builtins(pkg, builtins);
     let mut exec = interp.call_main().unwrap();
     assert_eq!(exec.run_until_done().unwrap(), SLValue::Int(42));
@@ -2362,16 +2366,18 @@ mod test {
   #[test]
   fn if_rejects_non_bool_condition() {
     let source = "(fn main () ->Int (if 1 42 0))";
-    let err = compile_executable_from_source(source, ("main", "main"), &default_builtins().specs())
-      .unwrap_err();
+    let err =
+      compile_executable_from_source(source, ("main", "main"), &default_builtins().specs(), &[])
+        .unwrap_err();
     assert!(err.contains("expected `Bool`, got `Int`"), "{err}");
   }
 
   #[test]
   fn run_completes_in_one_call() {
     let source = "(fn main () ->Int 5)";
-    let pkg = compile_executable_from_source(source, ("main", "main"), &default_builtins().specs())
-      .unwrap();
+    let pkg =
+      compile_executable_from_source(source, ("main", "main"), &default_builtins().specs(), &[])
+        .unwrap();
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
     let status = exec.run(1_000).unwrap();
@@ -2383,8 +2389,9 @@ mod test {
     let source = "
       (fn main () ->Int
         (let a 1) (let b 2) (let c 3) (let d 4) 5)";
-    let pkg = compile_executable_from_source(source, ("main", "main"), &default_builtins().specs())
-      .unwrap();
+    let pkg =
+      compile_executable_from_source(source, ("main", "main"), &default_builtins().specs(), &[])
+        .unwrap();
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
     let status = exec.run(3).unwrap();
@@ -2399,8 +2406,9 @@ mod test {
   fn run_hits_limit_exactly() {
     // (std::+ 1 2) is 4 bytecodes: PushInt(1), PushInt(2), Call(std::+), Return.
     let source = "(fn main () ->Int (std::+ 1 2))";
-    let pkg = compile_executable_from_source(source, ("main", "main"), &default_builtins().specs())
-      .unwrap();
+    let pkg =
+      compile_executable_from_source(source, ("main", "main"), &default_builtins().specs(), &[])
+        .unwrap();
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
     let status = exec.run(4).unwrap();
@@ -2411,8 +2419,9 @@ mod test {
   #[test]
   fn run_limited_mid_program_pauses() {
     let source = "(fn main () ->Int (std::+ 1 2))";
-    let pkg = compile_executable_from_source(source, ("main", "main"), &default_builtins().specs())
-      .unwrap();
+    let pkg =
+      compile_executable_from_source(source, ("main", "main"), &default_builtins().specs(), &[])
+        .unwrap();
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
     let status = exec.run(2).unwrap();
@@ -2425,8 +2434,9 @@ mod test {
   #[test]
   fn infinite_recursion_is_bounded_by_run_budget() {
     let source = "(fn loop (n:Int) ->Int (loop n)) (fn main () ->Int (loop 1))";
-    let pkg = compile_executable_from_source(source, ("main", "main"), &default_builtins().specs())
-      .unwrap();
+    let pkg =
+      compile_executable_from_source(source, ("main", "main"), &default_builtins().specs(), &[])
+        .unwrap();
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
     let status = exec.run(10_000).unwrap();
@@ -2437,8 +2447,9 @@ mod test {
   #[test]
   fn executed_count_is_cumulative() {
     let source = "(fn main () ->Int (let a 1) (let b 2) (let c 3) 4)";
-    let pkg = compile_executable_from_source(source, ("main", "main"), &default_builtins().specs())
-      .unwrap();
+    let pkg =
+      compile_executable_from_source(source, ("main", "main"), &default_builtins().specs(), &[])
+        .unwrap();
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
     exec.run(2).unwrap();
@@ -2458,8 +2469,9 @@ mod test {
     // result. Each `main` returns its distinct constant so we can tell them
     // apart.
     let source = "(fn main () ->Int (let a 1) (let b 2) 3)";
-    let pkg = compile_executable_from_source(source, ("main", "main"), &default_builtins().specs())
-      .unwrap();
+    let pkg =
+      compile_executable_from_source(source, ("main", "main"), &default_builtins().specs(), &[])
+        .unwrap();
     let interp = Interpreter::new(pkg);
     let mut exec_a = interp.call_main().unwrap();
     let mut exec_b = interp.call_main().unwrap();
@@ -2481,8 +2493,9 @@ mod test {
   fn run_for_duration_completes() {
     // A trivial program completes well within a generous duration.
     let source = "(fn main () ->Int 5)";
-    let pkg = compile_executable_from_source(source, ("main", "main"), &default_builtins().specs())
-      .unwrap();
+    let pkg =
+      compile_executable_from_source(source, ("main", "main"), &default_builtins().specs(), &[])
+        .unwrap();
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
     let status = exec.run_for_duration(Duration::from_secs(1)).unwrap();
@@ -2493,8 +2506,9 @@ mod test {
   fn run_for_duration_pauses_on_infinite_recursion() {
     // A non-terminating program is bounded by the time budget and pauses.
     let source = "(fn loop (n:Int) ->Int (loop n)) (fn main () ->Int (loop 1))";
-    let pkg = compile_executable_from_source(source, ("main", "main"), &default_builtins().specs())
-      .unwrap();
+    let pkg =
+      compile_executable_from_source(source, ("main", "main"), &default_builtins().specs(), &[])
+        .unwrap();
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
     let status = exec.run_for_duration(Duration::from_millis(50)).unwrap();
@@ -2511,8 +2525,9 @@ mod test {
     // unreachable from the root. Forcing a full collection cycle should
     // reclaim those allocations.
     let source = "(fn main () ->Int (let garbage (std::cell 42)) 99)";
-    let pkg = compile_executable_from_source(source, ("main", "main"), &default_builtins().specs())
-      .unwrap();
+    let pkg =
+      compile_executable_from_source(source, ("main", "main"), &default_builtins().specs(), &[])
+        .unwrap();
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
 
@@ -2556,8 +2571,9 @@ mod test {
             (waste (std::- n 1)))))
       (fn main () ->Int (waste 1000))
     ";
-    let pkg = compile_executable_from_source(source, ("main", "main"), &default_builtins().specs())
-      .unwrap();
+    let pkg =
+      compile_executable_from_source(source, ("main", "main"), &default_builtins().specs(), &[])
+        .unwrap();
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
 
@@ -2584,8 +2600,9 @@ mod test {
     // A program that returns a Cell: the Cell must survive a forced
     // collection, proving that reachable `Gc` pointers are not reclaimed.
     let source = "(fn main () ->(Cell Int) (std::cell 3))";
-    let pkg = compile_executable_from_source(source, ("main", "main"), &default_builtins().specs())
-      .unwrap();
+    let pkg =
+      compile_executable_from_source(source, ("main", "main"), &default_builtins().specs(), &[])
+        .unwrap();
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
 
@@ -2614,8 +2631,9 @@ mod test {
   #[test]
   fn cell_wrapping_immediate_allocates_one_gc_box() {
     let source = "(fn main () ->(Cell Int) (std::cell 3))";
-    let pkg = compile_executable_from_source(source, ("main", "main"), &default_builtins().specs())
-      .unwrap();
+    let pkg =
+      compile_executable_from_source(source, ("main", "main"), &default_builtins().specs(), &[])
+        .unwrap();
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
 
@@ -2645,8 +2663,9 @@ mod test {
   #[test]
   fn memory_limit_errors_when_exceeded() {
     let source = "(fn main () ->Int (let garbage (std::cell 42)) 99)";
-    let pkg = compile_executable_from_source(source, ("main", "main"), &default_builtins().specs())
-      .unwrap();
+    let pkg =
+      compile_executable_from_source(source, ("main", "main"), &default_builtins().specs(), &[])
+        .unwrap();
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
     // 1 byte is far below any allocation; the first step after entering main
@@ -2666,8 +2685,9 @@ mod test {
     // A trivial program that only pushes an int and returns should fit well
     // under a generous limit and complete normally.
     let source = "(fn main () ->Int 5)";
-    let pkg = compile_executable_from_source(source, ("main", "main"), &default_builtins().specs())
-      .unwrap();
+    let pkg =
+      compile_executable_from_source(source, ("main", "main"), &default_builtins().specs(), &[])
+        .unwrap();
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
     exec.set_memory_limit(Some(1024 * 1024));
@@ -2687,8 +2707,9 @@ mod test {
           (loop (std::- n 1) (std::push acc n))))
       (fn main () ->(List Int) (loop 100000 (std::list)))
     ";
-    let pkg = compile_executable_from_source(source, ("main", "main"), &default_builtins().specs())
-      .unwrap();
+    let pkg =
+      compile_executable_from_source(source, ("main", "main"), &default_builtins().specs(), &[])
+        .unwrap();
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
     exec.set_memory_limit(Some(64 * 1024));
@@ -2722,8 +2743,9 @@ mod test {
       (fn spin () ->Int (spin))
       (fn main () ->Int (spin))
     ";
-    let pkg = compile_executable_from_source(source, ("main", "main"), &default_builtins().specs())
-      .unwrap();
+    let pkg =
+      compile_executable_from_source(source, ("main", "main"), &default_builtins().specs(), &[])
+        .unwrap();
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
     // 64 KiB is far below what 200 000 cloned instruction vectors + frame
@@ -2783,8 +2805,9 @@ mod test {
           (grow (std::concat s s) (std::- n 1))))
       (fn main () ->String (grow \"x\" 25))
     ";
-    let pkg = compile_executable_from_source(source, ("main", "main"), &default_builtins().specs())
-      .unwrap();
+    let pkg =
+      compile_executable_from_source(source, ("main", "main"), &default_builtins().specs(), &[])
+        .unwrap();
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
     exec.set_memory_limit(Some(64 * 1024));
@@ -2833,8 +2856,9 @@ mod test {
         (let big (grow \"x\" 20))
         (make-holder big))
     ";
-    let pkg = compile_executable_from_source(source, ("main", "main"), &default_builtins().specs())
-      .unwrap();
+    let pkg =
+      compile_executable_from_source(source, ("main", "main"), &default_builtins().specs(), &[])
+        .unwrap();
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
     // Step to completion with no limit: builds the 1 MiB string and closure.
@@ -2882,7 +2906,7 @@ mod test {
     let large = "x".repeat(64 * 1024);
     let source = format!("(fn main () ->String (let c (std::cell \"{large}\")) (std::get c))");
     let pkg =
-      compile_executable_from_source(&source, ("main", "main"), &default_builtins().specs())
+      compile_executable_from_source(&source, ("main", "main"), &default_builtins().specs(), &[])
         .unwrap();
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
@@ -2923,8 +2947,9 @@ mod test {
   #[test]
   fn explicit_set_on_non_cell_errors() {
     let source = "(fn main () ->Int (std::set! 1 2))";
-    let err = compile_executable_from_source(source, ("main", "main"), &default_builtins().specs())
-      .unwrap_err();
+    let err =
+      compile_executable_from_source(source, ("main", "main"), &default_builtins().specs(), &[])
+        .unwrap_err();
     assert!(err.contains("expected `(Cell"), "unexpected error: {}", err);
   }
 
@@ -2953,8 +2978,9 @@ mod test {
         self)
       (fn main () ->Int (make-cycle) 99)
     ";
-    let pkg = compile_executable_from_source(source, ("main", "main"), &default_builtins().specs())
-      .unwrap();
+    let pkg =
+      compile_executable_from_source(source, ("main", "main"), &default_builtins().specs(), &[])
+        .unwrap();
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
 
@@ -2989,7 +3015,7 @@ mod test {
       (fn main () ->Int ((make-cycle)) 99)
     ";
     let error =
-      compile_executable_from_source(source, ("main", "main"), &default_builtins().specs())
+      compile_executable_from_source(source, ("main", "main"), &default_builtins().specs(), &[])
         .unwrap_err();
     assert!(error.contains("infinite type"), "{error}");
   }
@@ -3216,14 +3242,15 @@ mod test {
   }
 
   #[test]
-  fn source_set_is_no_longer_a_special_form() {
+  fn bare_set_resolves_to_std_builtin_not_special_form() {
     let err = compile_executable_from_source(
       "(fn main () ->Int (let x 1) (set! x 2))",
       ("main", "main"),
       &default_builtins().specs(),
+      &[("std", "set!")],
     )
     .unwrap_err();
-    assert!(err.contains("unknown function `set!`"), "unexpected: {err}");
+    assert!(err.contains("expected `(Cell"), "unexpected: {err}");
   }
 
   #[test]
@@ -3470,11 +3497,15 @@ mod test {
 
   /// Helper: evaluate `main` and return the error string (panics if no error).
   fn eval_main_err(source: &str) -> String {
-    let pkg =
-      match compile_executable_from_source(source, ("main", "main"), &default_builtins().specs()) {
-        Ok(pkg) => pkg,
-        Err(error) => return error,
-      };
+    let pkg = match compile_executable_from_source(
+      source,
+      ("main", "main"),
+      &default_builtins().specs(),
+      &[],
+    ) {
+      Ok(pkg) => pkg,
+      Err(error) => return error,
+    };
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
     exec.run_until_done().unwrap_err()
@@ -3542,8 +3573,9 @@ mod test {
       (fn main () ->Int
         (let a 1) (id 10) (let b 2) (id 20) (let c 3) (id 30))
     ";
-    let pkg = compile_executable_from_source(source, ("main", "main"), &default_builtins().specs())
-      .unwrap();
+    let pkg =
+      compile_executable_from_source(source, ("main", "main"), &default_builtins().specs(), &[])
+        .unwrap();
     let (mod_idx, fn_idx) = pkg.main.unwrap();
     let function = pkg.get_function(mod_idx, fn_idx).cloned().unwrap();
     if let Callable::Function(function) = function {
@@ -3657,8 +3689,9 @@ mod test {
   #[test]
   fn top_level_void_function_completes_with_void() {
     let source = "(fn main () (let a 1) (let b 2) (std::+ a b))";
-    let pkg = compile_executable_from_source(source, ("main", "main"), &default_builtins().specs())
-      .unwrap();
+    let pkg =
+      compile_executable_from_source(source, ("main", "main"), &default_builtins().specs(), &[])
+        .unwrap();
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
     let result = exec.run_until_done().unwrap();
@@ -3731,7 +3764,8 @@ mod test {
       (fn dbl (x:Int) ->Int (std::+ x x))
       (fn main () ->Int (applydouble dbl))
     ";
-    let pkg = compile_executable_from_source(source, ("main", "main"), &builtins.specs()).unwrap();
+    let pkg =
+      compile_executable_from_source(source, ("main", "main"), &builtins.specs(), &[]).unwrap();
     let interp = Interpreter::with_builtins(pkg, builtins);
     let mut exec = interp.call_main().unwrap();
     assert_eq!(exec.run_until_done().unwrap(), SLValue::Int(28));
@@ -3768,7 +3802,8 @@ mod test {
       (fn voidy (x:Int) (std::+ x 1))
       (fn main () ->Bool (callvoid voidy))
     ";
-    let pkg = compile_executable_from_source(source, ("main", "main"), &builtins.specs()).unwrap();
+    let pkg =
+      compile_executable_from_source(source, ("main", "main"), &builtins.specs(), &[]).unwrap();
     let interp = Interpreter::with_builtins(pkg, builtins);
     let mut exec = interp.call_main().unwrap();
     assert_eq!(exec.run_until_done().unwrap(), SLValue::Bool(true));

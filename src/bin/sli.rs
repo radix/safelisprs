@@ -14,6 +14,7 @@ use safelisp::builtins::default_builtins;
 use safelisp::compiler::compile_executable_from_source;
 use safelisp::compiler::Package;
 use safelisp::interpreter::{Interpreter, Status};
+use safelisp::prelude::std_prelude_from_specs;
 
 #[derive(Parser)]
 #[clap(author, version, about, long_about = None)]
@@ -63,7 +64,9 @@ fn main() -> Result<()> {
 
   let package = match (&args.code, &args.input_file) {
     (Some(source), None) => {
-      compile_executable_from_source(source, ("main", "main"), &default_builtins().specs())
+      let specs = default_builtins().specs();
+      let prelude = std_prelude_from_specs(&specs);
+      compile_executable_from_source(source, ("main", "main"), &specs, &prelude)
         .map_err(|e| anyhow!("{}", e))?
     }
     (None, Some(input_file)) => {

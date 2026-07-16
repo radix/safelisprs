@@ -12,6 +12,7 @@ use clap::Parser;
 
 use safelisp::builtins::default_builtins;
 use safelisp::compiler::{compile_executable_from_source, compile_from_source};
+use safelisp::prelude::std_prelude_from_specs;
 
 #[derive(Parser)]
 #[clap(author, version, about, long_about = None)]
@@ -50,15 +51,13 @@ fn main() -> Result<()> {
     input_data
   };
 
+  let specs = default_builtins().specs();
+  let prelude = std_prelude_from_specs(&specs);
   let package = if args.no_main {
-    compile_from_source(&input_data, &default_builtins().specs())
+    compile_from_source(&input_data, &specs, &prelude)
   } else {
     let main_func = args.main_function;
-    compile_executable_from_source(
-      &input_data,
-      ("main", &main_func),
-      &default_builtins().specs(),
-    )
+    compile_executable_from_source(&input_data, ("main", &main_func), &specs, &prelude)
   }
   .map_err(|e| anyhow!("{}", e))?;
 

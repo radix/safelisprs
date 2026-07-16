@@ -10,6 +10,7 @@ use wasm_encoder::{
 
 use crate::builtins::{sig, BuiltinSignature, Trait, TypeConst};
 use crate::parser::{self, ASTKind, Identifier, AST};
+use crate::prelude::resolve_module_prelude;
 
 /// Tag values for the SafeLisp tagged-value representation. Every SafeLisp
 /// value on the WASM stack is a `(payload: i64, tag: i32)` pair — payload
@@ -211,16 +212,26 @@ struct Signature {
 /// All SafeLisp values are represented as `(i64 payload, i32 tag)` pairs on
 /// the WASM stack. The tag discriminates Int (0), Float (1), Bool (2), and
 /// Void (3).
-pub fn compile(source: &str, builtins: &Builtins) -> Result<Vec<u8>, String> {
+pub fn compile(
+  source: &str,
+  builtins: &Builtins,
+  prelude: &[(&str, &str)],
+) -> Result<Vec<u8>, String> {
   let asts = parser::read_multiple(source)?;
+  let asts = resolve_module_prelude(&asts, prelude)?;
   check_types(&asts, builtins).map_err(|error| error.render(source))?;
   ModuleCompiler::new(builtins).compile(&asts)
 }
 
 /// Compile a slice of already-parsed top-level AST into a WASM binary.
-pub fn compile_asts(asts: &[AST], builtins: &Builtins) -> Result<Vec<u8>, String> {
-  check_types(asts, builtins).map_err(|error| error.to_string())?;
-  ModuleCompiler::new(builtins).compile(asts)
+pub fn compile_asts(
+  asts: &[AST],
+  builtins: &Builtins,
+  prelude: &[(&str, &str)],
+) -> Result<Vec<u8>, String> {
+  let asts = resolve_module_prelude(asts, prelude)?;
+  check_types(&asts, builtins).map_err(|error| error.to_string())?;
+  ModuleCompiler::new(builtins).compile(&asts)
 }
 
 fn check_types(asts: &[AST], builtins: &Builtins) -> Result<(), crate::typecheck::TypeError> {
@@ -437,7 +448,7 @@ impl<'b> ModuleCompiler<'b> {
     match &ast.kind {
       ASTKind::Int(_) | ASTKind::Float(_) | ASTKind::Bool(_) | ASTKind::Variable(_) => {}
       ASTKind::FunctionRef(module, name) => {
-        self.resolve_builtin_for_discovery(&Identifier::Qualified(module.clone(), name.clone()))?;
+        self.record_builtin_import(module, name);
       }
       ASTKind::Let(_, _, expr) => self.discover_expr(expr)?,
       ASTKind::If(cond, then, els) => {
@@ -507,6 +518,29 @@ impl<'b> ModuleCompiler<'b> {
       }
     }
     Ok(())
+  }
+
+  fn record_builtin_import(&mut self, module: &str, name: &str) {
+    let Some(b) = self.builtins.lookup(module, name) else {
+      return;
+    };
+    let key = (b.module.clone(), b.name.clone());
+    if !self.used_imports.contains_key(&key) {
+      let sig = Signature {
+        params: slval_param_types(b.num_params as u32),
+        results: SLVAL.to_vec(),
+      };
+      let type_index = self.type_index(sig);
+      let func_index = self.used_imports.len() as u32;
+      self.used_imports.insert(
+        key,
+        UsedImport {
+          builtin: b.clone(),
+          func_index,
+          type_index,
+        },
+      );
+    }
   }
 
   /// Compile one function. Each SafeLisp-value local is two WASM locals:
@@ -1086,7 +1120,7 @@ mod test {
   /// Compile with the given `builtins` registry, auto-register every builtin
   /// with the linker, then instantiate and run `main`.
   fn run_main_with(source: &str, builtins: &Builtins) -> Result<SLValue, String> {
-    let wasm = compile(source, builtins)?;
+    let wasm = compile(source, builtins, &[])?;
     let engine = Engine::default();
     let module = Module::from_binary(&engine, &wasm).map_err(|e| format!("wasm validate: {e}"))?;
     let mut linker: Linker<()> = Linker::new(&engine);
@@ -1320,6 +1354,7 @@ mod test {
     let wasm = compile(
       "(fn id (a:Int) ->Int a) (fn main () ->Int (id 7))",
       &std_builtins(),
+      &[],
     )
     .unwrap();
     let engine = Engine::default();
@@ -1329,7 +1364,7 @@ mod test {
   #[test]
   fn compile_rejects_type_errors_before_wasm_codegen() {
     let source = "(fn main () ->Int\n  (std::+ 1\n    true))";
-    let error = compile(source, &std_builtins()).unwrap_err();
+    let error = compile(source, &std_builtins(), &[]).unwrap_err();
     assert!(error.starts_with("line 3, column 5: TypeError:"), "{error}");
     assert!(error.contains("expected `Int`, got `Bool`"), "{error}");
   }
@@ -1366,7 +1401,7 @@ mod test {
 
   #[test]
   fn unused_builtins_are_not_emitted() {
-    let wasm = compile("(fn main () ->Int (std::+ 1 2))", &std_builtins()).unwrap();
+    let wasm = compile("(fn main () ->Int (std::+ 1 2))", &std_builtins(), &[]).unwrap();
     let engine = Engine::default();
     let module = Module::from_binary(&engine, &wasm).unwrap();
     let num_imports = module.imports().filter(|i| i.module() == "std").count();

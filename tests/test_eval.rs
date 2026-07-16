@@ -13,6 +13,8 @@ use safelisp::interpreter::{Interpreter, SLValue};
 use safelisp::wasm::{self, SLValue as WasmVal};
 use wasmtime::{Engine, Linker, Module, Store};
 
+const PRELUDE: &[(&str, &str)] = &[("std", "+"), ("std", "-"), ("std", "==")];
+
 /// A value that both backends can produce, for cross-backend comparison.
 #[derive(Debug, Clone, PartialEq)]
 enum Val {
@@ -25,8 +27,13 @@ enum Val {
 /// Run `source` through the SLC compiler + interpreter and return the result
 /// as a `Val`. Panics on compile or runtime errors.
 fn eval_interpreter(source: &str) -> Val {
-  let pkg = compile_executable_from_source(source, ("main", "main"), &default_builtins().specs())
-    .unwrap_or_else(|e| panic!("interpreter compile failed: {e}"));
+  let pkg = compile_executable_from_source(
+    source,
+    ("main", "main"),
+    &default_builtins().specs(),
+    PRELUDE,
+  )
+  .unwrap_or_else(|e| panic!("interpreter compile failed: {e}"));
   let interp = Interpreter::new(pkg);
   let mut exec = interp
     .call_main()
@@ -48,8 +55,8 @@ fn eval_interpreter(source: &str) -> Val {
 /// on compile or runtime errors.
 fn eval_wasm(source: &str) -> Val {
   let builtins = wasm::std_builtins();
-  let wasm =
-    wasm::compile(source, &builtins).unwrap_or_else(|e| panic!("wasm compile failed: {e}"));
+  let wasm = wasm::compile(source, &builtins, PRELUDE)
+    .unwrap_or_else(|e| panic!("wasm compile failed: {e}"));
   let engine = Engine::default();
   let module = Module::from_binary(&engine, &wasm).unwrap_or_else(|e| panic!("wasm validate: {e}"));
   let mut linker: Linker<()> = Linker::new(&engine);
@@ -169,6 +176,12 @@ fn register_one(linker: &mut Linker<()>, b: &safelisp::wasm::Builtin) {
   Val::Int(7)
 )]
 #[case::std_add("(fn main () ->Int (std::+ 1 2))", Val::Int(3))]
+#[case::prelude_std_add("(fn main () ->Int (+ 1 2))", Val::Int(3))]
+#[case::prelude_function_ref_can_be_bound("(fn main () ->Int (let add +) (add 2 3))", Val::Int(5))]
+#[case::same_module_function_shadows_prelude(
+  "(fn + (a:Int b:Int) ->Int a) (fn main () ->Int (+ 5 6))",
+  Val::Int(5)
+)]
 #[case::std_sub("(fn main () ->Int (std::- 1 2))", Val::Int(-1))]
 #[case::std_add_floats("(fn main () ->Float (std::+ 1.5 2.5))", Val::Float(4.0))]
 #[case::std_eq_int_true("(fn main () ->Bool (std::== 3 3))", Val::Bool(true))]

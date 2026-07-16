@@ -933,7 +933,7 @@ mod test {
   /// Helper: evaluate `main` with [`default_builtins`] and return the result.
   fn eval_builtin_main(source: &str) -> Result<SLValue, String> {
     let pkg =
-      compile_executable_from_source(source, ("main", "main"), &default_builtins().specs())?;
+      compile_executable_from_source(source, ("main", "main"), &default_builtins().specs(), &[])?;
     let interp = Interpreter::new(pkg);
     let mut exec = interp.call_main().unwrap();
     exec.run_until_done()
@@ -944,8 +944,9 @@ mod test {
   /// large operands without a limit, then install a limit immediately before
   /// the builtin's temporary allocation.
   fn before_final_call(source: &str) -> Execution {
-    let pkg = compile_executable_from_source(source, ("main", "main"), &default_builtins().specs())
-      .unwrap();
+    let pkg =
+      compile_executable_from_source(source, ("main", "main"), &default_builtins().specs(), &[])
+        .unwrap();
     let (module, function) = pkg.main.unwrap();
     let instruction_count = match pkg.get_function(module, function).unwrap() {
       crate::compiler::Callable::Function(function) => function.instructions.len(),

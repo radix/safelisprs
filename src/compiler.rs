@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use crate::builtins::BuiltinSpec;
 use crate::closure::transform_closures_in_module;
 use crate::parser::{self, ASTKind, Identifier, AST};
+use crate::prelude::resolve_module_prelude;
 
 /// A Package can either represent a "program" or a "library".
 /// If a `main` is provided, then it can be executed as a program directly.
@@ -312,8 +313,13 @@ fn find_struct(index: &ModuleIndex, module_name: &str, struct_name: &str) -> Opt
   })
 }
 
-pub fn compile_module(module_name: &str, asts: &[AST]) -> Result<CompiledModule, String> {
-  let asts = transform_closures_in_module(module_name, asts)?;
+pub fn compile_module(
+  module_name: &str,
+  asts: &[AST],
+  prelude: &[(&str, &str)],
+) -> Result<CompiledModule, String> {
+  let asts = resolve_module_prelude(asts, prelude)?;
+  let asts = transform_closures_in_module(module_name, &asts)?;
   let module_functions: HashSet<String> = asts
     .iter()
     .filter_map(|ast| match &ast.kind {
@@ -674,19 +680,30 @@ pub fn compile_executable_from_source(
   module_source: &str,
   main: (&str, &str),
   specs: &[BuiltinSpec],
+  prelude: &[(&str, &str)],
 ) -> Result<Package, String> {
-  Package::from_modules_with_main(_compile_from_source(module_source, specs)?, main, specs)
+  Package::from_modules_with_main(
+    _compile_from_source(module_source, specs, prelude)?,
+    main,
+    specs,
+  )
 }
 
-pub fn compile_from_source(module_source: &str, specs: &[BuiltinSpec]) -> Result<Package, String> {
-  Package::from_modules(_compile_from_source(module_source, specs)?, specs)
+pub fn compile_from_source(
+  module_source: &str,
+  specs: &[BuiltinSpec],
+  prelude: &[(&str, &str)],
+) -> Result<Package, String> {
+  Package::from_modules(_compile_from_source(module_source, specs, prelude)?, specs)
 }
 
 fn _compile_from_source(
   module_source: &str,
   specs: &[BuiltinSpec],
+  prelude: &[(&str, &str)],
 ) -> Result<CompiledModules, String> {
   let asts = parser::read_multiple(module_source)?;
+  let asts = resolve_module_prelude(&asts, prelude)?;
   crate::typecheck::typecheck(&asts, specs).map_err(|error| error.render(module_source))?;
   let compiled_modules = compile_modules(&asts)?;
   Ok(compiled_modules)
@@ -694,7 +711,7 @@ fn _compile_from_source(
 
 fn compile_modules(asts: &[AST]) -> Result<CompiledModules, String> {
   println!("Compiling main module");
-  let compiled_module = compile_module("main", asts)?;
+  let compiled_module = compile_module("main", asts, &[])?;
   Ok(vec![compiled_module])
 }
 
@@ -894,7 +911,7 @@ mod test {
         (let foo (new Foo y:2 x:3))
         foo.x)";
     let package =
-      compile_executable_from_source(source, ("main", "main"), &builtins.specs()).unwrap();
+      compile_executable_from_source(source, ("main", "main"), &builtins.specs(), &[]).unwrap();
     let Callable::Function(main) = package.get_function(0, 0).unwrap() else {
       panic!("expected main function");
     };
@@ -931,7 +948,7 @@ mod test {
         (let b (new Box size:10 origin:(new Point x:4 y:5)))
         (std::+ b.origin.x b.origin.y))";
     let package =
-      compile_executable_from_source(source, ("main", "main"), &builtins.specs()).unwrap();
+      compile_executable_from_source(source, ("main", "main"), &builtins.specs(), &[]).unwrap();
     let Callable::Function(main) = package.get_function(0, 0).unwrap() else {
       panic!("expected main function");
     };
@@ -968,7 +985,7 @@ mod test {
         (let foo (make))
         foo.x)";
     let package =
-      compile_executable_from_source(source, ("main", "main"), &builtins.specs()).unwrap();
+      compile_executable_from_source(source, ("main", "main"), &builtins.specs(), &[]).unwrap();
     let Callable::Function(main) = package.get_function(0, 1).unwrap() else {
       panic!("expected main function");
     };
@@ -988,7 +1005,7 @@ mod test {
         (let foo:Foo (id (new Foo x:9)))
         foo.x)";
     let package =
-      compile_executable_from_source(source, ("main", "main"), &builtins.specs()).unwrap();
+      compile_executable_from_source(source, ("main", "main"), &builtins.specs(), &[]).unwrap();
     let Callable::Function(main) = package.get_function(0, 1).unwrap() else {
       panic!("expected main function");
     };
@@ -1003,7 +1020,7 @@ mod test {
     let builtins = crate::builtins::default_builtins();
     let source = "(fn main () ->Int\n  (std::+ 1\n    \"not-an-int\"))";
     let error =
-      compile_executable_from_source(source, ("main", "main"), &builtins.specs()).unwrap_err();
+      compile_executable_from_source(source, ("main", "main"), &builtins.specs(), &[]).unwrap_err();
     assert!(error.starts_with("line 3, column 5: TypeError:"), "{error}");
     assert!(
       error.contains("type `String` does not satisfy trait `Add`")
