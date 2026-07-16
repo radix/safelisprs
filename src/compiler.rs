@@ -316,20 +316,20 @@ fn compile_resolved_module(
   ModuleCompiler::new(module_name, &asts, type_info).compile(&asts)
 }
 
-struct ModuleCompiler {
+struct ModuleCompiler<'types> {
   module_name: String,
-  structs: HashMap<String, parser::Struct>,
+  struct_indices: HashMap<String, usize>,
   struct_defs: Vec<StructDef>,
-  type_info: TypecheckInfo,
+  type_info: &'types TypecheckInfo,
 }
 
-impl ModuleCompiler {
-  fn new(module_name: &str, asts: &[AST], type_info: &TypecheckInfo) -> Self {
-    let mut structs = HashMap::new();
+impl<'types> ModuleCompiler<'types> {
+  fn new(module_name: &str, asts: &[AST], type_info: &'types TypecheckInfo) -> Self {
+    let mut struct_indices = HashMap::new();
     let mut struct_defs = vec![];
     for ast in asts {
       if let ASTKind::DefineStruct(struct_) = &ast.kind {
-        structs.insert(struct_.name.clone(), struct_.clone());
+        struct_indices.insert(struct_.name.clone(), struct_defs.len());
         struct_defs.push(StructDef {
           name: struct_.name.clone(),
           fields: struct_
@@ -342,9 +342,9 @@ impl ModuleCompiler {
     }
     Self {
       module_name: module_name.to_string(),
-      structs,
+      struct_indices,
       struct_defs,
-      type_info: type_info.clone(),
+      type_info,
     }
   }
 
@@ -368,29 +368,23 @@ impl ModuleCompiler {
     FunctionCompiler::new(self, f).compile(f)
   }
 
-  fn field_for_struct(&self, struct_name: &str, field: &str) -> Result<u16, String> {
-    let struct_ = self
-      .structs
-      .get(struct_name)
-      .ok_or_else(|| format!("unknown struct `{struct_name}`"))?;
-    struct_
-      .fields
-      .iter()
-      .enumerate()
-      .find(|(_, (name, _))| name == field)
-      .map(|(index, _)| index as u16)
-      .ok_or_else(|| format!("struct `{struct_name}` has no field `{field}`"))
+  fn struct_def(&self, name: &str) -> Result<&StructDef, String> {
+    self
+      .struct_indices
+      .get(name)
+      .and_then(|index| self.struct_defs.get(*index))
+      .ok_or_else(|| format!("unknown struct `{name}`"))
   }
 }
 
-struct FunctionCompiler<'module> {
-  module: &'module ModuleCompiler,
+struct FunctionCompiler<'module, 'types> {
+  module: &'module ModuleCompiler<'types>,
   locals: HashMap<BindingId, u16>,
   instructions: Vec<CompiledInstruction>,
 }
 
-impl<'module> FunctionCompiler<'module> {
-  fn new(module: &'module ModuleCompiler, f: &parser::Function) -> Self {
+impl<'module, 'types> FunctionCompiler<'module, 'types> {
+  fn new(module: &'module ModuleCompiler<'types>, f: &parser::Function) -> Self {
     let mut locals = HashMap::new();
     for (idx, (param, _)) in f.params.iter().enumerate() {
       locals.insert(param.binding, idx as u16);
@@ -509,15 +503,7 @@ impl<'module> FunctionCompiler<'module> {
         self.emit(Instruction::PartialApply(args.len() as u16));
       }
       ASTKind::NewStruct(name, fields) => {
-        let field_names = self
-          .module
-          .structs
-          .get(name)
-          .ok_or_else(|| format!("unknown struct `{name}`"))?
-          .fields
-          .iter()
-          .map(|(field_name, _)| field_name.clone())
-          .collect::<Vec<_>>();
+        let field_names = self.module.struct_def(name)?.fields.clone();
         for field_name in field_names {
           let expression = fields
             .iter()
@@ -531,13 +517,13 @@ impl<'module> FunctionCompiler<'module> {
           name.clone(),
         )));
       }
-      ASTKind::FieldAccess(receiver, field) => {
-        let receiver_type = self
+      ASTKind::FieldAccess(receiver, _) => {
+        let field_index = self
           .module
           .type_info
-          .field_access_receiver_type(ast.id())
+          .field_access(ast.id())
+          .map(|field| field.field_index())
           .ok_or_else(|| format!("field access has no typechecking information: {ast:?}"))?;
-        let field_index = self.module.field_for_struct(receiver_type, field)?;
         self.compile_expr(receiver)?;
         self.emit(Instruction::GetField(field_index));
       }

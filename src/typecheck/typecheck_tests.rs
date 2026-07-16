@@ -44,10 +44,10 @@ fn chained_struct_field_access_typechecks() {
 #[test]
 fn records_receiver_types_for_field_accesses() {
   let source = "
-    (struct Point x:Int)
-    (struct Box origin:Point)
+    (struct Point y:Int x:Int)
+    (struct Box origin:Point size:Int)
     (fn main () ->Int
-      (let b (new Box origin:(new Point x:4)))
+      (let b (new Box origin:(new Point y:3 x:4) size:5))
       b.origin.x)";
   let asts = read_multiple(source).unwrap();
   let asts = resolve_module_names("main", &asts, &[], &[]).unwrap();
@@ -63,11 +63,13 @@ fn records_receiver_types_for_field_accesses() {
     panic!("expected inner field access");
   };
 
-  assert_eq!(info.field_access_receiver_type(origin.id()), Some("Box"));
-  assert_eq!(
-    info.field_access_receiver_type(main.code[1].id()),
-    Some("Point")
-  );
+  let origin = info.field_access(origin.id()).unwrap();
+  assert_eq!(origin.receiver_type(), "Box");
+  assert_eq!(origin.field_index(), 0);
+
+  let x = info.field_access(main.code[1].id()).unwrap();
+  assert_eq!(x.receiver_type(), "Point");
+  assert_eq!(x.field_index(), 1);
 }
 
 #[test]

@@ -6,7 +6,8 @@ fn returns(name: &str) -> Option<parser::TypeAst> {
 
 fn compile_test_function(f: &parser::Function) -> Result<(String, CompiledCallable), String> {
   let asts = resolve_module_names("main", &[AST::DefineFn(f.clone())], &[], &[])?;
-  let module = ModuleCompiler::new("main", &asts, &TypecheckInfo::default());
+  let type_info = TypecheckInfo::default();
+  let module = ModuleCompiler::new("main", &asts, &type_info);
   let ASTKind::DefineFn(f) = &asts[0].kind else {
     unreachable!("the test input is a function");
   };

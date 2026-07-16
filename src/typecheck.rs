@@ -141,15 +141,28 @@ type TypeVars = HashMap<String, TvRef>;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TypecheckInfo {
-  field_access_receiver_types: HashMap<AstId, String>,
+  field_accesses: HashMap<AstId, FieldAccessInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FieldAccessInfo {
+  receiver_type: String,
+  field_index: u16,
 }
 
 impl TypecheckInfo {
-  pub fn field_access_receiver_type(&self, access: AstId) -> Option<&str> {
-    self
-      .field_access_receiver_types
-      .get(&access)
-      .map(String::as_str)
+  pub fn field_access(&self, access: AstId) -> Option<&FieldAccessInfo> {
+    self.field_accesses.get(&access)
+  }
+}
+
+impl FieldAccessInfo {
+  pub fn receiver_type(&self) -> &str {
+    &self.receiver_type
+  }
+
+  pub fn field_index(&self) -> u16 {
+    self.field_index
   }
 }
 
@@ -172,7 +185,7 @@ pub fn typecheck_named<'a>(
 struct Checker {
   schemes: HashMap<(String, String), FnScheme>,
   structs: HashMap<String, StructAst>,
-  field_access_receiver_types: HashMap<AstId, String>,
+  field_accesses: HashMap<AstId, FieldAccessInfo>,
   next_var: usize,
   inference_vars: Vec<TvRef>,
 }
@@ -182,7 +195,7 @@ impl Checker {
     let mut checker = Self {
       schemes: HashMap::new(),
       structs: HashMap::new(),
-      field_access_receiver_types: HashMap::new(),
+      field_accesses: HashMap::new(),
       next_var: 0,
       inference_vars: Vec::new(),
     };
@@ -254,7 +267,7 @@ impl Checker {
       }
     }
     Ok(TypecheckInfo {
-      field_access_receiver_types: self.field_access_receiver_types,
+      field_accesses: self.field_accesses,
     })
   }
 
@@ -504,17 +517,26 @@ impl Checker {
   fn field_type(&mut self, access: AstId, receiver: Type, field: &str) -> Result<Type, TypeError> {
     match prune(&receiver) {
       Type::Struct(name) => {
-        let ty = self
+        let (field_index, ty) = self
           .structs
           .get(&name)
           .ok_or_else(|| TypeError::new(format!("unknown struct `{name}`")))?
           .fields
           .iter()
-          .find(|(name, _)| name == field)
-          .map(|(_, ty)| ty.clone())
+          .enumerate()
+          .find(|(_, (name, _))| name == field)
+          .map(|(index, (_, ty))| (index, ty.clone()))
           .ok_or_else(|| TypeError::new(format!("struct `{name}` has no field `{field}`")))?;
+        let field_index = u16::try_from(field_index)
+          .map_err(|_| TypeError::new(format!("struct `{name}` has too many fields")))?;
         let field_type = self.resolve_type(&ty, &HashMap::new())?;
-        self.field_access_receiver_types.insert(access, name);
+        self.field_accesses.insert(
+          access,
+          FieldAccessInfo {
+            receiver_type: name,
+            field_index,
+          },
+        );
         Ok(field_type)
       }
       other => Err(TypeError::new(format!(
