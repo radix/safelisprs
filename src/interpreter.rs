@@ -2075,6 +2075,26 @@ mod test {
   }
 
   #[test]
+  fn captured_nested_functions_can_call_each_other() {
+    let source = "
+      (fn make-parity (even-result:Int odd-result:Int) ->(Fn (Int) -> Int)
+        (fn even (n:Int) ->Int
+          (if (std::== n 0)
+              even-result
+              (odd (std::- n 1))))
+        (fn odd (n:Int) ->Int
+          (if (std::== n 0)
+              odd-result
+              (even (std::- n 1))))
+        even)
+      (fn main () ->Int
+        (let parity (make-parity 10 20))
+        (parity 5))
+    ";
+    assert_eq!(eval_main(source), SLValue::Int(20));
+  }
+
+  #[test]
   fn function_definition_expression_returns_function() {
     let source = "
       (fn outer () ->(Fn () -> Int)

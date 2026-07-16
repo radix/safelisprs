@@ -272,16 +272,86 @@ impl Checker {
       env.insert(name.clone(), Binding::Mono(ty.clone()));
     }
 
-    let last = function.code.len().saturating_sub(1);
-    for (index, expression) in function.code.iter().enumerate() {
-      let inferred = self.infer(&mut env, &type_vars, expression)?;
-      if index == last && !matches!(prune(&scheme.ret), Type::Void) {
-        self
-          .unify(inferred, scheme.ret.clone())
-          .map_err(|error| error.at(expression.span.clone()))?;
-      }
+    let inferred = self.infer_sequence(&mut env, &type_vars, &function.code)?;
+    if !matches!(prune(&scheme.ret), Type::Void) {
+      self.unify(inferred, scheme.ret.clone()).map_err(|error| {
+        let span = function
+          .code
+          .last()
+          .map(|expression| expression.span.clone())
+          .unwrap_or_default();
+        error.at(span)
+      })?;
     }
     self.reject_unresolved(checkpoint)
+  }
+
+  fn infer_sequence(
+    &mut self,
+    env: &mut Env,
+    type_vars: &TypeVars,
+    expressions: &[AST],
+  ) -> Result<Type, TypeError> {
+    let mut result = Type::Void;
+    let mut index = 0;
+    while index < expressions.len() {
+      if matches!(expressions[index].kind, ASTKind::DefineFn(_)) {
+        let end = nested_function_group_end(expressions, index);
+        result = self.infer_nested_function_group(env, type_vars, &expressions[index..end])?;
+        index = end;
+      } else {
+        result = self.infer(env, type_vars, &expressions[index])?;
+        index += 1;
+      }
+    }
+    Ok(result)
+  }
+
+  fn infer_nested_function_group(
+    &mut self,
+    env: &mut Env,
+    type_vars: &TypeVars,
+    definitions: &[AST],
+  ) -> Result<Type, TypeError> {
+    let mut declared = Vec::with_capacity(definitions.len());
+    let mut group_env = env.clone();
+    for definition in definitions {
+      let ASTKind::DefineFn(function) = &definition.kind else {
+        unreachable!("nested function groups contain only function definitions");
+      };
+      let (scheme, nested_type_vars) = self
+        .declared_scheme(function, type_vars)
+        .map_err(|error| error.at(definition.span.clone()))?;
+      group_env.insert(function.name.clone(), Binding::PolyFn(scheme.clone()));
+      declared.push((function, definition, scheme, nested_type_vars));
+    }
+
+    let mut result = Type::Void;
+    for (function, definition, scheme, nested_type_vars) in &declared {
+      self
+        .check_function(
+          function,
+          scheme,
+          group_env.clone(),
+          nested_type_vars.clone(),
+          false,
+        )
+        .map_err(|error| {
+          error
+            .context(format!("in nested function `{}`", function.name))
+            .at(definition.span.clone())
+        })?;
+
+      let checkpoint = self.inference_vars.len();
+      let instantiated = self.instantiate(scheme, Some(format!("function `{}`", function.name)));
+      self.inference_vars.truncate(checkpoint);
+      result = Type::fn_scheme_type(instantiated);
+    }
+
+    for (function, _, scheme, _) in declared {
+      env.insert(function.name.clone(), Binding::PolyFn(scheme));
+    }
+    Ok(result)
   }
 
   fn infer(&mut self, env: &mut Env, type_vars: &TypeVars, ast: &AST) -> Result<Type, TypeError> {
@@ -322,22 +392,8 @@ impl Checker {
         env.insert(name.clone(), binding);
         Ok(inferred)
       }
-      ASTKind::DefineFn(function) => {
-        let (scheme, nested_type_vars) = self.declared_scheme(function, type_vars)?;
-        let mut nested_env = env.clone();
-        nested_env.insert(function.name.clone(), Binding::PolyFn(scheme.clone()));
-        self
-          .check_function(function, &scheme, nested_env, nested_type_vars, false)
-          .map_err(|error| error.context(format!("in nested function `{}`", function.name)))?;
-        // The definition itself is a declared polymorphic value. Its result
-        // gets an instantiation for expression typing, but those variables are
-        // generalized by the declaration and must not be reported as
-        // ambiguous monomorphic locals.
-        let checkpoint = self.inference_vars.len();
-        let result = self.instantiate(&scheme, Some(format!("function `{}`", function.name)));
-        self.inference_vars.truncate(checkpoint);
-        env.insert(function.name.clone(), Binding::PolyFn(scheme));
-        Ok(Type::fn_scheme_type(result))
+      ASTKind::DefineFn(_) => {
+        self.infer_nested_function_group(env, type_vars, std::slice::from_ref(ast))
       }
       ASTKind::Call(callee, args) => {
         let callee_type = self.infer(env, type_vars, callee)?;
@@ -374,13 +430,7 @@ impl Checker {
         *env = intersect_compatible_bindings(then_env, &else_env);
         Ok(then_type)
       }
-      ASTKind::Block(body) => {
-        let mut result = Type::Void;
-        for expression in body {
-          result = self.infer(env, type_vars, expression)?;
-        }
-        Ok(result)
-      }
+      ASTKind::Block(body) => self.infer_sequence(env, type_vars, body),
       ASTKind::PartialApply(_, _) => Err(TypeError::new(
         "internal transformed AST reached the source typechecker",
       )),
@@ -941,6 +991,22 @@ fn intersect_compatible_bindings(then_env: Env, else_env: &Env) -> Env {
     .collect()
 }
 
+fn nested_function_group_end(expressions: &[AST], start: usize) -> usize {
+  let mut names = HashSet::new();
+  let mut end = start;
+  while let Some(AST {
+    kind: ASTKind::DefineFn(function),
+    ..
+  }) = expressions.get(end)
+  {
+    if !names.insert(function.name.as_str()) {
+      break;
+    }
+    end += 1;
+  }
+  end
+}
+
 fn bindings_compatible(left: &Binding, right: &Binding) -> bool {
   match (left, right) {
     (Binding::Mono(left), Binding::Mono(right)) => types_equivalent(left, right),
@@ -1455,6 +1521,30 @@ mod tests {
          (recurse 3))",
     )
     .unwrap();
+  }
+
+  #[test]
+  fn nested_mutual_recursion_is_accepted() {
+    check(
+      "(fn main () ->Bool
+         (fn even (n:Int) ->Bool
+           (if (std::== n 0) true (odd (std::- n 1))))
+         (fn odd (n:Int) ->Bool
+           (if (std::== n 0) false (even (std::- n 1))))
+         (even 4))",
+    )
+    .unwrap();
+  }
+
+  #[test]
+  fn nested_function_is_not_visible_before_its_recursive_group() {
+    let error = check(
+      "(fn main () ->Int
+         (later)
+         (fn later () ->Int 1))",
+    )
+    .unwrap_err();
+    assert_eq!(error.message, "unknown function `later`");
   }
 
   #[test]

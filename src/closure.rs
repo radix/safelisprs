@@ -33,8 +33,17 @@ struct TransformResult {
   /// Function definitions meant to be lifted to the top-level. This includes all
   /// nested functions and the function transformed by this result.
   lifted: Vec<AST>,
-  /// Variables that a function *uses* from outer environment
+  /// Variables that a function uses from the outer environment, before
+  /// recursive sibling dependencies are propagated.
   captures: Vec<String>,
+  /// Functions in the current recursive group that this body needs as local
+  /// closure values.
+  recursive_refs: Vec<String>,
+}
+
+struct RecursiveBinding {
+  source_name: String,
+  lifted_name: String,
 }
 
 fn closurize_function(
@@ -55,10 +64,12 @@ fn closurize_function(
     &HashSet::new(),
     source_span,
     names,
+    &[],
   )?;
   Ok(result.lifted)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn transform_function(
   module_name: &str,
   func: &Function,
@@ -67,6 +78,7 @@ fn transform_function(
   environment: &HashSet<String>,
   source_span: Span,
   names: &mut ClosureNameAllocator,
+  recursive_bindings: &[RecursiveBinding],
 ) -> Result<TransformResult, String> {
   //! Rewrite a function into simpler AST that the compiler already knows how to
   //! turn into bytecode, while also returning the capture info its parent
@@ -78,48 +90,26 @@ fn transform_function(
   //! - the original nested `fn` expression becomes `let name (partial-apply func [captures...])`
   let mut locals = hashset! {};
   locals.extend(func.params.iter().map(|(name, _)| name.clone()));
-  let nested_self_name = if transformed_name != func.name {
-    locals.insert(func.name.clone());
-    Some(func.name.as_str())
-  } else {
-    None
-  };
-  let mut self_referenced = false;
+  locals.extend(
+    recursive_bindings
+      .iter()
+      .map(|binding| binding.source_name.clone()),
+  );
   let mut lifted = vec![];
   let mut captures = vec![];
-  let mut code = vec![];
-  for ast in &func.code {
-    code.push(transform_ast(
-      module_name,
-      ast,
-      &lexical_path,
-      environment,
-      &mut locals,
-      &mut captures,
-      &mut lifted,
-      names,
-      nested_self_name,
-      &mut self_referenced,
-    )?);
-  }
-  if self_referenced {
-    code.insert(
-      0,
-      AST::new(
-        ASTKind::Let(
-          func.name.clone(),
-          None,
-          Box::new(closure_expr(
-            module_name,
-            &transformed_name,
-            &captures,
-            source_span.clone(),
-          )),
-        ),
-        source_span.clone(),
-      ),
-    );
-  }
+  let mut recursive_refs = vec![];
+  let code = transform_sequence(
+    module_name,
+    &func.code,
+    &lexical_path,
+    environment,
+    &mut locals,
+    &mut captures,
+    &mut lifted,
+    names,
+    recursive_bindings,
+    &mut recursive_refs,
+  )?;
 
   let mut params = vec![];
   params.extend(captures.iter().cloned().map(|name| (name, None)));
@@ -134,9 +124,213 @@ fn transform_function(
     }),
     source_span,
   ));
-  Ok(TransformResult { lifted, captures })
+  Ok(TransformResult {
+    lifted,
+    captures,
+    recursive_refs,
+  })
 }
 
+#[allow(clippy::too_many_arguments)]
+fn transform_sequence(
+  module_name: &str,
+  expressions: &[AST],
+  lexical_path: &[String],
+  environment: &HashSet<String>,
+  locals: &mut HashSet<String>,
+  captures: &mut Vec<String>,
+  lifted: &mut Vec<AST>,
+  names: &mut ClosureNameAllocator,
+  recursive_bindings: &[RecursiveBinding],
+  recursive_refs: &mut Vec<String>,
+) -> Result<Vec<AST>, String> {
+  let mut transformed = vec![];
+  let mut index = 0;
+  while index < expressions.len() {
+    if matches!(expressions[index].kind, ASTKind::DefineFn(_)) {
+      let end = nested_function_group_end(expressions, index);
+      transformed.extend(transform_nested_function_group(
+        module_name,
+        &expressions[index..end],
+        lexical_path,
+        environment,
+        locals,
+        captures,
+        lifted,
+        names,
+        recursive_bindings,
+        recursive_refs,
+      )?);
+      index = end;
+    } else {
+      transformed.push(transform_ast(
+        module_name,
+        &expressions[index],
+        lexical_path,
+        environment,
+        locals,
+        captures,
+        lifted,
+        names,
+        recursive_bindings,
+        recursive_refs,
+      )?);
+      index += 1;
+    }
+  }
+  Ok(transformed)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn transform_nested_function_group(
+  module_name: &str,
+  definitions: &[AST],
+  lexical_path: &[String],
+  environment: &HashSet<String>,
+  locals: &mut HashSet<String>,
+  captures: &mut Vec<String>,
+  lifted: &mut Vec<AST>,
+  names: &mut ClosureNameAllocator,
+  enclosing_recursive_bindings: &[RecursiveBinding],
+  enclosing_recursive_refs: &mut Vec<String>,
+) -> Result<Vec<AST>, String> {
+  let mut inner_environment = environment.clone();
+  inner_environment.extend(locals.iter().cloned());
+
+  let mut bindings = Vec::with_capacity(definitions.len());
+  for definition in definitions {
+    let ASTKind::DefineFn(function) = &definition.kind else {
+      unreachable!("nested function groups contain only function definitions");
+    };
+    let mut inner_path = lexical_path.to_vec();
+    inner_path.push(function.name.clone());
+    bindings.push(RecursiveBinding {
+      source_name: function.name.clone(),
+      lifted_name: names.allocate(&inner_path),
+    });
+  }
+
+  let mut results = Vec::with_capacity(definitions.len());
+  for (definition, binding) in definitions.iter().zip(&bindings) {
+    let ASTKind::DefineFn(function) = &definition.kind else {
+      unreachable!("nested function groups contain only function definitions");
+    };
+    let mut inner_path = lexical_path.to_vec();
+    inner_path.push(function.name.clone());
+    results.push(transform_function(
+      module_name,
+      function,
+      binding.lifted_name.clone(),
+      inner_path,
+      &inner_environment,
+      definition.span.clone(),
+      names,
+      &bindings,
+    )?);
+  }
+
+  let mut group_captures = results
+    .iter()
+    .map(|result| result.captures.clone())
+    .collect::<Vec<_>>();
+  // Partial applications are immutable, so recursive closures cannot capture
+  // each other directly. Propagate ordinary captures until every function can
+  // reconstruct the sibling closures it references.
+  loop {
+    let previous = group_captures.clone();
+    for (index, result) in results.iter().enumerate() {
+      for reference in &result.recursive_refs {
+        let dependency = bindings
+          .iter()
+          .position(|binding| binding.source_name == *reference)
+          .expect("recursive references belong to the current group");
+        for capture in &previous[dependency] {
+          push_unique(&mut group_captures[index], capture.clone());
+        }
+      }
+    }
+    if group_captures == previous {
+      break;
+    }
+  }
+
+  for (index, result) in results.iter_mut().enumerate() {
+    let definition = &definitions[index];
+    let direct_capture_count = result.captures.len();
+    let root = result
+      .lifted
+      .last_mut()
+      .expect("transforming a function always emits its lifted definition");
+    let ASTKind::DefineFn(function) = &mut root.kind else {
+      unreachable!("the transformed function is emitted last");
+    };
+
+    let source_params = function.params.split_off(direct_capture_count);
+    function.params = group_captures[index]
+      .iter()
+      .cloned()
+      .map(|name| (name, None))
+      .chain(source_params)
+      .collect();
+
+    let mut recursive_bindings = vec![];
+    for reference in &result.recursive_refs {
+      let dependency = bindings
+        .iter()
+        .position(|binding| binding.source_name == *reference)
+        .expect("recursive references belong to the current group");
+      recursive_bindings.push(AST::new(
+        ASTKind::Let(
+          reference.clone(),
+          None,
+          Box::new(closure_expr(
+            module_name,
+            &bindings[dependency].lifted_name,
+            &group_captures[dependency],
+            definition.span.clone(),
+          )),
+        ),
+        definition.span.clone(),
+      ));
+    }
+    recursive_bindings.append(&mut function.code);
+    function.code = recursive_bindings;
+  }
+
+  let mut transformed = Vec::with_capacity(definitions.len());
+  for (((definition, binding), result), group_capture) in definitions
+    .iter()
+    .zip(&bindings)
+    .zip(results)
+    .zip(&group_captures)
+  {
+    let ASTKind::DefineFn(function) = &definition.kind else {
+      unreachable!("nested function groups contain only function definitions");
+    };
+    for capture in group_capture {
+      if recursive_binding(enclosing_recursive_bindings, capture).is_some() {
+        push_unique(enclosing_recursive_refs, capture.clone());
+      } else if !locals.contains(capture) && environment.contains(capture) {
+        push_unique(captures, capture.clone());
+      }
+    }
+    lifted.extend(result.lifted);
+    transformed.push(definition.with_kind(ASTKind::Let(
+      function.name.clone(),
+      None,
+      Box::new(closure_expr(
+        module_name,
+        &binding.lifted_name,
+        group_capture,
+        definition.span.clone(),
+      )),
+    )));
+  }
+  locals.extend(bindings.into_iter().map(|binding| binding.source_name));
+  Ok(transformed)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn transform_ast(
   module_name: &str,
   ast: &AST,
@@ -146,8 +340,8 @@ fn transform_ast(
   captures: &mut Vec<String>,
   lifted: &mut Vec<AST>,
   names: &mut ClosureNameAllocator,
-  nested_self_name: Option<&str>,
-  self_referenced: &mut bool,
+  recursive_bindings: &[RecursiveBinding],
+  recursive_refs: &mut Vec<String>,
 ) -> Result<AST, String> {
   //! Do closure transformations on one expression inside a function body,
   //! recording captures as they are discovered.
@@ -162,8 +356,8 @@ fn transform_ast(
         captures,
         lifted,
         names,
-        nested_self_name,
-        self_referenced,
+        recursive_bindings,
+        recursive_refs,
       )?;
       locals.insert(name.clone());
       Ok(ast.with_kind(ASTKind::Let(
@@ -172,45 +366,28 @@ fn transform_ast(
         Box::new(expr),
       )))
     }
-    ASTKind::DefineFn(inner_func) => {
-      let mut inner_environment = environment.clone();
-      inner_environment.extend(locals.iter().cloned());
-      let mut inner_path = lexical_path.to_vec();
-      inner_path.push(inner_func.name.clone());
-      let lifted_name = names.allocate(&inner_path);
-      let TransformResult {
-        lifted: transformed_lifted,
-        captures: transformed_captures,
-      } = transform_function(
+    ASTKind::DefineFn(_) => {
+      let mut transformed = transform_nested_function_group(
         module_name,
-        inner_func,
-        lifted_name.clone(),
-        inner_path,
-        &inner_environment,
-        ast.span.clone(),
+        std::slice::from_ref(ast),
+        lexical_path,
+        environment,
+        locals,
+        captures,
+        lifted,
         names,
+        recursive_bindings,
+        recursive_refs,
       )?;
-      for capture in &transformed_captures {
-        if !locals.contains(capture) && environment.contains(capture) {
-          push_unique(captures, capture.clone());
-        }
-      }
-      lifted.extend(transformed_lifted);
-      locals.insert(inner_func.name.clone());
-      Ok(ast.with_kind(ASTKind::Let(
-        inner_func.name.clone(),
-        None,
-        Box::new(closure_expr(
-          module_name,
-          &lifted_name,
-          &transformed_captures,
-          ast.span.clone(),
-        )),
-      )))
+      Ok(
+        transformed
+          .pop()
+          .expect("a singleton function group emits one binding"),
+      )
     }
     ASTKind::Variable(name) => {
-      if nested_self_name == Some(name.as_str()) && locals.contains(name) {
-        *self_referenced = true;
+      if recursive_binding(recursive_bindings, name).is_some() && locals.contains(name) {
+        push_unique(recursive_refs, name.clone());
       }
       if !locals.contains(name) && environment.contains(name) {
         push_unique(captures, name.clone());
@@ -227,8 +404,8 @@ fn transform_ast(
         captures,
         lifted,
         names,
-        nested_self_name,
-        self_referenced,
+        recursive_bindings,
+        recursive_refs,
       )?;
       let mut new_args = vec![];
       for arg in args {
@@ -241,16 +418,16 @@ fn transform_ast(
           captures,
           lifted,
           names,
-          nested_self_name,
-          self_referenced,
+          recursive_bindings,
+          recursive_refs,
         )?);
       }
       Ok(ast.with_kind(ASTKind::Call(Box::new(callable), new_args)))
     }
     ASTKind::CallFixed(ident, args) => {
       if let crate::parser::Identifier::Bare(name) = ident {
-        if nested_self_name == Some(name.as_str()) && locals.contains(name) {
-          *self_referenced = true;
+        if recursive_binding(recursive_bindings, name).is_some() && locals.contains(name) {
+          push_unique(recursive_refs, name.clone());
         }
         if !locals.contains(name) && environment.contains(name) {
           push_unique(captures, name.clone());
@@ -267,8 +444,8 @@ fn transform_ast(
           captures,
           lifted,
           names,
-          nested_self_name,
-          self_referenced,
+          recursive_bindings,
+          recursive_refs,
         )?);
       }
       Ok(ast.with_kind(ASTKind::CallFixed(ident.clone(), new_args)))
@@ -283,8 +460,8 @@ fn transform_ast(
         captures,
         lifted,
         names,
-        nested_self_name,
-        self_referenced,
+        recursive_bindings,
+        recursive_refs,
       )?;
       let mut new_args = vec![];
       for arg in args {
@@ -297,8 +474,8 @@ fn transform_ast(
           captures,
           lifted,
           names,
-          nested_self_name,
-          self_referenced,
+          recursive_bindings,
+          recursive_refs,
         )?);
       }
       Ok(ast.with_kind(ASTKind::PartialApply(Box::new(callable), new_args)))
@@ -317,8 +494,8 @@ fn transform_ast(
             captures,
             lifted,
             names,
-            nested_self_name,
-            self_referenced,
+            recursive_bindings,
+            recursive_refs,
           )?,
         ));
       }
@@ -334,8 +511,8 @@ fn transform_ast(
         captures,
         lifted,
         names,
-        nested_self_name,
-        self_referenced,
+        recursive_bindings,
+        recursive_refs,
       )?;
       Ok(ast.with_kind(ASTKind::FieldAccess(Box::new(receiver), field.clone())))
     }
@@ -349,8 +526,8 @@ fn transform_ast(
         captures,
         lifted,
         names,
-        nested_self_name,
-        self_referenced,
+        recursive_bindings,
+        recursive_refs,
       )?;
       let then = transform_ast(
         module_name,
@@ -361,8 +538,8 @@ fn transform_ast(
         captures,
         lifted,
         names,
-        nested_self_name,
-        self_referenced,
+        recursive_bindings,
+        recursive_refs,
       )?;
       let els = transform_ast(
         module_name,
@@ -373,29 +550,23 @@ fn transform_ast(
         captures,
         lifted,
         names,
-        nested_self_name,
-        self_referenced,
+        recursive_bindings,
+        recursive_refs,
       )?;
       Ok(ast.with_kind(ASTKind::If(Box::new(cond), Box::new(then), Box::new(els))))
     }
-    ASTKind::Block(body) => {
-      let mut new_body = vec![];
-      for expr in body {
-        new_body.push(transform_ast(
-          module_name,
-          expr,
-          lexical_path,
-          environment,
-          locals,
-          captures,
-          lifted,
-          names,
-          nested_self_name,
-          self_referenced,
-        )?);
-      }
-      Ok(ast.with_kind(ASTKind::Block(new_body)))
-    }
+    ASTKind::Block(body) => Ok(ast.with_kind(ASTKind::Block(transform_sequence(
+      module_name,
+      body,
+      lexical_path,
+      environment,
+      locals,
+      captures,
+      lifted,
+      names,
+      recursive_bindings,
+      recursive_refs,
+    )?))),
     ASTKind::Int(_)
     | ASTKind::Float(_)
     | ASTKind::String(_)
@@ -403,6 +574,31 @@ fn transform_ast(
     | ASTKind::DefineStruct(_) => Ok(ast.clone()),
     ASTKind::FunctionRef(_, _) => Ok(ast.clone()),
   }
+}
+
+fn recursive_binding<'a>(
+  bindings: &'a [RecursiveBinding],
+  source_name: &str,
+) -> Option<&'a RecursiveBinding> {
+  bindings
+    .iter()
+    .find(|binding| binding.source_name == source_name)
+}
+
+fn nested_function_group_end(expressions: &[AST], start: usize) -> usize {
+  let mut names = HashSet::new();
+  let mut end = start;
+  while let Some(AST {
+    kind: ASTKind::DefineFn(function),
+    ..
+  }) = expressions.get(end)
+  {
+    if !names.insert(function.name.as_str()) {
+      break;
+    }
+    end += 1;
+  }
+  end
 }
 
 fn closure_expr(module_name: &str, lifted_name: &str, captures: &[String], span: Span) -> AST {
@@ -675,6 +871,79 @@ mod test {
     };
     assert_eq!(name, "countdown");
     assert_eq!(args.len(), 1);
+    Ok(())
+  }
+
+  #[test]
+  fn nested_mutual_recursion_propagates_group_captures() -> Result<(), String> {
+    let source = "
+      (fn outer (even-result:Int odd-result:Int)
+        (fn even (n:Int) ->Int
+          (if (std::== n 0) even-result (odd (std::- n 1))))
+        (fn odd (n:Int) ->Int
+          (if (std::== n 0) odd-result (even (std::- n 1))))
+        even)";
+    let asts = read_multiple(source)?;
+    let transformed = transform_closures_in_module("main", &asts)?;
+
+    let ASTKind::DefineFn(even) = &transformed[0].kind else {
+      panic!("expected lifted even function");
+    };
+    let ASTKind::DefineFn(odd) = &transformed[1].kind else {
+      panic!("expected lifted odd function");
+    };
+    assert_eq!(
+      even
+        .params
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect::<Vec<_>>(),
+      vec!["even-result", "odd-result", "n"]
+    );
+    assert_eq!(
+      odd
+        .params
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect::<Vec<_>>(),
+      vec!["odd-result", "even-result", "n"]
+    );
+
+    let ASTKind::Let(name, _, value) = &even.code[0].kind else {
+      panic!("expected local odd closure");
+    };
+    assert_eq!(name, "odd");
+    assert_eq!(
+      **value,
+      PartialApply(
+        Box::new(FunctionRef(
+          "main".to_string(),
+          "outer:odd:(closure)".to_string()
+        )),
+        vec![
+          Variable("odd-result".to_string()),
+          Variable("even-result".to_string())
+        ]
+      )
+    );
+
+    let ASTKind::Let(name, _, value) = &odd.code[0].kind else {
+      panic!("expected local even closure");
+    };
+    assert_eq!(name, "even");
+    assert_eq!(
+      **value,
+      PartialApply(
+        Box::new(FunctionRef(
+          "main".to_string(),
+          "outer:even:(closure)".to_string()
+        )),
+        vec![
+          Variable("even-result".to_string()),
+          Variable("odd-result".to_string())
+        ]
+      )
+    );
     Ok(())
   }
 
