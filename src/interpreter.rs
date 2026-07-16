@@ -692,14 +692,14 @@ impl<'gc> Value<'gc> {
 
   /// Convert a runtime `Value` into an owned `SLValue`, deep-copying any `Gc`-held
   /// sub-values out of the arena.
-  fn to_value(&self) -> SLValue {
+  fn to_value(self) -> SLValue {
     match self {
-      Value::Int(i) => SLValue::Int(*i),
-      Value::Float(x) => SLValue::Float(*x),
+      Value::Int(i) => SLValue::Int(i),
+      Value::Float(x) => SLValue::Float(x),
       Value::Heap(gc) => gc.value.to_value(),
-      Value::Bool(b) => SLValue::Bool(*b),
+      Value::Bool(b) => SLValue::Bool(b),
       Value::Void => SLValue::Void,
-      Value::FunctionRef(m, n) => SLValue::FunctionRef(*m, *n),
+      Value::FunctionRef(m, n) => SLValue::FunctionRef(m, n),
       Value::Cell(r) => SLValue::Cell(Box::new(r.borrow().value.to_value())),
     }
   }
@@ -720,12 +720,12 @@ impl<'gc> SLVal<'gc> {
       SLVal::String(s) => SLValue::String(s.clone()),
       SLVal::Partial(p) => SLValue::Partial {
         function: p.function,
-        args: p.args.iter().map(Value::to_value).collect(),
+        args: p.args.iter().map(|value| value.to_value()).collect(),
       },
-      SLVal::List(items) => SLValue::List(items.iter().map(Value::to_value).collect()),
+      SLVal::List(items) => SLValue::List(items.iter().map(|value| value.to_value()).collect()),
       SLVal::Struct(s) => SLValue::Struct {
         struct_: s.struct_,
-        fields: s.fields.iter().map(Value::to_value).collect(),
+        fields: s.fields.iter().map(|value| value.to_value()).collect(),
       },
     }
   }

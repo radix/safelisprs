@@ -1248,7 +1248,7 @@ fn occurs(needle: &TvRef, ty: &Type) -> bool {
     Type::Cell(item) | Type::List(item) => occurs(needle, &item),
     Type::Fn { params, rest, ret } => {
       params.iter().any(|param| occurs(needle, param))
-        || rest.as_ref().is_some_and(|rest| occurs(needle, &rest))
+        || rest.as_ref().is_some_and(|rest| occurs(needle, rest))
         || occurs(needle, &ret)
     }
     _ => false,
