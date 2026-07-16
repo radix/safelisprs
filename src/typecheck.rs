@@ -157,7 +157,6 @@ pub fn typecheck_named<'a>(
 
 struct Checker {
   schemes: HashMap<(String, String), FnScheme>,
-  lexical_schemes: HashMap<BindingId, FnScheme>,
   structs: HashMap<String, StructAst>,
   next_var: usize,
   inference_vars: Vec<TvRef>,
@@ -167,7 +166,6 @@ impl Checker {
   fn new<'a>(builtins: impl IntoIterator<Item = (&'a str, &'a str, &'a BuiltinSignature)>) -> Self {
     let mut checker = Self {
       schemes: HashMap::new(),
-      lexical_schemes: HashMap::new(),
       structs: HashMap::new(),
       next_var: 0,
       inference_vars: Vec::new(),
@@ -223,10 +221,7 @@ impl Checker {
       let (scheme, _) = self
         .declared_scheme(function, &HashMap::new())
         .map_err(|error| error.at(ast.span.clone()))?;
-      self.schemes.insert(key, scheme.clone());
-      if function.name.binding.is_resolved() {
-        self.lexical_schemes.insert(function.name.binding, scheme);
-      }
+      self.schemes.insert(key, scheme);
     }
 
     for ast in asts {
@@ -516,54 +511,14 @@ impl Checker {
     identifier: &Identifier,
     args: &[AST],
   ) -> Result<Type, TypeError> {
-    if let Identifier::Bare(name) = identifier {
-      let label = name.name.clone();
-      if let Some(binding) = env.get(&name.binding).cloned() {
-        let callee = self.instantiate_binding(binding, Some(format!("call to `{label}`")))?;
-        let arg_types = args
-          .iter()
-          .enumerate()
-          .map(|(index, arg)| {
-            self.infer(env, type_vars, arg).map_err(|error| {
-              error.context(format!(
-                "while checking argument {} of call to `{label}`",
-                index + 1
-              ))
-            })
-          })
-          .collect::<Result<Vec<_>, _>>()?;
-        let ret = self.fresh(Some(format!("result of call to `{label}`")), Vec::new());
-        self
-          .unify(callee, Type::fixed_fn(arg_types, ret.clone()))
-          .map_err(|error| error.context(format!("while checking call to `{label}`")))?;
-        return Ok(ret);
-      }
-    }
-
-    let label = match identifier {
-      Identifier::Bare(name) => name.name.clone(),
-      Identifier::Qualified(module, name) => format!("{module}::{name}"),
-    };
-
-    let scheme = match identifier {
-      Identifier::Bare(name) => self
-        .lexical_schemes
-        .get(&name.binding)
-        .cloned()
-        .or_else(|| {
-          (!name.binding.is_resolved())
-            .then(|| {
-              self
-                .schemes
-                .get(&("main".to_string(), name.name.clone()))
-                .cloned()
-            })
-            .flatten()
-        }),
-      Identifier::Qualified(module, name) => {
-        self.schemes.get(&(module.clone(), name.clone())).cloned()
+    let (module, name) = match identifier {
+      Identifier::Qualified(module, name) => (module, name),
+      Identifier::Bare(name) => {
+        return Err(TypeError::new(format!("unknown function `{name}`")));
       }
     };
+    let label = format!("{module}::{name}");
+    let scheme = self.schemes.get(&(module.clone(), name.clone())).cloned();
     let Some(scheme) = scheme else {
       return Err(TypeError::new(format!("unknown function `{label}`")));
     };
@@ -607,26 +562,11 @@ impl Checker {
   }
 
   fn resolve_bare(&mut self, env: &Env, name: &ResolvedName) -> Result<Type, TypeError> {
-    if let Some(binding) = env.get(&name.binding).cloned() {
-      return self.instantiate_binding(binding, Some(format!("variable `{name}`")));
-    }
-    let scheme = self
-      .lexical_schemes
+    let binding = env
       .get(&name.binding)
       .cloned()
-      .or_else(|| {
-        (!name.binding.is_resolved())
-          .then(|| {
-            self
-              .schemes
-              .get(&("main".to_string(), name.name.clone()))
-              .cloned()
-          })
-          .flatten()
-      })
       .ok_or_else(|| TypeError::new(format!("Unknown name `{name}`")))?;
-    let instantiated = self.instantiate(&scheme, Some(format!("function `main::{name}`")));
-    Ok(Type::fn_scheme_type(instantiated))
+    self.instantiate_binding(binding, Some(format!("variable `{name}`")))
   }
 
   fn resolve_scheme(&mut self, module: &str, name: &str) -> Result<Type, TypeError> {
@@ -1349,7 +1289,7 @@ mod tests {
 
   fn check(source: &str) -> Result<(), TypeError> {
     let asts = read_multiple(source).unwrap();
-    let asts = resolve_module_names(&asts, &[]).unwrap();
+    let asts = resolve_module_names("main", &asts, &[], &[]).unwrap();
     typecheck(&asts, &default_builtins().specs())
   }
 

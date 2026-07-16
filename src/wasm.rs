@@ -218,7 +218,12 @@ pub fn compile(
   prelude: &[(&str, &str)],
 ) -> Result<Vec<u8>, String> {
   let asts = parser::read_multiple(source)?;
-  let asts = resolve_module_names(&asts, prelude)?;
+  let module_symbols = builtins
+    .iter()
+    .filter(|builtin| builtin.module == "main")
+    .map(|builtin| builtin.name.as_str())
+    .collect::<Vec<_>>();
+  let asts = resolve_module_names("main", &asts, prelude, &module_symbols)?;
   check_types(&asts, builtins).map_err(|error| error.render(source))?;
   ModuleCompiler::new(builtins).compile(&asts)
 }
@@ -229,7 +234,12 @@ pub fn compile_asts(
   builtins: &Builtins,
   prelude: &[(&str, &str)],
 ) -> Result<Vec<u8>, String> {
-  let asts = resolve_module_names(asts, prelude)?;
+  let module_symbols = builtins
+    .iter()
+    .filter(|builtin| builtin.module == "main")
+    .map(|builtin| builtin.name.as_str())
+    .collect::<Vec<_>>();
+  let asts = resolve_module_names("main", asts, prelude, &module_symbols)?;
   check_types(&asts, builtins).map_err(|error| error.to_string())?;
   ModuleCompiler::new(builtins).compile(&asts)
 }
@@ -267,7 +277,6 @@ struct ModuleCompiler<'b> {
   builtins: &'b Builtins,
   functions: Vec<FuncDef>,
   function_names: HashMap<String, u32>,
-  function_bindings: HashMap<BindingId, u32>,
   type_indices: HashMap<Signature, u32>,
   used_imports: HashMap<(String, String), UsedImport>,
   /// Type index for the `if` block type: `() -> (i64, i32)`, i.e. an SlValue
@@ -282,7 +291,6 @@ impl<'b> ModuleCompiler<'b> {
       builtins,
       functions: vec![],
       function_names: HashMap::new(),
-      function_bindings: HashMap::new(),
       type_indices: HashMap::new(),
       used_imports: HashMap::new(),
       if_block_type: None,
@@ -292,9 +300,6 @@ impl<'b> ModuleCompiler<'b> {
   fn compile(mut self, asts: &[AST]) -> Result<Vec<u8>, String> {
     for ast in asts {
       if let ASTKind::DefineFn(f) = &ast.kind {
-        self
-          .function_bindings
-          .insert(f.name.binding, self.functions.len() as u32);
         self
           .function_names
           .insert(f.name.name.clone(), self.functions.len() as u32);
@@ -417,8 +422,7 @@ impl<'b> ModuleCompiler<'b> {
     let mut codes = CodeSection::new();
     for ast in asts {
       if let ASTKind::DefineFn(f) = &ast.kind {
-        let def_index = self.function_names[f.name.as_str()];
-        let body = self.compile_function(f, def_index, num_imports)?;
+        let body = self.compile_function(f, num_imports)?;
         codes.function(&body);
       }
     }
@@ -564,7 +568,6 @@ impl<'b> ModuleCompiler<'b> {
   fn compile_function(
     &mut self,
     f: &parser::Function,
-    def_index: u32,
     num_imports: u32,
   ) -> Result<Function, String> {
     let num_params = f.params.len() as u32;
@@ -606,7 +609,6 @@ impl<'b> ModuleCompiler<'b> {
         &mut next_pair,
         num_params,
         num_lets,
-        def_index,
         num_imports,
         &mut func,
       )?;
@@ -713,7 +715,6 @@ impl<'b> ModuleCompiler<'b> {
     next_pair: &mut u32,
     num_params: u32,
     num_lets: u32,
-    def_index: u32,
     num_imports: u32,
     func: &mut Function,
   ) -> Result<(), String> {
@@ -737,11 +738,6 @@ impl<'b> ModuleCompiler<'b> {
           let tl = Self::tag_local(pair_idx, num_params, num_lets);
           func.instructions().local_get(pl);
           func.instructions().local_get(tl);
-        } else if let Some(target_def) = self.function_bindings.get(&name.binding) {
-          func
-            .instructions()
-            .i64_const(i64::from(num_imports + target_def));
-          func.instructions().i32_const(TAG_FUNCTION_REF);
         } else {
           return Err(format!("unbound variable: {}", name));
         }
@@ -758,7 +754,6 @@ impl<'b> ModuleCompiler<'b> {
           next_pair,
           num_params,
           num_lets,
-          def_index,
           num_imports,
           func,
         )?;
@@ -789,7 +784,6 @@ impl<'b> ModuleCompiler<'b> {
           next_pair,
           num_params,
           num_lets,
-          def_index,
           num_imports,
           func,
         )?;
@@ -809,7 +803,6 @@ impl<'b> ModuleCompiler<'b> {
           next_pair,
           num_params,
           num_lets,
-          def_index,
           num_imports,
           func,
         )?;
@@ -820,7 +813,6 @@ impl<'b> ModuleCompiler<'b> {
           next_pair,
           num_params,
           num_lets,
-          def_index,
           num_imports,
           func,
         )?;
@@ -835,7 +827,6 @@ impl<'b> ModuleCompiler<'b> {
             next_pair,
             num_params,
             num_lets,
-            def_index,
             num_imports,
             func,
           )?;
@@ -853,7 +844,6 @@ impl<'b> ModuleCompiler<'b> {
         next_pair,
         num_params,
         num_lets,
-        def_index,
         num_imports,
         func,
       )?,
@@ -864,7 +854,6 @@ impl<'b> ModuleCompiler<'b> {
         next_pair,
         num_params,
         num_lets,
-        def_index,
         num_imports,
         func,
       )?,
@@ -888,32 +877,16 @@ impl<'b> ModuleCompiler<'b> {
     next_pair: &mut u32,
     num_params: u32,
     num_lets: u32,
-    def_index: u32,
     num_imports: u32,
     func: &mut Function,
   ) -> Result<(), String> {
-    if let Identifier::Bare(name) = ident {
-      if self.resolve_local(locals, name.binding).is_some() {
-        return self.compile_call_dynamic(
-          &AST::synthetic(ASTKind::Variable(name.clone())),
-          args,
-          locals,
-          next_pair,
-          num_params,
-          num_lets,
-          def_index,
-          num_imports,
-          func,
-        );
-      }
-    }
     let callee_index = match ident {
-      Identifier::Bare(name) if self.function_bindings.contains_key(&name.binding) => {
-        let _ = def_index;
-        let target_def = self.function_bindings[&name.binding];
-        num_imports + target_def
-      }
       Identifier::Bare(name) => return Err(format!("call to unknown function: {name}")),
+      Identifier::Qualified(module, name) if module == "main" => self
+        .function_names
+        .get(name)
+        .map(|target_def| num_imports + target_def)
+        .ok_or_else(|| format!("call to unknown function: {module}::{name}"))?,
       Identifier::Qualified(module, name) => {
         let key = (module.clone(), name.clone());
         let imp = self
@@ -931,7 +904,6 @@ impl<'b> ModuleCompiler<'b> {
         next_pair,
         num_params,
         num_lets,
-        def_index,
         num_imports,
         func,
       )?;
@@ -949,7 +921,6 @@ impl<'b> ModuleCompiler<'b> {
     next_pair: &mut u32,
     num_params: u32,
     num_lets: u32,
-    def_index: u32,
     num_imports: u32,
     func: &mut Function,
   ) -> Result<(), String> {
@@ -960,7 +931,6 @@ impl<'b> ModuleCompiler<'b> {
         next_pair,
         num_params,
         num_lets,
-        def_index,
         num_imports,
         func,
       )?;
@@ -971,7 +941,6 @@ impl<'b> ModuleCompiler<'b> {
       next_pair,
       num_params,
       num_lets,
-      def_index,
       num_imports,
       func,
     )?;
