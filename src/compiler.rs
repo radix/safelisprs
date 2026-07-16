@@ -462,22 +462,7 @@ impl<'module> FunctionCompiler<'module> {
   }
 
   fn compile(mut self, f: &parser::Function) -> Result<(String, CompiledCallable), String> {
-    let last_idx = f.code.len().saturating_sub(1);
-    let returns_void = f.returns_void();
-    for (i, ast) in f.code.iter().enumerate() {
-      self.compile_expr(ast)?;
-      // Non-final body expressions are in statement position: their value is
-      // discarded, so pop it off the stack to keep the stack clean. It would be
-      // really nice to avoid pushing things to the stack entirely if we know they
-      // are not going to be used, but that will probably take some more
-      // thought/refactoring.
-      if i != last_idx || returns_void {
-        self.emit(Instruction::Pop);
-      }
-    }
-    if returns_void {
-      self.emit(Instruction::PushVoid);
-    }
+    self.compile_body(&f.code, f.returns_void())?;
     self.emit(Instruction::Return);
     Ok((
       f.name.name.clone(),
@@ -487,6 +472,25 @@ impl<'module> FunctionCompiler<'module> {
         instructions: self.instructions,
       }),
     ))
+  }
+
+  fn compile_body(&mut self, body: &[AST], returns_void: bool) -> Result<(), String> {
+    let last_index = body.len().saturating_sub(1);
+    for (index, expression) in body.iter().enumerate() {
+      self.compile_expr(expression)?;
+      // Non-final body expressions are in statement position: their value is
+      // discarded, so pop it off the stack to keep the stack clean. It would be
+      // really nice to avoid pushing things to the stack entirely if we know they
+      // are not going to be used, but that will probably take some more
+      // thought/refactoring.
+      if index != last_index || returns_void {
+        self.emit(Instruction::Pop);
+      }
+    }
+    if returns_void {
+      self.emit(Instruction::PushVoid);
+    }
+    Ok(())
   }
 
   fn emit(&mut self, instruction: CompiledInstruction) -> usize {
@@ -618,14 +622,7 @@ impl<'module> FunctionCompiler<'module> {
         self.patch_jump_to_here(jump_end)?;
       }
       ASTKind::Block(body) => {
-        // Leave only the final expression's value on the stack.
-        let last_index = body.len().saturating_sub(1);
-        for (index, expression) in body.iter().enumerate() {
-          self.compile_expr(expression)?;
-          if index != last_index {
-            self.emit(Instruction::Pop);
-          }
-        }
+        self.compile_body(body, false)?;
       }
       ASTKind::Variable(name) => {
         let local = self
