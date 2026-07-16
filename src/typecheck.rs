@@ -5,7 +5,8 @@ use std::rc::Rc;
 
 use crate::builtins::{BuiltinSignature, BuiltinSpec, Trait, TypeConst};
 use crate::parser::{
-  source_position, ASTKind, Function, Identifier, Span, Struct as StructAst, TypeAst, AST,
+  source_position, ASTKind, BindingId, Function, Identifier, ResolvedName, Span,
+  Struct as StructAst, TypeAst, AST,
 };
 
 pub type TvRef = Rc<RefCell<TypeVar>>;
@@ -135,7 +136,7 @@ enum Binding {
   PolyFn(FnScheme),
 }
 
-type Env = HashMap<String, Binding>;
+type Env = HashMap<BindingId, Binding>;
 type TypeVars = HashMap<String, TvRef>;
 
 pub fn typecheck(asts: &[AST], builtins: &[BuiltinSpec]) -> Result<(), TypeError> {
@@ -156,6 +157,7 @@ pub fn typecheck_named<'a>(
 
 struct Checker {
   schemes: HashMap<(String, String), FnScheme>,
+  lexical_schemes: HashMap<BindingId, FnScheme>,
   structs: HashMap<String, StructAst>,
   next_var: usize,
   inference_vars: Vec<TvRef>,
@@ -165,6 +167,7 @@ impl Checker {
   fn new<'a>(builtins: impl IntoIterator<Item = (&'a str, &'a str, &'a BuiltinSignature)>) -> Self {
     let mut checker = Self {
       schemes: HashMap::new(),
+      lexical_schemes: HashMap::new(),
       structs: HashMap::new(),
       next_var: 0,
       inference_vars: Vec::new(),
@@ -210,7 +213,7 @@ impl Checker {
             .at(ast.span.clone()),
         );
       };
-      let key = ("main".to_string(), function.name.clone());
+      let key = ("main".to_string(), function.name.name.clone());
       if self.schemes.contains_key(&key) {
         return Err(
           TypeError::new(format!("duplicate function `main::{}`", function.name))
@@ -220,12 +223,15 @@ impl Checker {
       let (scheme, _) = self
         .declared_scheme(function, &HashMap::new())
         .map_err(|error| error.at(ast.span.clone()))?;
-      self.schemes.insert(key, scheme);
+      self.schemes.insert(key, scheme.clone());
+      if function.name.binding.is_resolved() {
+        self.lexical_schemes.insert(function.name.binding, scheme);
+      }
     }
 
     for ast in asts {
       if let ASTKind::DefineFn(function) = &ast.kind {
-        let scheme = self.schemes[&("main".to_string(), function.name.clone())].clone();
+        let scheme = self.schemes[&("main".to_string(), function.name.name.clone())].clone();
         let vars = rigid_vars_by_name(&scheme.quantified);
         self
           .check_function(function, &scheme, Env::new(), vars, true)
@@ -266,10 +272,10 @@ impl Checker {
           "parameter `{name}` requires a type annotation"
         )));
       }
-      if !seen.insert(name) {
+      if !seen.insert(name.as_str()) {
         return Err(TypeError::new(format!("duplicate parameter `{name}`")));
       }
-      env.insert(name.clone(), Binding::Mono(ty.clone()));
+      env.insert(name.binding, Binding::Mono(ty.clone()));
     }
 
     let inferred = self.infer_sequence(&mut env, &type_vars, &function.code)?;
@@ -322,7 +328,7 @@ impl Checker {
       let (scheme, nested_type_vars) = self
         .declared_scheme(function, type_vars)
         .map_err(|error| error.at(definition.span.clone()))?;
-      group_env.insert(function.name.clone(), Binding::PolyFn(scheme.clone()));
+      group_env.insert(function.name.binding, Binding::PolyFn(scheme.clone()));
       declared.push((function, definition, scheme, nested_type_vars));
     }
 
@@ -349,7 +355,7 @@ impl Checker {
     }
 
     for (function, _, scheme, _) in declared {
-      env.insert(function.name.clone(), Binding::PolyFn(scheme));
+      env.insert(function.name.binding, Binding::PolyFn(scheme));
     }
     Ok(result)
   }
@@ -383,13 +389,13 @@ impl Checker {
         }
         let binding = if let ASTKind::DefineFn(function) = &expression.kind {
           env
-            .get(&function.name)
+            .get(&function.name.binding)
             .cloned()
             .ok_or_else(|| TypeError::new("nested function was not bound after checking"))?
         } else {
           Binding::Mono(inferred.clone())
         };
-        env.insert(name.clone(), binding);
+        env.insert(name.binding, binding);
         Ok(inferred)
       }
       ASTKind::DefineFn(_) => {
@@ -511,8 +517,8 @@ impl Checker {
     args: &[AST],
   ) -> Result<Type, TypeError> {
     if let Identifier::Bare(name) = identifier {
-      let label = name.clone();
-      if let Some(binding) = env.get(name).cloned() {
+      let label = name.name.clone();
+      if let Some(binding) = env.get(&name.binding).cloned() {
         let callee = self.instantiate_binding(binding, Some(format!("call to `{label}`")))?;
         let arg_types = args
           .iter()
@@ -535,15 +541,25 @@ impl Checker {
     }
 
     let label = match identifier {
-      Identifier::Bare(name) => name.clone(),
+      Identifier::Bare(name) => name.name.clone(),
       Identifier::Qualified(module, name) => format!("{module}::{name}"),
     };
 
     let scheme = match identifier {
       Identifier::Bare(name) => self
-        .schemes
-        .get(&("main".to_string(), name.clone()))
-        .cloned(),
+        .lexical_schemes
+        .get(&name.binding)
+        .cloned()
+        .or_else(|| {
+          (!name.binding.is_resolved())
+            .then(|| {
+              self
+                .schemes
+                .get(&("main".to_string(), name.name.clone()))
+                .cloned()
+            })
+            .flatten()
+        }),
       Identifier::Qualified(module, name) => {
         self.schemes.get(&(module.clone(), name.clone())).cloned()
       }
@@ -590,14 +606,24 @@ impl Checker {
     Ok(instantiated.ret)
   }
 
-  fn resolve_bare(&mut self, env: &Env, name: &str) -> Result<Type, TypeError> {
-    if let Some(binding) = env.get(name).cloned() {
+  fn resolve_bare(&mut self, env: &Env, name: &ResolvedName) -> Result<Type, TypeError> {
+    if let Some(binding) = env.get(&name.binding).cloned() {
       return self.instantiate_binding(binding, Some(format!("variable `{name}`")));
     }
     let scheme = self
-      .schemes
-      .get(&("main".to_string(), name.to_string()))
+      .lexical_schemes
+      .get(&name.binding)
       .cloned()
+      .or_else(|| {
+        (!name.binding.is_resolved())
+          .then(|| {
+            self
+              .schemes
+              .get(&("main".to_string(), name.name.clone()))
+              .cloned()
+          })
+          .flatten()
+      })
       .ok_or_else(|| TypeError::new(format!("Unknown name `{name}`")))?;
     let instantiated = self.instantiate(&scheme, Some(format!("function `main::{name}`")));
     Ok(Type::fn_scheme_type(instantiated))
@@ -1319,9 +1345,11 @@ mod tests {
   use super::*;
   use crate::builtins::default_builtins;
   use crate::parser::read_multiple;
+  use crate::prelude::resolve_module_names;
 
   fn check(source: &str) -> Result<(), TypeError> {
     let asts = read_multiple(source).unwrap();
+    let asts = resolve_module_names(&asts, &[]).unwrap();
     typecheck(&asts, &default_builtins().specs())
   }
 

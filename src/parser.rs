@@ -1,6 +1,87 @@
+use std::fmt;
 use std::ops::Range;
 
 pub type Span = Range<usize>;
+
+/// Stable identity for one lexical binding within a resolved module.
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
+pub struct BindingId(u32);
+
+impl BindingId {
+  const UNRESOLVED: Self = Self(u32::MAX);
+
+  pub(crate) fn resolved(index: u32) -> Self {
+    Self(index)
+  }
+
+  pub(crate) fn synthetic(index: u32) -> Self {
+    Self(u32::MAX - 1 - index)
+  }
+
+  pub fn is_resolved(self) -> bool {
+    self != Self::UNRESOLVED
+  }
+}
+
+/// A source name paired with the lexical binding it resolves to.
+///
+/// The parser creates unresolved names; [`crate::prelude::resolve_module_names`]
+/// assigns binding IDs before typechecking and lowering.
+#[derive(Debug, PartialEq, Eq, Hash, Clone)]
+pub struct ResolvedName {
+  pub name: String,
+  pub binding: BindingId,
+}
+
+impl ResolvedName {
+  pub fn unresolved(name: impl Into<String>) -> Self {
+    Self {
+      name: name.into(),
+      binding: BindingId::UNRESOLVED,
+    }
+  }
+
+  pub(crate) fn resolved(name: impl Into<String>, binding: BindingId) -> Self {
+    Self {
+      name: name.into(),
+      binding,
+    }
+  }
+
+  pub fn as_str(&self) -> &str {
+    &self.name
+  }
+}
+
+impl fmt::Display for ResolvedName {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    self.name.fmt(formatter)
+  }
+}
+
+impl PartialEq<str> for ResolvedName {
+  fn eq(&self, other: &str) -> bool {
+    self.name == other
+  }
+}
+
+impl PartialEq<&str> for ResolvedName {
+  fn eq(&self, other: &&str) -> bool {
+    self.name == *other
+  }
+}
+
+impl From<String> for ResolvedName {
+  fn from(name: String) -> Self {
+    Self::unresolved(name)
+  }
+}
+
+impl From<&str> for ResolvedName {
+  fn from(name: &str) -> Self {
+    Self::unresolved(name)
+  }
+}
 
 #[derive(Debug, Clone)]
 pub struct AST {
@@ -17,12 +98,12 @@ impl PartialEq for AST {
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum ASTKind {
-  Let(String, Option<TypeAst>, Box<AST>),
+  Let(ResolvedName, Option<TypeAst>, Box<AST>),
   DefineFn(Function),
   DefineStruct(Struct),
   Call(Box<AST>, Vec<AST>),
   CallFixed(Identifier, Vec<AST>),
-  Variable(String),
+  Variable(ResolvedName),
   Int(i64),
   Float(f64),
   String(String),
@@ -61,7 +142,7 @@ impl AST {
 #[allow(non_snake_case)]
 impl AST {
   pub(crate) fn Let(name: String, value: Box<AST>) -> Self {
-    Self::synthetic(ASTKind::Let(name, None, value))
+    Self::synthetic(ASTKind::Let(name.into(), None, value))
   }
 
   pub(crate) fn DefineFn(function: Function) -> Self {
@@ -73,7 +154,7 @@ impl AST {
   }
 
   pub(crate) fn Variable(name: String) -> Self {
-    Self::synthetic(ASTKind::Variable(name))
+    Self::synthetic(ASTKind::Variable(name.into()))
   }
 
   pub(crate) fn Int(value: i64) -> Self {
@@ -101,16 +182,84 @@ impl AST {
   }
 }
 
+#[cfg(test)]
+pub(crate) fn erase_bindings(asts: &[AST]) -> Vec<AST> {
+  fn erase_name(name: &mut ResolvedName) {
+    name.binding = BindingId::UNRESOLVED;
+  }
+
+  fn erase_ast(ast: &mut AST) {
+    match &mut ast.kind {
+      ASTKind::Let(name, _, expression) => {
+        erase_name(name);
+        erase_ast(expression);
+      }
+      ASTKind::DefineFn(function) => {
+        erase_name(&mut function.name);
+        for (param, _) in &mut function.params {
+          erase_name(param);
+        }
+        for expression in &mut function.code {
+          erase_ast(expression);
+        }
+      }
+      ASTKind::Call(callable, args) | ASTKind::PartialApply(callable, args) => {
+        erase_ast(callable);
+        for arg in args {
+          erase_ast(arg);
+        }
+      }
+      ASTKind::CallFixed(identifier, args) => {
+        if let Identifier::Bare(name) = identifier {
+          erase_name(name);
+        }
+        for arg in args {
+          erase_ast(arg);
+        }
+      }
+      ASTKind::Variable(name) => erase_name(name),
+      ASTKind::NewStruct(_, fields) => {
+        for (_, expression) in fields {
+          erase_ast(expression);
+        }
+      }
+      ASTKind::FieldAccess(receiver, _) => erase_ast(receiver),
+      ASTKind::If(condition, then_branch, else_branch) => {
+        erase_ast(condition);
+        erase_ast(then_branch);
+        erase_ast(else_branch);
+      }
+      ASTKind::Block(body) => {
+        for expression in body {
+          erase_ast(expression);
+        }
+      }
+      ASTKind::Int(_)
+      | ASTKind::Float(_)
+      | ASTKind::String(_)
+      | ASTKind::Bool(_)
+      | ASTKind::FunctionRef(_, _)
+      | ASTKind::DefineStruct(_) => {}
+    }
+  }
+
+  let mut asts = asts.to_vec();
+  for ast in &mut asts {
+    erase_ast(ast);
+  }
+  asts
+}
+
 #[derive(Debug, PartialEq, Clone)]
 pub enum Identifier {
-  Bare(String),
+  Bare(ResolvedName),
   Qualified(String, String),
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct Function {
-  pub name: String,
-  pub params: Vec<(String, Option<TypeAst>)>,
+  pub name: ResolvedName,
+  pub params: Vec<(ResolvedName, Option<TypeAst>)>,
   pub return_type: Option<TypeAst>,
   pub bounds: Vec<Bound>,
   pub code: Vec<AST>,
@@ -534,7 +683,7 @@ impl Parser {
     let close = self.expect_close("`let` must have exactly two arguments")?;
     let span = start..close.span.end;
     Ok(AST::new(
-      ASTKind::Let(variable, annotation, Box::new(expression)),
+      ASTKind::Let(variable.into(), annotation, Box::new(expression)),
       span,
     ))
   }
@@ -615,8 +764,11 @@ impl Parser {
     let span = start..close.span.end;
     Ok(AST::new(
       ASTKind::DefineFn(Function {
-        name,
-        params,
+        name: name.into(),
+        params: params
+          .into_iter()
+          .map(|(name, annotation)| (name.into(), annotation))
+          .collect(),
         return_type,
         bounds,
         code: body,
@@ -716,13 +868,13 @@ impl Parser {
     let (identifier, head_span) = if matches!(self.peek().kind, TokenKind::DoubleColon) {
       self.parse_qualified_identifier(name, head.span)?
     } else {
-      (Identifier::Bare(name), head.span)
+      (Identifier::Bare(name.into()), head.span)
     };
     let (args, close) = self.parse_call_args()?;
     let span = start..close.span.end;
     match identifier {
       Identifier::Bare(name) => {
-        let callee = ast_from_symbol(name, head_span);
+        let callee = ast_from_symbol(name.name, head_span);
         match callee.kind {
           ASTKind::Variable(name) => Ok(AST::new(
             ASTKind::CallFixed(Identifier::Bare(name), args),
@@ -913,14 +1065,14 @@ fn ast_from_symbol(name: String, span: Span) -> AST {
 
 fn ast_from_variable_or_field_access(name: String, span: Span) -> AST {
   if name == "..." || !name.contains('.') || name.split('.').any(str::is_empty) {
-    return AST::new(ASTKind::Variable(name), span);
+    return AST::new(ASTKind::Variable(name.into()), span);
   }
 
   let mut parts = name.split('.');
   let first = parts
     .next()
     .expect("contains('.') ensures at least one component");
-  let mut ast = AST::new(ASTKind::Variable(first.to_string()), span.clone());
+  let mut ast = AST::new(ASTKind::Variable(first.into()), span.clone());
   for field in parts {
     ast = AST::new(
       ASTKind::FieldAccess(Box::new(ast), field.to_string()),
@@ -1003,7 +1155,7 @@ mod test {
     assert_eq!(
       result,
       vec![AST::CallFixed(
-        Identifier::Bare("set!".to_string()),
+        Identifier::Bare("set!".into()),
         vec![AST::Variable("x".to_string()), AST::Int(2)],
       )]
     );
@@ -1039,9 +1191,9 @@ mod test {
     assert_eq!(
       function.params,
       vec![
-        ("a".to_string(), Some(TypeAst::Named("A".to_string()))),
+        ("a".into(), Some(TypeAst::Named("A".to_string()))),
         (
-          "xs".to_string(),
+          "xs".into(),
           Some(TypeAst::Apply(
             "List".to_string(),
             vec![TypeAst::Named("Int".to_string())]

@@ -2095,6 +2095,40 @@ mod test {
   }
 
   #[test]
+  fn recursive_function_parameter_can_shadow_a_sibling_name() {
+    let source = "
+      (fn make () ->(Fn (Int) -> Int)
+        (fn a (b:Int) ->Int b)
+        (fn b (n:Int) ->Int n)
+        a)
+      (fn main () ->Int
+        (let f (make))
+        (f 7))
+    ";
+    assert_eq!(eval_main(source), SLValue::Int(7));
+  }
+
+  #[test]
+  fn transitive_capture_can_share_a_name_with_a_source_parameter() {
+    let source = "
+      (fn make (x:Int) ->(Fn (Int) -> Int)
+        (fn a (x:Int) ->Int
+          (if (std::== x 0)
+              999
+              (b (std::- x 1))))
+        (fn b (n:Int) ->Int
+          (if (std::== n 0)
+              x
+              (a (std::- n 1))))
+        a)
+      (fn main () ->Int
+        (let f (make 42))
+        (f 1))
+    ";
+    assert_eq!(eval_main(source), SLValue::Int(42));
+  }
+
+  #[test]
   fn function_definition_expression_returns_function() {
     let source = "
       (fn outer () ->(Fn () -> Int)
