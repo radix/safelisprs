@@ -2,7 +2,8 @@ use std::collections::HashSet;
 
 #[cfg(test)]
 use crate::parser::TypeAst;
-use crate::parser::{ASTKind, Function, Span, AST};
+use crate::parser::{ASTKind, BindingId, Function, Identifier, ResolvedName, Span, AST};
+use crate::prelude::resolve_module_names;
 
 pub fn transform_closures_in_module(module_name: &str, items: &[AST]) -> Result<Vec<AST>, String> {
   //! There isn't technically anything called a "closure" in either the runtime or compile time of
@@ -13,6 +14,19 @@ pub fn transform_closures_in_module(module_name: &str, items: &[AST]) -> Result<
   //! definition environment are passed in as hidden parameters. Then, to actually represent the
   //! "closure" (i.e. the callable object which has the environment bound to it), we PartialApply
   //! the inner function with all the values that it uses.
+
+  let resolved_items;
+  let items = if items.iter().any(|item| {
+    matches!(
+      &item.kind,
+      ASTKind::DefineFn(function) if !function.name.binding.is_resolved()
+    )
+  }) {
+    resolved_items = resolve_module_names(items, &[])?;
+    resolved_items.as_slice()
+  } else {
+    items
+  };
 
   let mut result = vec![];
   let mut names = ClosureNameAllocator::new(items);
@@ -35,15 +49,15 @@ struct TransformResult {
   lifted: Vec<AST>,
   /// Variables that a function uses from the outer environment, before
   /// recursive sibling dependencies are propagated.
-  captures: Vec<String>,
+  captures: Vec<ResolvedName>,
   /// Functions in the current recursive group that this body needs as local
   /// closure values.
-  recursive_refs: Vec<String>,
+  recursive_refs: Vec<ResolvedName>,
 }
 
 struct RecursiveBinding {
-  source_name: String,
-  lifted_name: String,
+  source_name: ResolvedName,
+  lifted_name: ResolvedName,
 }
 
 fn closurize_function(
@@ -55,7 +69,7 @@ fn closurize_function(
   //! Transform a function into a simpler form where nested functions are lifted
   //! to the top level and their captured environment is threaded in as hidden
   //! parameters.
-  let path = vec![outer_func.name.clone()];
+  let path = vec![outer_func.name.name.clone()];
   let result = transform_function(
     module_name,
     outer_func,
@@ -73,9 +87,9 @@ fn closurize_function(
 fn transform_function(
   module_name: &str,
   func: &Function,
-  transformed_name: String,
+  transformed_name: ResolvedName,
   lexical_path: Vec<String>,
-  environment: &HashSet<String>,
+  environment: &HashSet<BindingId>,
   source_span: Span,
   names: &mut ClosureNameAllocator,
   recursive_bindings: &[RecursiveBinding],
@@ -89,11 +103,11 @@ fn transform_function(
   //! - nested `fn` definitions are lifted into `lifted` as separate functions
   //! - the original nested `fn` expression becomes `let name (partial-apply func [captures...])`
   let mut locals = hashset! {};
-  locals.extend(func.params.iter().map(|(name, _)| name.clone()));
+  locals.extend(func.params.iter().map(|(name, _)| name.binding));
   locals.extend(
     recursive_bindings
       .iter()
-      .map(|binding| binding.source_name.clone()),
+      .map(|binding| binding.source_name.binding),
   );
   let mut lifted = vec![];
   let mut captures = vec![];
@@ -136,13 +150,13 @@ fn transform_sequence(
   module_name: &str,
   expressions: &[AST],
   lexical_path: &[String],
-  environment: &HashSet<String>,
-  locals: &mut HashSet<String>,
-  captures: &mut Vec<String>,
+  environment: &HashSet<BindingId>,
+  locals: &mut HashSet<BindingId>,
+  captures: &mut Vec<ResolvedName>,
   lifted: &mut Vec<AST>,
   names: &mut ClosureNameAllocator,
   recursive_bindings: &[RecursiveBinding],
-  recursive_refs: &mut Vec<String>,
+  recursive_refs: &mut Vec<ResolvedName>,
 ) -> Result<Vec<AST>, String> {
   let mut transformed = vec![];
   let mut index = 0;
@@ -186,13 +200,13 @@ fn transform_nested_function_group(
   module_name: &str,
   definitions: &[AST],
   lexical_path: &[String],
-  environment: &HashSet<String>,
-  locals: &mut HashSet<String>,
-  captures: &mut Vec<String>,
+  environment: &HashSet<BindingId>,
+  locals: &mut HashSet<BindingId>,
+  captures: &mut Vec<ResolvedName>,
   lifted: &mut Vec<AST>,
   names: &mut ClosureNameAllocator,
   enclosing_recursive_bindings: &[RecursiveBinding],
-  enclosing_recursive_refs: &mut Vec<String>,
+  enclosing_recursive_refs: &mut Vec<ResolvedName>,
 ) -> Result<Vec<AST>, String> {
   let mut inner_environment = environment.clone();
   inner_environment.extend(locals.iter().cloned());
@@ -203,7 +217,7 @@ fn transform_nested_function_group(
       unreachable!("nested function groups contain only function definitions");
     };
     let mut inner_path = lexical_path.to_vec();
-    inner_path.push(function.name.clone());
+    inner_path.push(function.name.name.clone());
     bindings.push(RecursiveBinding {
       source_name: function.name.clone(),
       lifted_name: names.allocate(&inner_path),
@@ -216,7 +230,7 @@ fn transform_nested_function_group(
       unreachable!("nested function groups contain only function definitions");
     };
     let mut inner_path = lexical_path.to_vec();
-    inner_path.push(function.name.clone());
+    inner_path.push(function.name.name.clone());
     results.push(transform_function(
       module_name,
       function,
@@ -242,7 +256,7 @@ fn transform_nested_function_group(
       for reference in &result.recursive_refs {
         let dependency = bindings
           .iter()
-          .position(|binding| binding.source_name == *reference)
+          .position(|binding| binding.source_name.binding == reference.binding)
           .expect("recursive references belong to the current group");
         for capture in &previous[dependency] {
           push_unique(&mut group_captures[index], capture.clone());
@@ -277,7 +291,7 @@ fn transform_nested_function_group(
     for reference in &result.recursive_refs {
       let dependency = bindings
         .iter()
-        .position(|binding| binding.source_name == *reference)
+        .position(|binding| binding.source_name.binding == reference.binding)
         .expect("recursive references belong to the current group");
       recursive_bindings.push(AST::new(
         ASTKind::Let(
@@ -285,7 +299,7 @@ fn transform_nested_function_group(
           None,
           Box::new(closure_expr(
             module_name,
-            &bindings[dependency].lifted_name,
+            bindings[dependency].lifted_name.as_str(),
             &group_captures[dependency],
             definition.span.clone(),
           )),
@@ -308,9 +322,9 @@ fn transform_nested_function_group(
       unreachable!("nested function groups contain only function definitions");
     };
     for capture in group_capture {
-      if recursive_binding(enclosing_recursive_bindings, capture).is_some() {
+      if recursive_binding(enclosing_recursive_bindings, capture.binding).is_some() {
         push_unique(enclosing_recursive_refs, capture.clone());
-      } else if !locals.contains(capture) && environment.contains(capture) {
+      } else if !locals.contains(&capture.binding) && environment.contains(&capture.binding) {
         push_unique(captures, capture.clone());
       }
     }
@@ -320,13 +334,17 @@ fn transform_nested_function_group(
       None,
       Box::new(closure_expr(
         module_name,
-        &binding.lifted_name,
+        binding.lifted_name.as_str(),
         group_capture,
         definition.span.clone(),
       )),
     )));
   }
-  locals.extend(bindings.into_iter().map(|binding| binding.source_name));
+  locals.extend(
+    bindings
+      .into_iter()
+      .map(|binding| binding.source_name.binding),
+  );
   Ok(transformed)
 }
 
@@ -335,13 +353,13 @@ fn transform_ast(
   module_name: &str,
   ast: &AST,
   lexical_path: &[String],
-  environment: &HashSet<String>,
-  locals: &mut HashSet<String>,
-  captures: &mut Vec<String>,
+  environment: &HashSet<BindingId>,
+  locals: &mut HashSet<BindingId>,
+  captures: &mut Vec<ResolvedName>,
   lifted: &mut Vec<AST>,
   names: &mut ClosureNameAllocator,
   recursive_bindings: &[RecursiveBinding],
-  recursive_refs: &mut Vec<String>,
+  recursive_refs: &mut Vec<ResolvedName>,
 ) -> Result<AST, String> {
   //! Do closure transformations on one expression inside a function body,
   //! recording captures as they are discovered.
@@ -359,7 +377,7 @@ fn transform_ast(
         recursive_bindings,
         recursive_refs,
       )?;
-      locals.insert(name.clone());
+      locals.insert(name.binding);
       Ok(ast.with_kind(ASTKind::Let(
         name.clone(),
         annotation.clone(),
@@ -386,10 +404,12 @@ fn transform_ast(
       )
     }
     ASTKind::Variable(name) => {
-      if recursive_binding(recursive_bindings, name).is_some() && locals.contains(name) {
+      if recursive_binding(recursive_bindings, name.binding).is_some()
+        && locals.contains(&name.binding)
+      {
         push_unique(recursive_refs, name.clone());
       }
-      if !locals.contains(name) && environment.contains(name) {
+      if !locals.contains(&name.binding) && environment.contains(&name.binding) {
         push_unique(captures, name.clone());
       }
       Ok(ast.clone())
@@ -425,11 +445,13 @@ fn transform_ast(
       Ok(ast.with_kind(ASTKind::Call(Box::new(callable), new_args)))
     }
     ASTKind::CallFixed(ident, args) => {
-      if let crate::parser::Identifier::Bare(name) = ident {
-        if recursive_binding(recursive_bindings, name).is_some() && locals.contains(name) {
+      if let Identifier::Bare(name) = ident {
+        if recursive_binding(recursive_bindings, name.binding).is_some()
+          && locals.contains(&name.binding)
+        {
           push_unique(recursive_refs, name.clone());
         }
-        if !locals.contains(name) && environment.contains(name) {
+        if !locals.contains(&name.binding) && environment.contains(&name.binding) {
           push_unique(captures, name.clone());
         }
       }
@@ -576,13 +598,13 @@ fn transform_ast(
   }
 }
 
-fn recursive_binding<'a>(
-  bindings: &'a [RecursiveBinding],
-  source_name: &str,
-) -> Option<&'a RecursiveBinding> {
+fn recursive_binding(
+  bindings: &[RecursiveBinding],
+  binding: BindingId,
+) -> Option<&RecursiveBinding> {
   bindings
     .iter()
-    .find(|binding| binding.source_name == source_name)
+    .find(|candidate| candidate.source_name.binding == binding)
 }
 
 fn nested_function_group_end(expressions: &[AST], start: usize) -> usize {
@@ -601,7 +623,12 @@ fn nested_function_group_end(expressions: &[AST], start: usize) -> usize {
   end
 }
 
-fn closure_expr(module_name: &str, lifted_name: &str, captures: &[String], span: Span) -> AST {
+fn closure_expr(
+  module_name: &str,
+  lifted_name: &str,
+  captures: &[ResolvedName],
+  span: Span,
+) -> AST {
   //! Generate a PartialApply of a closure with its captures
   let func_ref = AST::new(
     ASTKind::FunctionRef(module_name.to_string(), lifted_name.to_string()),
@@ -624,14 +651,18 @@ fn closure_expr(module_name: &str, lifted_name: &str, captures: &[String], span:
   }
 }
 
-fn push_unique(items: &mut Vec<String>, item: String) {
-  if !items.contains(&item) {
+fn push_unique(items: &mut Vec<ResolvedName>, item: ResolvedName) {
+  if !items
+    .iter()
+    .any(|existing| existing.binding == item.binding)
+  {
     items.push(item);
   }
 }
 
 struct ClosureNameAllocator {
   used: HashSet<String>,
+  next_binding: u32,
 }
 
 impl ClosureNameAllocator {
@@ -639,27 +670,36 @@ impl ClosureNameAllocator {
     let used = items
       .iter()
       .filter_map(|item| match &item.kind {
-        ASTKind::DefineFn(func) => Some(func.name.clone()),
+        ASTKind::DefineFn(func) => Some(func.name.name.clone()),
         _ => None,
       })
       .collect();
-    Self { used }
+    Self {
+      used,
+      next_binding: 0,
+    }
   }
 
-  fn allocate(&mut self, lexical_path: &[String]) -> String {
+  fn allocate(&mut self, lexical_path: &[String]) -> ResolvedName {
     let base = mangle_closure_name(lexical_path);
     if self.used.insert(base.clone()) {
-      return base;
+      return self.synthetic_name(base);
     }
 
     let mut disambiguator = 1;
     loop {
       let candidate = format!("{}:{}:(closure)", lexical_path.join(":"), disambiguator);
       if self.used.insert(candidate.clone()) {
-        return candidate;
+        return self.synthetic_name(candidate);
       }
       disambiguator += 1;
     }
+  }
+
+  fn synthetic_name(&mut self, name: String) -> ResolvedName {
+    let binding = BindingId::synthetic(self.next_binding);
+    self.next_binding += 1;
+    ResolvedName::resolved(name, binding)
   }
 }
 
@@ -670,7 +710,7 @@ fn mangle_closure_name(lexical_path: &[String]) -> String {
 #[cfg(test)]
 mod test {
   use super::*;
-  use crate::parser::{read_multiple, Identifier};
+  use crate::parser::{erase_bindings, read_multiple, Identifier};
 
   #[allow(non_snake_case)]
   fn Let(name: String, value: Box<AST>) -> AST {
@@ -702,6 +742,12 @@ mod test {
     AST::CallFixed(identifier, args)
   }
 
+  fn erased(ast: &AST) -> AST {
+    erase_bindings(std::slice::from_ref(ast))
+      .pop()
+      .expect("one AST was provided")
+  }
+
   #[test]
   fn transformed_closure() -> Result<(), String> {
     let source = "
@@ -712,14 +758,14 @@ mod test {
     let new_asts = transform_closures_in_module("main", &asts)?;
     let expected = vec![
       AST::DefineFn(Function {
-        name: "outer:inner:(closure)".to_string(),
-        params: vec![("a".to_string(), None)],
+        name: "outer:inner:(closure)".into(),
+        params: vec![("a".into(), None)],
         return_type: None,
         bounds: vec![],
         code: vec![Variable("a".to_string())],
       }),
       AST::DefineFn(Function {
-        name: "outer".to_string(),
+        name: "outer".into(),
         params: vec![],
         return_type: None,
         bounds: vec![],
@@ -738,7 +784,7 @@ mod test {
         ],
       }),
     ];
-    assert_eq!(new_asts, expected);
+    assert_eq!(erase_bindings(&new_asts), expected);
     Ok(())
   }
 
@@ -755,22 +801,22 @@ mod test {
     let new_asts = transform_closures_in_module("main", &asts)?;
     let expected = vec![
       AST::DefineFn(Function {
-        name: "outer:inner:(closure)".to_string(),
-        params: vec![("par".to_string(), None)],
+        name: "outer:inner:(closure)".into(),
+        params: vec![("par".into(), None)],
         return_type: None,
         bounds: vec![],
         code: vec![Variable("par".to_string())],
       }),
       AST::DefineFn(Function {
-        name: "outer".to_string(),
-        params: vec![("par".to_string(), Some(TypeAst::Named("Int".to_string())))],
+        name: "outer".into(),
+        params: vec![("par".into(), Some(TypeAst::Named("Int".to_string())))],
         return_type: None,
         bounds: vec![],
         code: vec![
           Let(
             "b".to_string(),
             Box::new(CallFixed(
-              Identifier::Bare("+".to_string()),
+              Identifier::Bare("+".into()),
               vec![Variable("par".to_string()), Int(1)],
             )),
           ),
@@ -787,7 +833,7 @@ mod test {
         ],
       }),
     ];
-    assert_eq!(new_asts, expected);
+    assert_eq!(erase_bindings(&new_asts), expected);
     Ok(())
   }
 
@@ -802,14 +848,14 @@ mod test {
     let new_asts = transform_closures_in_module("main", &asts)?;
     let expected = vec![
       AST::DefineFn(Function {
-        name: "outer:inner:(closure)".to_string(),
+        name: "outer:inner:(closure)".into(),
         params: vec![],
         return_type: None,
         bounds: vec![],
         code: vec![Int(1)],
       }),
       AST::DefineFn(Function {
-        name: "outer".to_string(),
+        name: "outer".into(),
         params: vec![],
         return_type: None,
         bounds: vec![],
@@ -822,7 +868,7 @@ mod test {
         )],
       }),
     ];
-    assert_eq!(new_asts, expected);
+    assert_eq!(erase_bindings(&new_asts), expected);
     Ok(())
   }
 
@@ -843,7 +889,7 @@ mod test {
       countdown
         .params
         .iter()
-        .map(|(name, _)| name)
+        .map(|(name, _)| name.as_str())
         .collect::<Vec<_>>(),
       vec!["base", "n"]
     );
@@ -853,7 +899,7 @@ mod test {
     };
     assert_eq!(self_name, "countdown");
     assert_eq!(
-      **self_value,
+      erased(self_value),
       PartialApply(
         Box::new(FunctionRef(
           "main".to_string(),
@@ -914,7 +960,7 @@ mod test {
     };
     assert_eq!(name, "odd");
     assert_eq!(
-      **value,
+      erased(value),
       PartialApply(
         Box::new(FunctionRef(
           "main".to_string(),
@@ -932,7 +978,7 @@ mod test {
     };
     assert_eq!(name, "even");
     assert_eq!(
-      **value,
+      erased(value),
       PartialApply(
         Box::new(FunctionRef(
           "main".to_string(),
@@ -962,7 +1008,7 @@ mod test {
     let new_asts = transform_closures_in_module("main", &asts)?;
     let expected = vec![
       AST::DefineFn(Function {
-        name: "outer:inner:(closure)".to_string(),
+        name: "outer:inner:(closure)".into(),
         params: vec![],
         return_type: None,
         bounds: vec![],
@@ -972,7 +1018,7 @@ mod test {
         ],
       }),
       AST::DefineFn(Function {
-        name: "outer".to_string(),
+        name: "outer".into(),
         params: vec![],
         return_type: None,
         bounds: vec![],
@@ -988,7 +1034,7 @@ mod test {
         ],
       }),
     ];
-    assert_eq!(new_asts, expected);
+    assert_eq!(erase_bindings(&new_asts), expected);
     Ok(())
   }
 
@@ -1007,15 +1053,15 @@ mod test {
     let new_asts = transform_closures_in_module("main", &asts)?;
     let expected = vec![
       AST::DefineFn(Function {
-        name: "outer:inner:(closure)".to_string(),
-        params: vec![("a".to_string(), None)],
+        name: "outer:inner:(closure)".into(),
+        params: vec![("a".into(), None)],
         return_type: None,
         bounds: vec![],
         code: vec![
           Let(
             "a".to_string(),
             Box::new(CallFixed(
-              Identifier::Bare("+".to_string()),
+              Identifier::Bare("+".into()),
               vec![Variable("a".to_string()), Int(1)],
             )),
           ),
@@ -1023,7 +1069,7 @@ mod test {
         ],
       }),
       AST::DefineFn(Function {
-        name: "outer".to_string(),
+        name: "outer".into(),
         params: vec![],
         return_type: None,
         bounds: vec![],
@@ -1042,7 +1088,7 @@ mod test {
         ],
       }),
     ];
-    assert_eq!(new_asts, expected);
+    assert_eq!(erase_bindings(&new_asts), expected);
     Ok(())
   }
 
@@ -1062,15 +1108,15 @@ mod test {
 
     let expected = vec![
       AST::DefineFn(Function {
-        name: "outer:intermediate:inner:(closure)".to_string(),
-        params: vec![("a".to_string(), None)],
+        name: "outer:intermediate:inner:(closure)".into(),
+        params: vec![("a".into(), None)],
         return_type: None,
         bounds: vec![],
         code: vec![AST::Variable("a".to_string())],
       }),
       AST::DefineFn(Function {
-        name: "outer:intermediate:(closure)".to_string(),
-        params: vec![("a".to_string(), None)],
+        name: "outer:intermediate:(closure)".into(),
+        params: vec![("a".into(), None)],
         return_type: None,
         bounds: vec![],
         code: vec![AST::Let(
@@ -1085,7 +1131,7 @@ mod test {
         )],
       }),
       AST::DefineFn(Function {
-        name: "outer".to_string(),
+        name: "outer".into(),
         params: vec![],
         return_type: None,
         bounds: vec![],
@@ -1105,7 +1151,7 @@ mod test {
         ],
       }),
     ];
-    assert_eq!(new_asts, expected);
+    assert_eq!(erase_bindings(&new_asts), expected);
     Ok(())
   }
 

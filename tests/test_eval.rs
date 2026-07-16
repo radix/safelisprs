@@ -163,6 +163,14 @@ fn register_one(linker: &mut Linker<()>, b: &safelisp::wasm::Builtin) {
   "(fn main () ->Int (if false (let a 10) (let a 20)) a)",
   Val::Int(20)
 )]
+#[case::if_join_selects_shadowing_binding(
+  "(fn main () ->Int (let a 5) (if true (let a 10) a) a)",
+  Val::Int(10)
+)]
+#[case::if_join_keeps_existing_binding(
+  "(fn main () ->Int (let a 5) (if false (let a 10) a) a)",
+  Val::Int(5)
+)]
 #[case::calls_same_module_function(
   "(fn id (a:Int) ->Int a) (fn main () ->Int (id 99))",
   Val::Int(99)

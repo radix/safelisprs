@@ -9,8 +9,8 @@ use wasm_encoder::{
 };
 
 use crate::builtins::{sig, BuiltinSignature, Trait, TypeConst};
-use crate::parser::{self, ASTKind, Identifier, AST};
-use crate::prelude::resolve_module_prelude;
+use crate::parser::{self, ASTKind, BindingId, Identifier, AST};
+use crate::prelude::resolve_module_names;
 
 /// Tag values for the SafeLisp tagged-value representation. Every SafeLisp
 /// value on the WASM stack is a `(payload: i64, tag: i32)` pair — payload
@@ -218,7 +218,7 @@ pub fn compile(
   prelude: &[(&str, &str)],
 ) -> Result<Vec<u8>, String> {
   let asts = parser::read_multiple(source)?;
-  let asts = resolve_module_prelude(&asts, prelude)?;
+  let asts = resolve_module_names(&asts, prelude)?;
   check_types(&asts, builtins).map_err(|error| error.render(source))?;
   ModuleCompiler::new(builtins).compile(&asts)
 }
@@ -229,7 +229,7 @@ pub fn compile_asts(
   builtins: &Builtins,
   prelude: &[(&str, &str)],
 ) -> Result<Vec<u8>, String> {
-  let asts = resolve_module_prelude(asts, prelude)?;
+  let asts = resolve_module_names(asts, prelude)?;
   check_types(&asts, builtins).map_err(|error| error.to_string())?;
   ModuleCompiler::new(builtins).compile(&asts)
 }
@@ -267,6 +267,7 @@ struct ModuleCompiler<'b> {
   builtins: &'b Builtins,
   functions: Vec<FuncDef>,
   function_names: HashMap<String, u32>,
+  function_bindings: HashMap<BindingId, u32>,
   type_indices: HashMap<Signature, u32>,
   used_imports: HashMap<(String, String), UsedImport>,
   /// Type index for the `if` block type: `() -> (i64, i32)`, i.e. an SlValue
@@ -281,6 +282,7 @@ impl<'b> ModuleCompiler<'b> {
       builtins,
       functions: vec![],
       function_names: HashMap::new(),
+      function_bindings: HashMap::new(),
       type_indices: HashMap::new(),
       used_imports: HashMap::new(),
       if_block_type: None,
@@ -291,10 +293,13 @@ impl<'b> ModuleCompiler<'b> {
     for ast in asts {
       if let ASTKind::DefineFn(f) = &ast.kind {
         self
+          .function_bindings
+          .insert(f.name.binding, self.functions.len() as u32);
+        self
           .function_names
-          .insert(f.name.clone(), self.functions.len() as u32);
+          .insert(f.name.name.clone(), self.functions.len() as u32);
         self.functions.push(FuncDef {
-          name: f.name.clone(),
+          name: f.name.name.clone(),
           num_params: f.params.len() as u32,
           def_index: self.functions.len() as u32,
         });
@@ -412,7 +417,7 @@ impl<'b> ModuleCompiler<'b> {
     let mut codes = CodeSection::new();
     for ast in asts {
       if let ASTKind::DefineFn(f) = &ast.kind {
-        let def_index = self.function_names[&f.name];
+        let def_index = self.function_names[f.name.as_str()];
         let body = self.compile_function(f, def_index, num_imports)?;
         codes.function(&body);
       }
@@ -566,11 +571,11 @@ impl<'b> ModuleCompiler<'b> {
     // `locals` stores (name, pair_index) where pair_index is the index of
     // the SafeLisp value (0-based: param 0 is pair 0, param 1 is pair 1,
     // first let is pair num_params, etc.).
-    let mut locals: Vec<(String, u32)> = f
+    let mut locals: Vec<(BindingId, u32)> = f
       .params
       .iter()
       .enumerate()
-      .map(|(i, (name, _))| (name.clone(), i as u32))
+      .map(|(i, (name, _))| (name.binding, i as u32))
       .collect();
     let mut next_pair = num_params;
 
@@ -588,7 +593,7 @@ impl<'b> ModuleCompiler<'b> {
       .params
       .iter()
       .enumerate()
-      .map(|(i, (name, _))| (name.clone(), i as u32))
+      .map(|(i, (name, _))| (name.binding, i as u32))
       .collect();
     next_pair = num_params;
 
@@ -651,7 +656,7 @@ impl<'b> ModuleCompiler<'b> {
   fn count_let_locals(
     &self,
     ast: &AST,
-    locals: &mut Vec<(String, u32)>,
+    locals: &mut Vec<(BindingId, u32)>,
     next_pair: &mut u32,
   ) -> Result<(), String> {
     match &ast.kind {
@@ -662,8 +667,8 @@ impl<'b> ModuleCompiler<'b> {
       | ASTKind::FunctionRef(_, _) => {}
       ASTKind::Let(name, _, expr) => {
         self.count_let_locals(expr, locals, next_pair)?;
-        if self.resolve_local(locals, name).is_none() {
-          locals.push((name.clone(), *next_pair));
+        if self.resolve_local(locals, name.binding).is_none() {
+          locals.push((name.binding, *next_pair));
           *next_pair += 1;
         }
       }
@@ -704,7 +709,7 @@ impl<'b> ModuleCompiler<'b> {
   fn compile_expr(
     &mut self,
     ast: &AST,
-    locals: &mut Vec<(String, u32)>,
+    locals: &mut Vec<(BindingId, u32)>,
     next_pair: &mut u32,
     num_params: u32,
     num_lets: u32,
@@ -727,12 +732,12 @@ impl<'b> ModuleCompiler<'b> {
         func.instructions().i32_const(TAG_BOOL);
       }
       ASTKind::Variable(name) => {
-        if let Some(pair_idx) = self.resolve_local(locals, name) {
+        if let Some(pair_idx) = self.resolve_local(locals, name.binding) {
           let pl = Self::payload_local(pair_idx, num_params);
           let tl = Self::tag_local(pair_idx, num_params, num_lets);
           func.instructions().local_get(pl);
           func.instructions().local_get(tl);
-        } else if let Some(target_def) = self.function_names.get(name) {
+        } else if let Some(target_def) = self.function_bindings.get(&name.binding) {
           func
             .instructions()
             .i64_const(i64::from(num_imports + target_def));
@@ -757,12 +762,12 @@ impl<'b> ModuleCompiler<'b> {
           num_imports,
           func,
         )?;
-        let pair_idx = match self.resolve_local(locals, name) {
+        let pair_idx = match self.resolve_local(locals, name.binding) {
           Some(pair_idx) => pair_idx,
           None => {
             let pair_idx = *next_pair;
             *next_pair += 1;
-            locals.push((name.clone(), pair_idx));
+            locals.push((name.binding, pair_idx));
             pair_idx
           }
         };
@@ -879,7 +884,7 @@ impl<'b> ModuleCompiler<'b> {
     &mut self,
     ident: &Identifier,
     args: &[AST],
-    locals: &mut Vec<(String, u32)>,
+    locals: &mut Vec<(BindingId, u32)>,
     next_pair: &mut u32,
     num_params: u32,
     num_lets: u32,
@@ -888,7 +893,7 @@ impl<'b> ModuleCompiler<'b> {
     func: &mut Function,
   ) -> Result<(), String> {
     if let Identifier::Bare(name) = ident {
-      if self.resolve_local(locals, name).is_some() {
+      if self.resolve_local(locals, name.binding).is_some() {
         return self.compile_call_dynamic(
           &AST::synthetic(ASTKind::Variable(name.clone())),
           args,
@@ -903,9 +908,9 @@ impl<'b> ModuleCompiler<'b> {
       }
     }
     let callee_index = match ident {
-      Identifier::Bare(name) if self.function_names.contains_key(name) => {
+      Identifier::Bare(name) if self.function_bindings.contains_key(&name.binding) => {
         let _ = def_index;
-        let target_def = self.function_names[name];
+        let target_def = self.function_bindings[&name.binding];
         num_imports + target_def
       }
       Identifier::Bare(name) => return Err(format!("call to unknown function: {name}")),
@@ -940,7 +945,7 @@ impl<'b> ModuleCompiler<'b> {
     &mut self,
     callable: &AST,
     args: &[AST],
-    locals: &mut Vec<(String, u32)>,
+    locals: &mut Vec<(BindingId, u32)>,
     next_pair: &mut u32,
     num_params: u32,
     num_lets: u32,
@@ -1002,11 +1007,11 @@ impl<'b> ModuleCompiler<'b> {
   }
 
   /// Resolve a variable name to its local pair index (most recent binding wins).
-  fn resolve_local(&self, locals: &[(String, u32)], name: &str) -> Option<u32> {
+  fn resolve_local(&self, locals: &[(BindingId, u32)], binding: BindingId) -> Option<u32> {
     locals
       .iter()
       .rev()
-      .find(|(n, _)| n == name)
+      .find(|(candidate, _)| *candidate == binding)
       .map(|(_, idx)| *idx)
   }
 }
