@@ -2060,6 +2060,21 @@ mod test {
   }
 
   #[test]
+  fn captured_nested_function_can_call_itself() {
+    let source = "
+      (fn make-countdown (base:Int) ->(Fn (Int) -> Int)
+        (fn countdown (n:Int) ->Int
+          (if (std::== n 0)
+              base
+              (countdown (std::- n 1)))))
+      (fn main () ->Int
+        (let countdown (make-countdown 7))
+        (countdown 4))
+    ";
+    assert_eq!(eval_main(source), SLValue::Int(7));
+  }
+
+  #[test]
   fn function_definition_expression_returns_function() {
     let source = "
       (fn outer () ->(Fn () -> Int)

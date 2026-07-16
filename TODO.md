@@ -3,8 +3,8 @@
 ## Medium priority
 
 - [ ] **consider an AST `Folder`/visitor** to deduplicate the AST walkers (closure transform, patch_cell_access, wasm discover/count/compile_expr, compiler compile_expr). Only go with this if it actually reduces lines of code
-- [ ] support imports or a prelude. it's dumb to require people to use `std::+`.
-- [ ] **support nested self-recursion**. Nested `fn` currently cannot call itself because the transform lifts it under a mangled name and the checker refuses to bind the nested function's own name. Fix transform name resolution, then bind the self name in the checker.
+- [ ] imports: `(use std)` or `(use rand)`. probably not very high priority now that we have prelude support.
+- [ ] **support nested mutual recursion**. Direct nested self-recursion works, but sibling nested functions like `a -> b -> a` are still checked/transformed sequentially. This likely needs predeclaring a local group of nested function schemes/lifted names before checking or closure-converting their bodies.
 - [ ] **consider expression-level type ascription**, e.g. `(the (List Int) expr)`, if ambiguous non-`let` expressions ever become useful. Today ambiguity can usually be fixed with a `let` annotation or by deleting dead code.
 - [ ] **consider opaque nominal host-handle types**, e.g. `Rng` instead of `(Cell Int)` for `rand::rng`, if exposing RNG state as a mutable cell turns out to be a footgun.
 

@@ -78,6 +78,13 @@ fn transform_function(
   //! - the original nested `fn` expression becomes `let name (partial-apply func [captures...])`
   let mut locals = hashset! {};
   locals.extend(func.params.iter().map(|(name, _)| name.clone()));
+  let nested_self_name = if transformed_name != func.name {
+    locals.insert(func.name.clone());
+    Some(func.name.as_str())
+  } else {
+    None
+  };
+  let mut self_referenced = false;
   let mut lifted = vec![];
   let mut captures = vec![];
   let mut code = vec![];
@@ -91,7 +98,27 @@ fn transform_function(
       &mut captures,
       &mut lifted,
       names,
+      nested_self_name,
+      &mut self_referenced,
     )?);
+  }
+  if self_referenced {
+    code.insert(
+      0,
+      AST::new(
+        ASTKind::Let(
+          func.name.clone(),
+          None,
+          Box::new(closure_expr(
+            module_name,
+            &transformed_name,
+            &captures,
+            source_span.clone(),
+          )),
+        ),
+        source_span.clone(),
+      ),
+    );
   }
 
   let mut params = vec![];
@@ -119,6 +146,8 @@ fn transform_ast(
   captures: &mut Vec<String>,
   lifted: &mut Vec<AST>,
   names: &mut ClosureNameAllocator,
+  nested_self_name: Option<&str>,
+  self_referenced: &mut bool,
 ) -> Result<AST, String> {
   //! Do closure transformations on one expression inside a function body,
   //! recording captures as they are discovered.
@@ -133,6 +162,8 @@ fn transform_ast(
         captures,
         lifted,
         names,
+        nested_self_name,
+        self_referenced,
       )?;
       locals.insert(name.clone());
       Ok(ast.with_kind(ASTKind::Let(
@@ -178,6 +209,9 @@ fn transform_ast(
       )))
     }
     ASTKind::Variable(name) => {
+      if nested_self_name == Some(name.as_str()) && locals.contains(name) {
+        *self_referenced = true;
+      }
       if !locals.contains(name) && environment.contains(name) {
         push_unique(captures, name.clone());
       }
@@ -193,6 +227,8 @@ fn transform_ast(
         captures,
         lifted,
         names,
+        nested_self_name,
+        self_referenced,
       )?;
       let mut new_args = vec![];
       for arg in args {
@@ -205,12 +241,17 @@ fn transform_ast(
           captures,
           lifted,
           names,
+          nested_self_name,
+          self_referenced,
         )?);
       }
       Ok(ast.with_kind(ASTKind::Call(Box::new(callable), new_args)))
     }
     ASTKind::CallFixed(ident, args) => {
       if let crate::parser::Identifier::Bare(name) = ident {
+        if nested_self_name == Some(name.as_str()) && locals.contains(name) {
+          *self_referenced = true;
+        }
         if !locals.contains(name) && environment.contains(name) {
           push_unique(captures, name.clone());
         }
@@ -226,6 +267,8 @@ fn transform_ast(
           captures,
           lifted,
           names,
+          nested_self_name,
+          self_referenced,
         )?);
       }
       Ok(ast.with_kind(ASTKind::CallFixed(ident.clone(), new_args)))
@@ -240,6 +283,8 @@ fn transform_ast(
         captures,
         lifted,
         names,
+        nested_self_name,
+        self_referenced,
       )?;
       let mut new_args = vec![];
       for arg in args {
@@ -252,6 +297,8 @@ fn transform_ast(
           captures,
           lifted,
           names,
+          nested_self_name,
+          self_referenced,
         )?);
       }
       Ok(ast.with_kind(ASTKind::PartialApply(Box::new(callable), new_args)))
@@ -270,6 +317,8 @@ fn transform_ast(
             captures,
             lifted,
             names,
+            nested_self_name,
+            self_referenced,
           )?,
         ));
       }
@@ -285,6 +334,8 @@ fn transform_ast(
         captures,
         lifted,
         names,
+        nested_self_name,
+        self_referenced,
       )?;
       Ok(ast.with_kind(ASTKind::FieldAccess(Box::new(receiver), field.clone())))
     }
@@ -298,6 +349,8 @@ fn transform_ast(
         captures,
         lifted,
         names,
+        nested_self_name,
+        self_referenced,
       )?;
       let then = transform_ast(
         module_name,
@@ -308,6 +361,8 @@ fn transform_ast(
         captures,
         lifted,
         names,
+        nested_self_name,
+        self_referenced,
       )?;
       let els = transform_ast(
         module_name,
@@ -318,6 +373,8 @@ fn transform_ast(
         captures,
         lifted,
         names,
+        nested_self_name,
+        self_referenced,
       )?;
       Ok(ast.with_kind(ASTKind::If(Box::new(cond), Box::new(then), Box::new(els))))
     }
@@ -333,6 +390,8 @@ fn transform_ast(
           captures,
           lifted,
           names,
+          nested_self_name,
+          self_referenced,
         )?);
       }
       Ok(ast.with_kind(ASTKind::Block(new_body)))
@@ -568,6 +627,54 @@ mod test {
       }),
     ];
     assert_eq!(new_asts, expected);
+    Ok(())
+  }
+
+  #[test]
+  fn nested_self_recursion_targets_lifted_function_with_captures() -> Result<(), String> {
+    let source = "
+      (fn outer (base:Int)
+        (fn countdown (n:Int) ->Int
+          (if (std::== n 0) base (countdown (std::- n 1)))))";
+    let asts = read_multiple(source)?;
+    let new_asts = transform_closures_in_module("main", &asts)?;
+
+    let ASTKind::DefineFn(countdown) = &new_asts[0].kind else {
+      panic!("expected lifted countdown function");
+    };
+    assert_eq!(countdown.name, "outer:countdown:(closure)");
+    assert_eq!(
+      countdown
+        .params
+        .iter()
+        .map(|(name, _)| name)
+        .collect::<Vec<_>>(),
+      vec!["base", "n"]
+    );
+
+    let ASTKind::Let(self_name, _, self_value) = &countdown.code[0].kind else {
+      panic!("expected local self binding");
+    };
+    assert_eq!(self_name, "countdown");
+    assert_eq!(
+      **self_value,
+      PartialApply(
+        Box::new(FunctionRef(
+          "main".to_string(),
+          "outer:countdown:(closure)".to_string()
+        )),
+        vec![Variable("base".to_string())]
+      )
+    );
+
+    let ASTKind::If(_, _, else_branch) = &countdown.code[1].kind else {
+      panic!("expected conditional body");
+    };
+    let ASTKind::CallFixed(Identifier::Bare(name), args) = &else_branch.kind else {
+      panic!("expected recursive call through local self binding");
+    };
+    assert_eq!(name, "countdown");
+    assert_eq!(args.len(), 1);
     Ok(())
   }
 

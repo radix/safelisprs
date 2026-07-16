@@ -133,7 +133,6 @@ struct FnScheme {
 enum Binding {
   Mono(Type),
   PolyFn(FnScheme),
-  ForbiddenNestedSelf,
 }
 
 type Env = HashMap<String, Binding>;
@@ -326,7 +325,7 @@ impl Checker {
       ASTKind::DefineFn(function) => {
         let (scheme, nested_type_vars) = self.declared_scheme(function, type_vars)?;
         let mut nested_env = env.clone();
-        nested_env.insert(function.name.clone(), Binding::ForbiddenNestedSelf);
+        nested_env.insert(function.name.clone(), Binding::PolyFn(scheme.clone()));
         self
           .check_function(function, &scheme, nested_env, nested_type_vars, false)
           .map_err(|error| error.context(format!("in nested function `{}`", function.name)))?;
@@ -703,9 +702,6 @@ impl Checker {
         let scheme = self.instantiate(&scheme, origin);
         Ok(Type::fn_scheme_type(scheme))
       }
-      Binding::ForbiddenNestedSelf => Err(TypeError::new(
-        "nested functions cannot refer to themselves recursively",
-      )),
     }
   }
 
@@ -949,7 +945,6 @@ fn bindings_compatible(left: &Binding, right: &Binding) -> bool {
   match (left, right) {
     (Binding::Mono(left), Binding::Mono(right)) => types_equivalent(left, right),
     (Binding::PolyFn(left), Binding::PolyFn(right)) => schemes_equivalent(left, right),
-    (Binding::ForbiddenNestedSelf, Binding::ForbiddenNestedSelf) => true,
     _ => false,
   }
 }
@@ -1452,16 +1447,14 @@ mod tests {
   }
 
   #[test]
-  fn nested_self_recursion_is_rejected() {
-    let error = check(
-      "(fn main ()
-         (fn recurse (n:Int) ->Int (recurse n)))",
+  fn nested_self_recursion_is_accepted() {
+    check(
+      "(fn main () ->Int
+         (fn recurse (n:Int) ->Int
+           (if (std::== n 0) 0 (recurse (std::- n 1))))
+         (recurse 3))",
     )
-    .unwrap_err();
-    assert!(
-      error.message.contains("cannot refer to themselves"),
-      "{error}"
-    );
+    .unwrap();
   }
 
   #[test]
