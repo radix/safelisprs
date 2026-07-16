@@ -139,6 +139,67 @@ impl AST {
   }
 }
 
+/// Rebuild an AST node after mapping each of its immediate expression children.
+///
+/// This keeps traversal policy in the caller: scope-sensitive passes can handle
+/// nodes such as `Let`, `DefineFn`, and `Block` themselves, then use this helper
+/// for the structurally recursive cases.
+pub(crate) fn try_map_ast_children<E>(
+  ast: &AST,
+  mut map: impl FnMut(&AST) -> Result<AST, E>,
+) -> Result<AST, E> {
+  let kind = match &ast.kind {
+    ASTKind::Let(name, annotation, expression) => {
+      ASTKind::Let(name.clone(), annotation.clone(), Box::new(map(expression)?))
+    }
+    ASTKind::DefineFn(function) => {
+      let mut function = function.clone();
+      function.code = function
+        .code
+        .iter()
+        .map(&mut map)
+        .collect::<Result<_, _>>()?;
+      ASTKind::DefineFn(function)
+    }
+    ASTKind::Call(callable, args) => ASTKind::Call(
+      Box::new(map(callable)?),
+      args.iter().map(&mut map).collect::<Result<_, _>>()?,
+    ),
+    ASTKind::CallFixed(identifier, args) => ASTKind::CallFixed(
+      identifier.clone(),
+      args.iter().map(&mut map).collect::<Result<_, _>>()?,
+    ),
+    ASTKind::NewStruct(name, fields) => ASTKind::NewStruct(
+      name.clone(),
+      fields
+        .iter()
+        .map(|(field, expression)| Ok((field.clone(), map(expression)?)))
+        .collect::<Result<_, _>>()?,
+    ),
+    ASTKind::FieldAccess(receiver, field) => {
+      ASTKind::FieldAccess(Box::new(map(receiver)?), field.clone())
+    }
+    ASTKind::PartialApply(callable, args) => ASTKind::PartialApply(
+      Box::new(map(callable)?),
+      args.iter().map(&mut map).collect::<Result<_, _>>()?,
+    ),
+    ASTKind::If(condition, then_branch, else_branch) => ASTKind::If(
+      Box::new(map(condition)?),
+      Box::new(map(then_branch)?),
+      Box::new(map(else_branch)?),
+    ),
+    ASTKind::Block(body) => ASTKind::Block(body.iter().map(&mut map).collect::<Result<_, _>>()?),
+    ASTKind::Variable(_)
+    | ASTKind::Int(_)
+    | ASTKind::Float(_)
+    | ASTKind::String(_)
+    | ASTKind::Bool(_)
+    | ASTKind::FunctionRef(_, _)
+    | ASTKind::DefineStruct(_) => return Ok(ast.clone()),
+  };
+  Ok(ast.with_kind(kind))
+}
+
 #[cfg(test)]
 #[allow(non_snake_case)]
 impl AST {

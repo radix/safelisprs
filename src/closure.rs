@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 #[cfg(test)]
 use crate::parser::TypeAst;
-use crate::parser::{ASTKind, BindingId, Function, ResolvedName, Span, AST};
+use crate::parser::{try_map_ast_children, ASTKind, BindingId, Function, ResolvedName, Span, AST};
 use crate::prelude::resolve_module_names;
 
 pub fn transform_closures_in_module(module_name: &str, items: &[AST]) -> Result<Vec<AST>, String> {
@@ -414,159 +414,6 @@ fn transform_ast(
       }
       Ok(ast.clone())
     }
-    ASTKind::Call(callable, args) => {
-      let callable = transform_ast(
-        module_name,
-        callable,
-        lexical_path,
-        environment,
-        locals,
-        captures,
-        lifted,
-        names,
-        recursive_bindings,
-        recursive_refs,
-      )?;
-      let mut new_args = vec![];
-      for arg in args {
-        new_args.push(transform_ast(
-          module_name,
-          arg,
-          lexical_path,
-          environment,
-          locals,
-          captures,
-          lifted,
-          names,
-          recursive_bindings,
-          recursive_refs,
-        )?);
-      }
-      Ok(ast.with_kind(ASTKind::Call(Box::new(callable), new_args)))
-    }
-    ASTKind::CallFixed(ident, args) => {
-      let mut new_args = vec![];
-      for arg in args {
-        new_args.push(transform_ast(
-          module_name,
-          arg,
-          lexical_path,
-          environment,
-          locals,
-          captures,
-          lifted,
-          names,
-          recursive_bindings,
-          recursive_refs,
-        )?);
-      }
-      Ok(ast.with_kind(ASTKind::CallFixed(ident.clone(), new_args)))
-    }
-    ASTKind::PartialApply(callable, args) => {
-      let callable = transform_ast(
-        module_name,
-        callable,
-        lexical_path,
-        environment,
-        locals,
-        captures,
-        lifted,
-        names,
-        recursive_bindings,
-        recursive_refs,
-      )?;
-      let mut new_args = vec![];
-      for arg in args {
-        new_args.push(transform_ast(
-          module_name,
-          arg,
-          lexical_path,
-          environment,
-          locals,
-          captures,
-          lifted,
-          names,
-          recursive_bindings,
-          recursive_refs,
-        )?);
-      }
-      Ok(ast.with_kind(ASTKind::PartialApply(Box::new(callable), new_args)))
-    }
-    ASTKind::NewStruct(name, fields) => {
-      let mut new_fields = vec![];
-      for (field, expr) in fields {
-        new_fields.push((
-          field.clone(),
-          transform_ast(
-            module_name,
-            expr,
-            lexical_path,
-            environment,
-            locals,
-            captures,
-            lifted,
-            names,
-            recursive_bindings,
-            recursive_refs,
-          )?,
-        ));
-      }
-      Ok(ast.with_kind(ASTKind::NewStruct(name.clone(), new_fields)))
-    }
-    ASTKind::FieldAccess(receiver, field) => {
-      let receiver = transform_ast(
-        module_name,
-        receiver,
-        lexical_path,
-        environment,
-        locals,
-        captures,
-        lifted,
-        names,
-        recursive_bindings,
-        recursive_refs,
-      )?;
-      Ok(ast.with_kind(ASTKind::FieldAccess(Box::new(receiver), field.clone())))
-    }
-    ASTKind::If(cond, then, els) => {
-      let cond = transform_ast(
-        module_name,
-        cond,
-        lexical_path,
-        environment,
-        locals,
-        captures,
-        lifted,
-        names,
-        recursive_bindings,
-        recursive_refs,
-      )?;
-      let then = transform_ast(
-        module_name,
-        then,
-        lexical_path,
-        environment,
-        locals,
-        captures,
-        lifted,
-        names,
-        recursive_bindings,
-        recursive_refs,
-      )?;
-      let els = transform_ast(
-        module_name,
-        els,
-        lexical_path,
-        environment,
-        locals,
-        captures,
-        lifted,
-        names,
-        recursive_bindings,
-        recursive_refs,
-      )?;
-      Ok(ast.with_kind(ASTKind::If(Box::new(cond), Box::new(then), Box::new(els))))
-    }
     ASTKind::Block(body) => Ok(ast.with_kind(ASTKind::Block(transform_sequence(
       module_name,
       body,
@@ -579,12 +426,20 @@ fn transform_ast(
       recursive_bindings,
       recursive_refs,
     )?))),
-    ASTKind::Int(_)
-    | ASTKind::Float(_)
-    | ASTKind::String(_)
-    | ASTKind::Bool(_)
-    | ASTKind::DefineStruct(_) => Ok(ast.clone()),
-    ASTKind::FunctionRef(_, _) => Ok(ast.clone()),
+    _ => try_map_ast_children(ast, |child| {
+      transform_ast(
+        module_name,
+        child,
+        lexical_path,
+        environment,
+        locals,
+        captures,
+        lifted,
+        names,
+        recursive_bindings,
+        recursive_refs,
+      )
+    }),
   }
 }
 

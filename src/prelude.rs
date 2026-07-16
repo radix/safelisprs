@@ -1,7 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::builtins::BuiltinSpec;
-use crate::parser::{ASTKind, BindingId, Function, Identifier, ResolvedName, AST};
+use crate::parser::{
+  try_map_ast_children, ASTKind, BindingId, Function, Identifier, ResolvedName, AST,
+};
 
 pub fn std_prelude_from_specs(specs: &[BuiltinSpec]) -> Vec<(&str, &str)> {
   specs
@@ -198,33 +200,6 @@ impl Resolver<'_> {
           Ok(ast.clone())
         }
       }
-      ASTKind::Call(callable, args) => {
-        let callable = self.resolve_expr(callable, scope)?;
-        let mut resolved_args = Vec::with_capacity(args.len());
-        for arg in args {
-          resolved_args.push(self.resolve_expr(arg, scope)?);
-        }
-        Ok(ast.with_kind(ASTKind::Call(Box::new(callable), resolved_args)))
-      }
-      ASTKind::PartialApply(callable, args) => {
-        let callable = self.resolve_expr(callable, scope)?;
-        let mut resolved_args = Vec::with_capacity(args.len());
-        for arg in args {
-          resolved_args.push(self.resolve_expr(arg, scope)?);
-        }
-        Ok(ast.with_kind(ASTKind::PartialApply(Box::new(callable), resolved_args)))
-      }
-      ASTKind::NewStruct(name, fields) => {
-        let mut resolved_fields = Vec::with_capacity(fields.len());
-        for (field, expr) in fields {
-          resolved_fields.push((field.clone(), self.resolve_expr(expr, scope)?));
-        }
-        Ok(ast.with_kind(ASTKind::NewStruct(name.clone(), resolved_fields)))
-      }
-      ASTKind::FieldAccess(receiver, field) => {
-        let receiver = self.resolve_expr(receiver, scope)?;
-        Ok(ast.with_kind(ASTKind::FieldAccess(Box::new(receiver), field.clone())))
-      }
       ASTKind::If(cond, then, els) => {
         let cond = self.resolve_expr(cond, scope)?;
         let baseline = scope.clone();
@@ -260,12 +235,7 @@ impl Resolver<'_> {
       ASTKind::Block(body) => {
         Ok(ast.with_kind(ASTKind::Block(self.resolve_sequence(body, scope)?)))
       }
-      ASTKind::Int(_)
-      | ASTKind::Float(_)
-      | ASTKind::String(_)
-      | ASTKind::Bool(_)
-      | ASTKind::FunctionRef(_, _)
-      | ASTKind::DefineStruct(_) => Ok(ast.clone()),
+      _ => try_map_ast_children(ast, |child| self.resolve_expr(child, scope)),
     }
   }
 
