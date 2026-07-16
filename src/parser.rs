@@ -1,7 +1,20 @@
 use std::fmt;
 use std::ops::Range;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub type Span = Range<usize>;
+
+/// Stable identity for one AST node across compiler passes.
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
+pub struct AstId(u64);
+
+static NEXT_AST_ID: AtomicU64 = AtomicU64::new(0);
+
+impl AstId {
+  fn fresh() -> Self {
+    Self(NEXT_AST_ID.fetch_add(1, Ordering::Relaxed))
+  }
+}
 
 /// Stable identity for one lexical binding within a resolved module.
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
@@ -83,15 +96,26 @@ impl From<&str> for ResolvedName {
   }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AST {
+  id: AstId,
   pub kind: ASTKind,
   pub span: Span,
 }
 
+impl fmt::Debug for AST {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    formatter
+      .debug_struct("AST")
+      .field("kind", &self.kind)
+      .field("span", &self.span)
+      .finish()
+  }
+}
+
 impl PartialEq for AST {
   fn eq(&self, other: &Self) -> bool {
-    // Source location is metadata, not part of the program's semantics.
+    // Compiler metadata is not part of the program's semantics.
     self.kind == other.kind
   }
 }
@@ -126,7 +150,15 @@ pub enum ASTKind {
 
 impl AST {
   pub fn new(kind: ASTKind, span: Span) -> Self {
-    Self { kind, span }
+    Self {
+      id: AstId::fresh(),
+      kind,
+      span,
+    }
+  }
+
+  pub fn id(&self) -> AstId {
+    self.id
   }
 
   #[cfg(test)]
@@ -135,7 +167,11 @@ impl AST {
   }
 
   pub(crate) fn with_kind(&self, kind: ASTKind) -> Self {
-    Self::new(kind, self.span.clone())
+    Self {
+      id: self.id,
+      kind,
+      span: self.span.clone(),
+    }
   }
 }
 

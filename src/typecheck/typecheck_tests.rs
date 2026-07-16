@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::builtins::default_builtins;
 use crate::parser::read_multiple;
@@ -7,7 +6,7 @@ use crate::prelude::resolve_module_names;
 fn check(source: &str) -> Result<(), TypeError> {
   let asts = read_multiple(source).unwrap();
   let asts = resolve_module_names("main", &asts, &[], &[]).unwrap();
-  typecheck(&asts, &default_builtins().specs())
+  typecheck(&asts, &default_builtins().specs()).map(|_| ())
 }
 
 #[test]
@@ -40,6 +39,35 @@ fn chained_struct_field_access_typechecks() {
          (std::+ b.origin.x b.origin.y))",
   )
   .unwrap();
+}
+
+#[test]
+fn records_receiver_types_for_field_accesses() {
+  let source = "
+    (struct Point x:Int)
+    (struct Box origin:Point)
+    (fn main () ->Int
+      (let b (new Box origin:(new Point x:4)))
+      b.origin.x)";
+  let asts = read_multiple(source).unwrap();
+  let asts = resolve_module_names("main", &asts, &[], &[]).unwrap();
+  let info = typecheck(&asts, &default_builtins().specs()).unwrap();
+
+  let ASTKind::DefineFn(main) = &asts[2].kind else {
+    panic!("expected main function");
+  };
+  let ASTKind::FieldAccess(origin, _) = &main.code[1].kind else {
+    panic!("expected outer field access");
+  };
+  let ASTKind::FieldAccess(_, _) = &origin.kind else {
+    panic!("expected inner field access");
+  };
+
+  assert_eq!(info.field_access_receiver_type(origin.id()), Some("Box"));
+  assert_eq!(
+    info.field_access_receiver_type(main.code[1].id()),
+    Some("Point")
+  );
 }
 
 #[test]

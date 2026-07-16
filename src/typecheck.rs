@@ -5,7 +5,7 @@ use std::rc::Rc;
 
 use crate::builtins::{BuiltinSignature, BuiltinSpec, Trait, TypeConst};
 use crate::parser::{
-  source_position, ASTKind, BindingId, Function, Identifier, ResolvedName, Span,
+  source_position, ASTKind, AstId, BindingId, Function, Identifier, ResolvedName, Span,
   Struct as StructAst, TypeAst, AST,
 };
 
@@ -139,7 +139,21 @@ enum Binding {
 type Env = HashMap<BindingId, Binding>;
 type TypeVars = HashMap<String, TvRef>;
 
-pub fn typecheck(asts: &[AST], builtins: &[BuiltinSpec]) -> Result<(), TypeError> {
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TypecheckInfo {
+  field_access_receiver_types: HashMap<AstId, String>,
+}
+
+impl TypecheckInfo {
+  pub fn field_access_receiver_type(&self, access: AstId) -> Option<&str> {
+    self
+      .field_access_receiver_types
+      .get(&access)
+      .map(String::as_str)
+  }
+}
+
+pub fn typecheck(asts: &[AST], builtins: &[BuiltinSpec]) -> Result<TypecheckInfo, TypeError> {
   typecheck_named(
     asts,
     builtins
@@ -151,13 +165,14 @@ pub fn typecheck(asts: &[AST], builtins: &[BuiltinSpec]) -> Result<(), TypeError
 pub fn typecheck_named<'a>(
   asts: &[AST],
   builtins: impl IntoIterator<Item = (&'a str, &'a str, &'a BuiltinSignature)>,
-) -> Result<(), TypeError> {
+) -> Result<TypecheckInfo, TypeError> {
   Checker::new(builtins).check(asts)
 }
 
 struct Checker {
   schemes: HashMap<(String, String), FnScheme>,
   structs: HashMap<String, StructAst>,
+  field_access_receiver_types: HashMap<AstId, String>,
   next_var: usize,
   inference_vars: Vec<TvRef>,
 }
@@ -167,6 +182,7 @@ impl Checker {
     let mut checker = Self {
       schemes: HashMap::new(),
       structs: HashMap::new(),
+      field_access_receiver_types: HashMap::new(),
       next_var: 0,
       inference_vars: Vec::new(),
     };
@@ -179,7 +195,7 @@ impl Checker {
     checker
   }
 
-  fn check(mut self, asts: &[AST]) -> Result<(), TypeError> {
+  fn check(mut self, asts: &[AST]) -> Result<TypecheckInfo, TypeError> {
     for ast in asts {
       if let ASTKind::DefineStruct(struct_) = &ast.kind {
         if self.structs.contains_key(&struct_.name) {
@@ -237,7 +253,9 @@ impl Checker {
           })?;
       }
     }
-    Ok(())
+    Ok(TypecheckInfo {
+      field_access_receiver_types: self.field_access_receiver_types,
+    })
   }
 
   fn validate_struct(&self, struct_: &StructAst) -> Result<(), TypeError> {
@@ -414,7 +432,7 @@ impl Checker {
       ASTKind::NewStruct(name, fields) => self.infer_new_struct(env, type_vars, name, fields),
       ASTKind::FieldAccess(receiver, field) => {
         let receiver = self.infer(env, type_vars, receiver)?;
-        self.field_type(receiver, field)
+        self.field_type(ast.id(), receiver, field)
       }
       ASTKind::If(condition, then_branch, else_branch) => {
         let condition_type = self.infer(env, type_vars, condition)?;
@@ -483,19 +501,21 @@ impl Checker {
     Ok(Type::Struct(name.to_string()))
   }
 
-  fn field_type(&self, receiver: Type, field: &str) -> Result<Type, TypeError> {
+  fn field_type(&mut self, access: AstId, receiver: Type, field: &str) -> Result<Type, TypeError> {
     match prune(&receiver) {
       Type::Struct(name) => {
-        let struct_ = self
+        let ty = self
           .structs
           .get(&name)
-          .ok_or_else(|| TypeError::new(format!("unknown struct `{name}`")))?;
-        let (_, ty) = struct_
+          .ok_or_else(|| TypeError::new(format!("unknown struct `{name}`")))?
           .fields
           .iter()
           .find(|(name, _)| name == field)
+          .map(|(_, ty)| ty.clone())
           .ok_or_else(|| TypeError::new(format!("struct `{name}` has no field `{field}`")))?;
-        self.resolve_type(ty, &HashMap::new())
+        let field_type = self.resolve_type(&ty, &HashMap::new())?;
+        self.field_access_receiver_types.insert(access, name);
+        Ok(field_type)
       }
       other => Err(TypeError::new(format!(
         "field access expected a struct, got `{}`",

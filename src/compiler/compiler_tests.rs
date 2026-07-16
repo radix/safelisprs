@@ -1,4 +1,3 @@
-
 use super::*;
 
 fn returns(name: &str) -> Option<parser::TypeAst> {
@@ -7,7 +6,7 @@ fn returns(name: &str) -> Option<parser::TypeAst> {
 
 fn compile_test_function(f: &parser::Function) -> Result<(String, CompiledCallable), String> {
   let asts = resolve_module_names("main", &[AST::DefineFn(f.clone())], &[], &[])?;
-  let module = ModuleCompiler::new("main", &asts);
+  let module = ModuleCompiler::new("main", &asts, &TypecheckInfo::default());
   let ASTKind::DefineFn(f) = &asts[0].kind else {
     unreachable!("the test input is a function");
   };
@@ -254,6 +253,48 @@ fn let_annotation_preserves_struct_type_after_generic_call() {
     .instructions
     .iter()
     .any(|instruction| matches!(instruction, Instruction::GetField(0))));
+}
+
+#[test]
+fn inferred_generic_return_preserves_struct_type_for_field_access() {
+  let builtins = crate::builtins::default_builtins();
+  let source = "
+      (struct Foo x:Int)
+      (fn id (x:A) ->A x)
+      (fn main () ->Int
+        (let foo (id (new Foo x:9)))
+        foo.x)";
+  let package =
+    compile_executable_from_source(source, ("main", "main"), &builtins.specs(), &[]).unwrap();
+  let Callable::Function(main) = package.get_function(0, 1).unwrap() else {
+    panic!("expected main function");
+  };
+  assert!(main
+    .instructions
+    .iter()
+    .any(|instruction| matches!(instruction, Instruction::GetField(0))));
+}
+
+#[test]
+fn closure_capture_preserves_struct_type_for_field_access() {
+  let builtins = crate::builtins::default_builtins();
+  let source = "
+      (struct Foo x:Int)
+      (fn main () ->Int
+        (let foo (new Foo x:9))
+        (fn get () ->Int foo.x)
+        (get))";
+  let package =
+    compile_executable_from_source(source, ("main", "main"), &builtins.specs(), &[]).unwrap();
+  assert!(package.modules[0].functions.iter().any(|(_, callable)| {
+    let Callable::Function(function) = callable else {
+      return false;
+    };
+    function
+      .instructions
+      .iter()
+      .any(|instruction| matches!(instruction, Instruction::GetField(0)))
+  }));
 }
 
 #[test]

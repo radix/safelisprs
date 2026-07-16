@@ -255,6 +255,7 @@ fn check_types(asts: &[AST], builtins: &Builtins) -> Result<(), crate::typecheck
       )
     }),
   )
+  .map(|_| ())
 }
 
 /// Metadata for a top-level function definition, collected during the first
