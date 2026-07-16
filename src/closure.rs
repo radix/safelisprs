@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 #[cfg(test)]
 use crate::parser::TypeAst;
-use crate::parser::{ASTKind, BindingId, Function, Identifier, ResolvedName, Span, AST};
+use crate::parser::{ASTKind, BindingId, Function, ResolvedName, Span, AST};
 use crate::prelude::resolve_module_names;
 
 pub fn transform_closures_in_module(module_name: &str, items: &[AST]) -> Result<Vec<AST>, String> {
@@ -22,7 +22,7 @@ pub fn transform_closures_in_module(module_name: &str, items: &[AST]) -> Result<
       ASTKind::DefineFn(function) if !function.name.binding.is_resolved()
     )
   }) {
-    resolved_items = resolve_module_names(items, &[])?;
+    resolved_items = resolve_module_names(module_name, items, &[], &[])?;
     resolved_items.as_slice()
   } else {
     items
@@ -445,16 +445,6 @@ fn transform_ast(
       Ok(ast.with_kind(ASTKind::Call(Box::new(callable), new_args)))
     }
     ASTKind::CallFixed(ident, args) => {
-      if let Identifier::Bare(name) = ident {
-        if recursive_binding(recursive_bindings, name.binding).is_some()
-          && locals.contains(&name.binding)
-        {
-          push_unique(recursive_refs, name.clone());
-        }
-        if !locals.contains(&name.binding) && environment.contains(&name.binding) {
-          push_unique(captures, name.clone());
-        }
-      }
       let mut new_args = vec![];
       for arg in args {
         new_args.push(transform_ast(
@@ -912,8 +902,11 @@ mod test {
     let ASTKind::If(_, _, else_branch) = &countdown.code[1].kind else {
       panic!("expected conditional body");
     };
-    let ASTKind::CallFixed(Identifier::Bare(name), args) = &else_branch.kind else {
+    let ASTKind::Call(callable, args) = &else_branch.kind else {
       panic!("expected recursive call through local self binding");
+    };
+    let ASTKind::Variable(name) = &callable.kind else {
+      panic!("expected recursive local variable");
     };
     assert_eq!(name, "countdown");
     assert_eq!(args.len(), 1);

@@ -11,18 +11,29 @@ pub fn std_prelude_from_specs(specs: &[BuiltinSpec]) -> Vec<(&str, &str)> {
     .collect()
 }
 
-/// Resolve all lexical names to binding IDs and qualify visible prelude symbols.
-pub fn resolve_module_names(asts: &[AST], prelude: &[(&str, &str)]) -> Result<Vec<AST>, String> {
+/// Resolve all lexical names to binding IDs and qualify module/prelude symbols.
+pub fn resolve_module_names(
+  module_name: &str,
+  asts: &[AST],
+  prelude: &[(&str, &str)],
+  module_symbols: &[&str],
+) -> Result<Vec<AST>, String> {
   let mut resolver = Resolver {
+    module_name,
     prelude,
+    module_symbols: module_symbols.iter().copied().collect(),
     next_binding: 0,
+    module_functions: HashSet::new(),
   };
   resolver.resolve_module(asts)
 }
 
 struct Resolver<'a> {
+  module_name: &'a str,
   prelude: &'a [(&'a str, &'a str)],
+  module_symbols: HashSet<&'a str>,
   next_binding: u32,
+  module_functions: HashSet<BindingId>,
 }
 
 type Scope = HashMap<String, BindingId>;
@@ -36,6 +47,7 @@ impl Resolver<'_> {
         ASTKind::DefineFn(function) => {
           let name = self.fresh_name(function.name.as_str());
           module_scope.insert(name.name.clone(), name.binding);
+          self.module_functions.insert(name.binding);
           Some(name)
         }
         _ => None,
@@ -138,35 +150,50 @@ impl Resolver<'_> {
         )))
       }
       ASTKind::CallFixed(identifier, args) => {
-        let identifier = match identifier {
-          Identifier::Bare(name) if scope.contains_key(name.as_str()) => {
-            Identifier::Bare(ResolvedName::resolved(name.as_str(), scope[name.as_str()]))
-          }
-          Identifier::Bare(name) => self
-            .resolve_prelude_name(name.as_str())?
-            .map(|(module, function)| {
-              Identifier::Qualified(module.to_string(), function.to_string())
-            })
-            .unwrap_or_else(|| identifier.clone()),
-          Identifier::Qualified(_, _) => identifier.clone(),
-        };
         let mut resolved_args = Vec::with_capacity(args.len());
         for arg in args {
           resolved_args.push(self.resolve_expr(arg, scope)?);
         }
-        Ok(ast.with_kind(ASTKind::CallFixed(identifier, resolved_args)))
+        let kind = match identifier {
+          Identifier::Bare(name) => {
+            if let Some(binding) = scope.get(name.as_str()) {
+              let name = ResolvedName::resolved(name.as_str(), *binding);
+              if self.module_functions.contains(binding) {
+                ASTKind::CallFixed(
+                  Identifier::Qualified(self.module_name.to_string(), name.name),
+                  resolved_args,
+                )
+              } else {
+                ASTKind::Call(
+                  Box::new(AST::new(ASTKind::Variable(name), ast.span.clone())),
+                  resolved_args,
+                )
+              }
+            } else if let Some((module, function)) = self.resolve_external_name(name.as_str())? {
+              ASTKind::CallFixed(Identifier::Qualified(module, function), resolved_args)
+            } else {
+              ASTKind::CallFixed(identifier.clone(), resolved_args)
+            }
+          }
+          Identifier::Qualified(_, _) => ASTKind::CallFixed(identifier.clone(), resolved_args),
+        };
+        Ok(ast.with_kind(kind))
       }
       ASTKind::Variable(name) => {
         if let Some(binding) = scope.get(name.as_str()) {
-          Ok(ast.with_kind(ASTKind::Variable(ResolvedName::resolved(
-            name.as_str(),
-            *binding,
-          ))))
-        } else if let Some((module, function)) = self.resolve_prelude_name(name.as_str())? {
-          Ok(ast.with_kind(ASTKind::FunctionRef(
-            module.to_string(),
-            function.to_string(),
-          )))
+          if self.module_functions.contains(binding) {
+            Ok(ast.with_kind(ASTKind::FunctionRef(
+              self.module_name.to_string(),
+              name.name.clone(),
+            )))
+          } else {
+            Ok(ast.with_kind(ASTKind::Variable(ResolvedName::resolved(
+              name.as_str(),
+              *binding,
+            ))))
+          }
+        } else if let Some((module, function)) = self.resolve_external_name(name.as_str())? {
+          Ok(ast.with_kind(ASTKind::FunctionRef(module, function)))
         } else {
           Ok(ast.clone())
         }
@@ -259,6 +286,18 @@ impl Resolver<'_> {
     }
     Ok(Some(first))
   }
+
+  fn resolve_external_name(&self, name: &str) -> Result<Option<(String, String)>, String> {
+    if self.module_symbols.contains(name) {
+      Ok(Some((self.module_name.to_string(), name.to_string())))
+    } else {
+      Ok(
+        self
+          .resolve_prelude_name(name)?
+          .map(|(module, function)| (module.to_string(), function.to_string())),
+      )
+    }
+  }
 }
 
 fn nested_function_group_end(expressions: &[AST], start: usize) -> usize {
@@ -297,11 +336,25 @@ mod tests {
   use crate::parser::{erase_bindings, read_multiple};
 
   fn resolve(source: &str) -> Vec<AST> {
-    erase_bindings(&resolve_module_names(&read_multiple(source).unwrap(), &[("std", "+")]).unwrap())
+    erase_bindings(
+      &resolve_module_names(
+        "main",
+        &read_multiple(source).unwrap(),
+        &[("std", "+")],
+        &[],
+      )
+      .unwrap(),
+    )
   }
 
   fn resolve_with_bindings(source: &str) -> Vec<AST> {
-    resolve_module_names(&read_multiple(source).unwrap(), &[("std", "+")]).unwrap()
+    resolve_module_names(
+      "main",
+      &read_multiple(source).unwrap(),
+      &[("std", "+")],
+      &[],
+    )
+    .unwrap()
   }
 
   #[test]
@@ -367,7 +420,10 @@ mod tests {
         params: vec![],
         return_type: Some(crate::parser::TypeAst::Named("Int".to_string())),
         bounds: vec![],
-        code: vec![AST::CallFixed(Identifier::Bare("+".into()), vec![])],
+        code: vec![AST::CallFixed(
+          Identifier::Qualified("main".to_string(), "+".to_string()),
+          vec![],
+        )],
       })
     );
   }
@@ -464,11 +520,17 @@ mod tests {
     let ASTKind::DefineFn(odd) = &outer.code[1].kind else {
       panic!("expected odd");
     };
-    let ASTKind::CallFixed(Identifier::Bare(odd_ref), _) = &even.code[0].kind else {
+    let ASTKind::Call(odd_ref, _) = &even.code[0].kind else {
       panic!("expected call to odd");
     };
-    let ASTKind::CallFixed(Identifier::Bare(even_ref), _) = &odd.code[0].kind else {
+    let ASTKind::Variable(odd_ref) = &odd_ref.kind else {
+      panic!("expected odd variable");
+    };
+    let ASTKind::Call(even_ref, _) = &odd.code[0].kind else {
       panic!("expected call to even");
+    };
+    let ASTKind::Variable(even_ref) = &even_ref.kind else {
+      panic!("expected even variable");
     };
     assert_eq!(odd_ref.binding, odd.name.binding);
     assert_eq!(even_ref.binding, even.name.binding);
@@ -536,5 +598,58 @@ mod tests {
     };
     assert_ne!(first.binding, second.binding);
     assert_eq!(second.binding, use_.binding);
+  }
+
+  #[test]
+  fn resolved_local_call_is_dynamic() {
+    let asts = resolve_with_bindings(
+      "(fn main () ->Int
+         (let f std::+)
+         (f 1 2))",
+    );
+    let ASTKind::DefineFn(main) = &asts[0].kind else {
+      panic!("expected main");
+    };
+    let ASTKind::Let(f, _, _) = &main.code[0].kind else {
+      panic!("expected local function binding");
+    };
+    let ASTKind::Call(callable, _) = &main.code[1].kind else {
+      panic!("expected dynamic local call");
+    };
+    let ASTKind::Variable(f_ref) = &callable.kind else {
+      panic!("expected local variable as callable");
+    };
+    assert_eq!(f_ref.binding, f.binding);
+  }
+
+  #[test]
+  fn resolved_top_level_call_is_qualified() {
+    let asts = resolve_with_bindings(
+      "(fn helper () ->Int 1)
+       (fn main () ->Int (helper))",
+    );
+    let ASTKind::DefineFn(main) = &asts[1].kind else {
+      panic!("expected main");
+    };
+    assert!(matches!(
+      &main.code[0].kind,
+      ASTKind::CallFixed(Identifier::Qualified(module, name), _)
+        if module == "main" && name == "helper"
+    ));
+  }
+
+  #[test]
+  fn resolved_top_level_value_is_a_function_ref() {
+    let asts = resolve_with_bindings(
+      "(fn helper () ->Int 1)
+       (fn main () ->(Fn () -> Int) helper)",
+    );
+    let ASTKind::DefineFn(main) = &asts[1].kind else {
+      panic!("expected main");
+    };
+    assert!(matches!(
+      &main.code[0].kind,
+      ASTKind::FunctionRef(module, name) if module == "main" && name == "helper"
+    ));
   }
 }

@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::builtins::BuiltinSpec;
 use crate::closure::transform_closures_in_module;
@@ -318,19 +318,12 @@ pub fn compile_module(
   asts: &[AST],
   prelude: &[(&str, &str)],
 ) -> Result<CompiledModule, String> {
-  let asts = resolve_module_names(asts, prelude)?;
+  let asts = resolve_module_names(module_name, asts, prelude, &[])?;
   compile_resolved_module(module_name, &asts)
 }
 
 fn compile_resolved_module(module_name: &str, asts: &[AST]) -> Result<CompiledModule, String> {
   let asts = transform_closures_in_module(module_name, asts)?;
-  let module_functions: HashSet<BindingId> = asts
-    .iter()
-    .filter_map(|ast| match &ast.kind {
-      ASTKind::DefineFn(func) => Some(func.name.binding),
-      _ => None,
-    })
-    .collect();
   let structs = asts
     .iter()
     .filter_map(|ast| match &ast.kind {
@@ -339,19 +332,6 @@ fn compile_resolved_module(module_name: &str, asts: &[AST]) -> Result<CompiledMo
     })
     .collect::<HashMap<_, _>>();
   let function_returns = asts
-    .iter()
-    .filter_map(|ast| match &ast.kind {
-      ASTKind::DefineFn(func) => Some((
-        func.name.binding,
-        func
-          .return_type
-          .as_ref()
-          .and_then(|ty| struct_name_from_type(ty, &structs)),
-      )),
-      _ => None,
-    })
-    .collect();
-  let function_returns_by_name = asts
     .iter()
     .filter_map(|ast| match &ast.kind {
       ASTKind::DefineFn(func) => Some((
@@ -366,9 +346,7 @@ fn compile_resolved_module(module_name: &str, asts: &[AST]) -> Result<CompiledMo
     .collect();
   let ctx = CompileContext {
     module_name,
-    module_functions: &module_functions,
     function_returns: &function_returns,
-    function_returns_by_name: &function_returns_by_name,
     structs: &structs,
   };
   let struct_defs = asts
@@ -402,9 +380,7 @@ fn compile_resolved_module(module_name: &str, asts: &[AST]) -> Result<CompiledMo
 
 struct CompileContext<'a> {
   module_name: &'a str,
-  module_functions: &'a HashSet<BindingId>,
-  function_returns: &'a HashMap<BindingId, Option<String>>,
-  function_returns_by_name: &'a HashMap<String, Option<String>>,
+  function_returns: &'a HashMap<String, Option<String>>,
   structs: &'a HashMap<String, parser::Struct>,
 }
 
@@ -480,23 +456,9 @@ fn compile_expr(
       for expr in arg_exprs {
         instructions.extend(compile_expr(ctx, expr, locals)?);
       }
-      if let Identifier::Bare(fname) = identifier {
-        if let Some(local_index) = locals.get(&fname.binding) {
-          instructions.push(Instruction::LoadLocal(local_index.index));
-          instructions.push(Instruction::CallDynamic(arg_exprs.len() as u16));
-          return Ok(instructions);
-        }
-      }
       let (module_name, function_name) = match identifier {
-        Identifier::Bare(fname)
-          if ctx.module_functions.contains(&fname.binding) || !fname.binding.is_resolved() =>
-        {
-          (ctx.module_name.to_string(), fname.name.clone())
-        }
-        Identifier::Bare(fname) => {
-          return Err(format!("call to unknown function: {fname}"));
-        }
         Identifier::Qualified(mname, fname) => (mname.to_string(), fname.to_string()),
+        Identifier::Bare(fname) => return Err(format!("call to unknown function: {fname}")),
       };
       instructions.push(Instruction::Call(
         (module_name, function_name),
@@ -609,11 +571,6 @@ fn compile_expr(
     ASTKind::Variable(name) => {
       if let Some(local) = locals.get(&name.binding) {
         instructions.push(Instruction::LoadLocal(local.index));
-      } else if ctx.module_functions.contains(&name.binding) {
-        instructions.push(Instruction::MakeFunctionRef((
-          ctx.module_name.to_string(),
-          name.name.clone(),
-        )));
       } else {
         return Err(format!("Function accesses unbound variable {}", name));
       }
@@ -659,11 +616,9 @@ fn infer_struct_type(
       .as_ref()
       .and_then(|ty| struct_name_from_type(ty, ctx.structs))
       .or_else(|| infer_struct_type(ctx, expr, locals)),
-    ASTKind::CallFixed(Identifier::Bare(name), _) => {
-      ctx.function_returns.get(&name.binding).cloned().flatten()
-    }
+    ASTKind::CallFixed(Identifier::Bare(_), _) => None,
     ASTKind::CallFixed(Identifier::Qualified(module, name), _) if module == ctx.module_name => {
-      ctx.function_returns_by_name.get(name).cloned().flatten()
+      ctx.function_returns.get(name).cloned().flatten()
     }
     ASTKind::Block(body) => body
       .last()
@@ -733,7 +688,12 @@ fn _compile_from_source(
   prelude: &[(&str, &str)],
 ) -> Result<CompiledModules, String> {
   let asts = parser::read_multiple(module_source)?;
-  let asts = resolve_module_names(&asts, prelude)?;
+  let module_symbols = specs
+    .iter()
+    .filter(|spec| spec.module == "main")
+    .map(|spec| spec.name)
+    .collect::<Vec<_>>();
+  let asts = resolve_module_names("main", &asts, prelude, &module_symbols)?;
   crate::typecheck::typecheck(&asts, specs).map_err(|error| error.render(module_source))?;
   let compiled_modules = compile_modules(&asts)?;
   Ok(compiled_modules)
@@ -791,16 +751,16 @@ mod test {
   fn compile_test_function(
     f: &parser::Function,
   ) -> Result<Vec<(String, CompiledCallable)>, String> {
-    let module_functions = HashSet::new();
     let function_returns = HashMap::new();
-    let function_returns_by_name = HashMap::new();
     let structs = HashMap::new();
     let ctx = CompileContext {
       module_name: "main",
-      module_functions: &module_functions,
       function_returns: &function_returns,
-      function_returns_by_name: &function_returns_by_name,
       structs: &structs,
+    };
+    let asts = resolve_module_names("main", &[AST::DefineFn(f.clone())], &[], &[])?;
+    let ASTKind::DefineFn(f) = &asts[0].kind else {
+      unreachable!("the test input is a function");
     };
     compile_function(&ctx, f)
   }

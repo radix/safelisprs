@@ -129,6 +129,7 @@ impl AST {
     Self { kind, span }
   }
 
+  #[cfg(test)]
   pub(crate) fn synthetic(kind: ASTKind) -> Self {
     Self::new(kind, 0..0)
   }
@@ -183,6 +184,8 @@ impl AST {
 }
 
 #[cfg(test)]
+/// Clone an AST and clear its binding IDs so tests can compare structure
+/// without depending on resolver allocation order.
 pub(crate) fn erase_bindings(asts: &[AST]) -> Vec<AST> {
   fn erase_name(name: &mut ResolvedName) {
     name.binding = BindingId::UNRESOLVED;
