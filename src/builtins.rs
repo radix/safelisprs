@@ -7,13 +7,35 @@ use rand_chacha::ChaCha8Rng;
 
 use crate::interpreter::{CellContents, HostCtx, MemoryReservation, SLVal, Value};
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
-pub enum Trait {
-  Add,
-  Sub,
-  Eq,
-  Concat,
-  Slice,
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct TraitName(pub String);
+
+impl TraitName {
+  pub fn new(name: impl Into<String>) -> Self {
+    Self(name.into())
+  }
+
+  pub fn as_str(&self) -> &str {
+    &self.0
+  }
+}
+
+impl From<&str> for TraitName {
+  fn from(name: &str) -> Self {
+    Self::new(name)
+  }
+}
+
+impl From<String> for TraitName {
+  fn from(name: String) -> Self {
+    Self::new(name)
+  }
+}
+
+impl std::fmt::Display for TraitName {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    self.0.fmt(f)
+  }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,7 +77,7 @@ impl TypeConst {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuiltinSignature {
-  pub type_vars: Vec<(String, Vec<Trait>)>,
+  pub type_vars: Vec<(String, Vec<TraitName>)>,
   pub params: Vec<TypeConst>,
   pub rest: Option<TypeConst>,
   pub ret: TypeConst,
@@ -72,7 +94,7 @@ pub struct BuiltinSpec {
 }
 
 pub fn sig(
-  type_vars: &[(&str, &[Trait])],
+  type_vars: &[(&str, &[TraitName])],
   params: Vec<TypeConst>,
   rest: Option<TypeConst>,
   ret: TypeConst,
@@ -365,7 +387,7 @@ pub fn default_builtins() -> Builtins {
       "std",
       "+",
       sig(
-        &[("A", &[Trait::Add])],
+        &[("A", &[TraitName::new("Add")])],
         vec![TypeConst::var("A"), TypeConst::var("A")],
         None,
         TypeConst::var("A"),
@@ -384,7 +406,7 @@ pub fn default_builtins() -> Builtins {
       "std",
       "-",
       sig(
-        &[("A", &[Trait::Sub])],
+        &[("A", &[TraitName::new("Sub")])],
         vec![TypeConst::var("A"), TypeConst::var("A")],
         None,
         TypeConst::var("A"),
@@ -406,7 +428,7 @@ pub fn default_builtins() -> Builtins {
       "std",
       "==",
       sig(
-        &[("A", &[Trait::Eq])],
+        &[("A", &[TraitName::new("Eq")])],
         vec![TypeConst::var("A"), TypeConst::var("A")],
         None,
         TypeConst::Bool,
@@ -418,7 +440,7 @@ pub fn default_builtins() -> Builtins {
       "concat",
       Some(2),
       sig(
-        &[("A", &[Trait::Concat])],
+        &[("A", &[TraitName::new("Concat")])],
         vec![TypeConst::var("A"), TypeConst::var("A")],
         None,
         TypeConst::var("A"),
@@ -705,7 +727,7 @@ pub fn default_builtins() -> Builtins {
       "slice",
       Some(3),
       sig(
-        &[("A", &[Trait::Slice])],
+        &[("A", &[TraitName::new("Slice")])],
         vec![TypeConst::var("A"), TypeConst::Int, TypeConst::Int],
         None,
         TypeConst::var("A"),

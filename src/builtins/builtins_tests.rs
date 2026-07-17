@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::compiler::compile_executable_from_source;
 use crate::interpreter::{Execution, Interpreter, SLValue};
@@ -8,7 +7,7 @@ use rstest::rstest;
 fn signatures_own_their_type_declarations() {
   let variable_name = String::from("Element");
   let signature = sig(
-    &[(variable_name.as_str(), &[Trait::Eq])],
+    &[(variable_name.as_str(), &[TraitName::new("Eq")])],
     vec![TypeConst::var(variable_name.clone())],
     None,
     TypeConst::list(TypeConst::var(variable_name.clone())),

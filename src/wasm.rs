@@ -8,7 +8,7 @@ use wasm_encoder::{
   TableType, TypeSection, ValType,
 };
 
-use crate::builtins::{sig, BuiltinSignature, Trait, TypeConst};
+use crate::builtins::{sig, BuiltinSignature, TraitName, TypeConst};
 use crate::parser::{self, ASTKind, BindingId, Identifier, AST};
 use crate::prelude::resolve_module_names;
 
@@ -995,7 +995,7 @@ pub fn std_builtins() -> Builtins {
       "std",
       "+",
       sig(
-        &[("A", &[Trait::Add])],
+        &[("A", &[TraitName::new("Add")])],
         vec![TypeConst::var("A"), TypeConst::var("A")],
         None,
         TypeConst::var("A"),
@@ -1010,7 +1010,7 @@ pub fn std_builtins() -> Builtins {
       "std",
       "-",
       sig(
-        &[("A", &[Trait::Sub])],
+        &[("A", &[TraitName::new("Sub")])],
         vec![TypeConst::var("A"), TypeConst::var("A")],
         None,
         TypeConst::var("A"),
@@ -1025,7 +1025,7 @@ pub fn std_builtins() -> Builtins {
       "std",
       "==",
       sig(
-        &[("A", &[Trait::Eq])],
+        &[("A", &[TraitName::new("Eq")])],
         vec![TypeConst::var("A"), TypeConst::var("A")],
         None,
         TypeConst::Bool,

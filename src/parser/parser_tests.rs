@@ -196,6 +196,35 @@ fn parses_enum_definitions_and_construction() {
 }
 
 #[test]
+fn parses_trait_and_impl_definitions() {
+  let asts = read_multiple(
+    "(trait Foo
+       (fn bar (x:Self y:Int) -> Int))
+     (impl (Foo Int)
+       (fn bar (x:Int y:Int) -> Int
+         (std::+ x y)))",
+  )
+  .unwrap();
+
+  let ASTKind::DefineTrait(trait_) = &asts[0].kind else {
+    panic!("expected trait definition");
+  };
+  assert_eq!(trait_.name, "Foo");
+  assert_eq!(trait_.methods[0].name, "bar");
+  assert_eq!(
+    trait_.methods[0].params[0].1,
+    TypeAst::Named("Self".to_string())
+  );
+
+  let ASTKind::DefineImpl(impl_) = &asts[1].kind else {
+    panic!("expected impl definition");
+  };
+  assert_eq!(impl_.trait_name, "Foo");
+  assert_eq!(impl_.target, TypeAst::Named("Int".to_string()));
+  assert_eq!(impl_.methods[0].name.as_str(), "bar");
+}
+
+#[test]
 fn parses_match_with_variant_and_default_arms() {
   let asts = read_multiple(
     "(fn main (foo:Foo) ->Int

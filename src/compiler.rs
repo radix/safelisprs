@@ -4,7 +4,10 @@ use crate::builtins::BuiltinSpec;
 use crate::closure::transform_closures_in_module;
 use crate::parser::{self, ASTKind, BindingId, Identifier, MatchPattern, ResolvedName, AST};
 use crate::prelude::resolve_module_names;
-use crate::typecheck::{CheckedModule, MatchArmInfo, TypecheckInfo};
+use crate::typecheck::{
+  hidden_impl_method_name, CheckedModule, DictionaryArg, DictionaryParam, MatchArmInfo,
+  TypecheckInfo,
+};
 
 /// A Package can either represent a "program" or a "library".
 /// If a `main` is provided, then it can be executed as a program directly.
@@ -407,6 +410,10 @@ impl<'types> ModuleCompiler<'types> {
       match &ast.kind {
         ASTKind::DefineStruct(_) => {}
         ASTKind::DefineEnum(_) => {}
+        ASTKind::DefineTrait(_) => {}
+        ASTKind::DefineImpl(impl_) => {
+          functions.extend(self.compile_impl_methods(impl_)?);
+        }
         ASTKind::DefineFn(func) => functions.push(self.compile_function(func)?),
         x => return Err(format!("Unexpected form at top-level: {:?}", x)),
       };
@@ -420,6 +427,22 @@ impl<'types> ModuleCompiler<'types> {
 
   fn compile_function(&self, f: &parser::Function) -> Result<(String, CompiledCallable), String> {
     FunctionCompiler::new(self, f).compile(f)
+  }
+
+  fn compile_impl_methods(
+    &self,
+    impl_: &parser::ImplDef,
+  ) -> Result<Vec<(String, CompiledCallable)>, String> {
+    let target_key = type_ast_key(&impl_.target);
+    let mut functions = Vec::with_capacity(impl_.methods.len());
+    for method in &impl_.methods {
+      let hidden_name =
+        hidden_impl_method_name(&impl_.trait_name, &target_key, method.name.as_str());
+      let mut method = method.clone();
+      method.name.name = hidden_name;
+      functions.push(self.compile_function(&method)?);
+    }
+    Ok(functions)
   }
 
   fn struct_def(&self, name: &str) -> Result<&ConstructorDef, String> {
@@ -455,18 +478,31 @@ impl<'types> ModuleCompiler<'types> {
 struct FunctionCompiler<'module, 'types> {
   module: &'module ModuleCompiler<'types>,
   locals: HashMap<BindingId, u16>,
+  dictionary_params: Vec<DictionaryParam>,
   instructions: Vec<CompiledInstruction>,
 }
 
 impl<'module, 'types> FunctionCompiler<'module, 'types> {
   fn new(module: &'module ModuleCompiler<'types>, f: &parser::Function) -> Self {
     let mut locals = HashMap::new();
+    let mut dictionary_params = module
+      .type_info
+      .function_dictionaries(&module.module_name, f.name.as_str())
+      .to_vec();
+    if dictionary_params.is_empty() {
+      dictionary_params = dictionary_params_from_bounds(module.type_info, &f.bounds);
+    }
+    let hidden_params = dictionary_params.len() as u16;
+    for idx in 0..hidden_params {
+      locals.insert(BindingId::synthetic(u32::from(idx)), idx);
+    }
     for (idx, (param, _)) in f.params.iter().enumerate() {
-      locals.insert(param.binding, idx as u16);
+      locals.insert(param.binding, hidden_params + idx as u16);
     }
     Self {
       module,
       locals,
+      dictionary_params,
       instructions: vec![],
     }
   }
@@ -477,7 +513,7 @@ impl<'module, 'types> FunctionCompiler<'module, 'types> {
     Ok((
       f.name.name.clone(),
       Callable::Function(Function {
-        num_params: f.params.len() as u16,
+        num_params: (self.dictionary_params.len() + f.params.len()) as u16,
         num_locals: self.locals.len() as u16,
         instructions: self.instructions,
       }),
@@ -557,8 +593,13 @@ impl<'module, 'types> FunctionCompiler<'module, 'types> {
         self.emit(Instruction::CallDynamic(args.len() as u16));
       }
       ASTKind::CallFixed(identifier, args) => {
-        for argument in args {
-          self.compile_expr(argument)?;
+        if let Some(trait_call) = self.module.type_info.trait_call(ast.id()) {
+          for argument in args {
+            self.compile_expr(argument)?;
+          }
+          self.compile_dictionary_arg(&trait_call.method)?;
+          self.emit(Instruction::CallDynamic(args.len() as u16));
+          return Ok(());
         }
         let (module_name, function_name) = match identifier {
           Identifier::Qualified(module, function) => (module.clone(), function.clone()),
@@ -566,9 +607,15 @@ impl<'module, 'types> FunctionCompiler<'module, 'types> {
             return Err(format!("call to unknown function: {function}"))
           }
         };
+        for dictionary in self.module.type_info.call_dictionaries(ast.id()) {
+          self.compile_dictionary_arg(dictionary)?;
+        }
+        for argument in args {
+          self.compile_expr(argument)?;
+        }
         self.emit(Instruction::Call(
           (module_name, function_name),
-          args.len() as u16,
+          (args.len() + self.module.type_info.call_dictionaries(ast.id()).len()) as u16,
         ));
       }
       ASTKind::FunctionRef(module, name) => {
@@ -715,10 +762,97 @@ impl<'module, 'types> FunctionCompiler<'module, 'types> {
         return Err("Unexpected struct definition in expression".to_string())
       }
       ASTKind::DefineEnum(_) => return Err("Unexpected enum definition in expression".to_string()),
+      ASTKind::DefineTrait(_) => {
+        return Err("Unexpected trait definition in expression".to_string())
+      }
+      ASTKind::DefineImpl(_) => return Err("Unexpected impl definition in expression".to_string()),
       kind => return Err(format!("Unexpected form at top-level: {kind:?}")),
     }
     Ok(())
   }
+
+  fn compile_dictionary_arg(&mut self, dictionary: &DictionaryArg) -> Result<(), String> {
+    match dictionary {
+      DictionaryArg::ImplMethod { function } => {
+        self.emit(Instruction::MakeFunctionRef((
+          self.module.module_name.clone(),
+          function.clone(),
+        )));
+      }
+      DictionaryArg::BoundMethod {
+        type_var,
+        trait_name,
+        method_slot,
+      } => {
+        let local = self.dictionary_local(type_var, trait_name, *method_slot)?;
+        self.emit(Instruction::LoadLocal(local));
+      }
+    }
+    Ok(())
+  }
+
+  fn dictionary_local(
+    &self,
+    type_var: &str,
+    trait_name: &str,
+    method_slot: u16,
+  ) -> Result<u16, String> {
+    self
+      .dictionary_params
+      .iter()
+      .position(|param| {
+        param.type_var == type_var
+          && param.trait_name == trait_name
+          && param.method_slot == method_slot
+      })
+      .map(|index| index as u16)
+      .ok_or_else(|| {
+        format!("missing dictionary parameter for `{type_var} {trait_name}` slot {method_slot}")
+      })
+  }
+}
+
+fn type_ast_key(ty: &parser::TypeAst) -> String {
+  match ty {
+    parser::TypeAst::Named(name) => name.clone(),
+    parser::TypeAst::Apply(name, args) => {
+      let mut key = name.clone();
+      for arg in args {
+        key.push('_');
+        key.push_str(&type_ast_key(arg));
+      }
+      key
+    }
+    parser::TypeAst::Fn(_, _, _) => "Fn".to_string(),
+  }
+}
+
+fn dictionary_params_from_bounds(
+  type_info: &TypecheckInfo,
+  bounds: &[parser::Bound],
+) -> Vec<DictionaryParam> {
+  let mut params = Vec::new();
+  for bound in bounds {
+    for trait_name in &bound.traits {
+      let Some(trait_) = type_info
+        .traits()
+        .iter()
+        .find(|trait_| trait_.name == *trait_name)
+      else {
+        continue;
+      };
+      for (slot, _) in trait_.methods.iter().enumerate() {
+        if let Ok(method_slot) = u16::try_from(slot) {
+          params.push(DictionaryParam {
+            type_var: bound.var.clone(),
+            trait_name: trait_name.clone(),
+            method_slot,
+          });
+        }
+      }
+    }
+  }
+  params
 }
 
 pub fn compile_executable_from_source(

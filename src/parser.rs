@@ -126,6 +126,8 @@ pub enum ASTKind {
   DefineFn(Function),
   DefineStruct(Struct),
   DefineEnum(Enum),
+  DefineTrait(TraitDef),
+  DefineImpl(ImplDef),
   Call(Box<AST>, Vec<AST>),
   CallFixed(Identifier, Vec<AST>),
   Variable(ResolvedName),
@@ -255,7 +257,9 @@ pub(crate) fn try_map_ast_children<E>(
     | ASTKind::Bool(_)
     | ASTKind::FunctionRef(_, _)
     | ASTKind::DefineStruct(_)
-    | ASTKind::DefineEnum(_) => return Ok(ast.clone()),
+    | ASTKind::DefineEnum(_)
+    | ASTKind::DefineTrait(_)
+    | ASTKind::DefineImpl(_) => return Ok(ast.clone()),
   };
   Ok(ast.with_kind(kind))
 }
@@ -380,7 +384,19 @@ pub(crate) fn erase_bindings(asts: &[AST]) -> Vec<AST> {
       | ASTKind::Bool(_)
       | ASTKind::FunctionRef(_, _)
       | ASTKind::DefineStruct(_)
-      | ASTKind::DefineEnum(_) => {}
+      | ASTKind::DefineEnum(_)
+      | ASTKind::DefineTrait(_) => {}
+      ASTKind::DefineImpl(impl_) => {
+        for method in &mut impl_.methods {
+          erase_name(&mut method.name);
+          for (param, _) in &mut method.params {
+            erase_name(param);
+          }
+          for expression in &mut method.code {
+            erase_ast(expression);
+          }
+        }
+      }
     }
   }
 
@@ -434,6 +450,26 @@ pub struct EnumVariant {
   pub fields: Vec<(String, TypeAst)>,
 }
 
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct TraitDef {
+  pub name: String,
+  pub methods: Vec<TraitMethod>,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct TraitMethod {
+  pub name: String,
+  pub params: Vec<(String, TypeAst)>,
+  pub return_type: TypeAst,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct ImplDef {
+  pub trait_name: String,
+  pub target: TypeAst,
+  pub methods: Vec<Function>,
+}
+
 #[derive(Debug, PartialEq, Clone)]
 pub struct MatchArm {
   pub pattern: MatchPattern,
@@ -449,7 +485,7 @@ pub enum MatchPattern {
   Default,
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum TypeAst {
   Named(String),
   Apply(String, Vec<TypeAst>),
@@ -826,6 +862,14 @@ impl Parser {
         self.advance();
         self.parse_enum(start)
       }
+      TokenKind::Sym(name) if name == "trait" => {
+        self.advance();
+        self.parse_trait(start)
+      }
+      TokenKind::Sym(name) if name == "impl" => {
+        self.advance();
+        self.parse_impl(start)
+      }
       TokenKind::Sym(name) if name == "new" => {
         self.advance();
         self.parse_new(start)
@@ -866,27 +910,7 @@ impl Parser {
 
   fn parse_fn(&mut self, start: usize) -> Result<AST, ParseError> {
     let name = self.expect_symbol("`fn` name must be a symbol")?;
-    let params_open = self.advance();
-    if !matches!(params_open.kind, TokenKind::LParen) {
-      return Err(
-        ParseError::new(params_open.span, "`fn` requires a parameter list").expected("`(`"),
-      );
-    }
-
-    let mut params = Vec::new();
-    while !matches!(self.peek().kind, TokenKind::RParen) {
-      if matches!(self.peek().kind, TokenKind::Eof) {
-        return Err(
-          ParseError::new(self.peek().span.clone(), "unterminated parameter list")
-            .expected("a parameter name")
-            .expected("`)`"),
-        );
-      }
-      let param = self.expect_symbol("Parameters must be symbols")?;
-      self.expect_colon("function parameters require a type annotation")?;
-      params.push((param, Some(self.parse_type()?)));
-    }
-    self.advance();
+    let params = self.parse_param_list("`fn`")?;
 
     let return_type = if matches!(self.peek().kind, TokenKind::Arrow) {
       self.advance();
@@ -953,6 +977,38 @@ impl Parser {
     ))
   }
 
+  fn parse_param_list(
+    &mut self,
+    owner: &'static str,
+  ) -> Result<Vec<(String, Option<TypeAst>)>, ParseError> {
+    let params_open = self.advance();
+    if !matches!(params_open.kind, TokenKind::LParen) {
+      return Err(
+        ParseError::new(
+          params_open.span,
+          format!("{owner} requires a parameter list"),
+        )
+        .expected("`(`"),
+      );
+    }
+
+    let mut params = Vec::new();
+    while !matches!(self.peek().kind, TokenKind::RParen) {
+      if matches!(self.peek().kind, TokenKind::Eof) {
+        return Err(
+          ParseError::new(self.peek().span.clone(), "unterminated parameter list")
+            .expected("a parameter name")
+            .expected("`)`"),
+        );
+      }
+      let param = self.expect_symbol("Parameters must be symbols")?;
+      self.expect_colon("function parameters require a type annotation")?;
+      params.push((param, Some(self.parse_type()?)));
+    }
+    self.advance();
+    Ok(params)
+  }
+
   fn parse_struct(&mut self, start: usize) -> Result<AST, ParseError> {
     let name = self.expect_symbol("`struct` name must be a symbol")?;
     let mut fields = Vec::new();
@@ -1011,6 +1067,90 @@ impl Parser {
     let close = self.advance();
     let span = start..close.span.end;
     Ok(AST::new(ASTKind::DefineEnum(Enum { name, variants }), span))
+  }
+
+  fn parse_trait(&mut self, start: usize) -> Result<AST, ParseError> {
+    let name = self.expect_symbol("`trait` name must be a symbol")?;
+    let mut methods = Vec::new();
+    while !matches!(self.peek().kind, TokenKind::RParen) {
+      if matches!(self.peek().kind, TokenKind::Eof) {
+        return Err(
+          ParseError::new(self.peek().span.clone(), "unterminated `trait` form")
+            .expected("a method signature")
+            .expected("`)`"),
+        );
+      }
+      methods.push(self.parse_trait_method()?);
+    }
+    let close = self.advance();
+    let span = start..close.span.end;
+    Ok(AST::new(
+      ASTKind::DefineTrait(TraitDef { name, methods }),
+      span,
+    ))
+  }
+
+  fn parse_trait_method(&mut self) -> Result<TraitMethod, ParseError> {
+    self.expect_open("trait methods must be parenthesized")?;
+    let keyword = self.expect_symbol("trait methods must start with `fn`")?;
+    if keyword != "fn" {
+      return Err(ParseError::new(
+        self.previous_span(),
+        "trait methods must start with `fn`",
+      ));
+    }
+    let name = self.expect_symbol("trait method name must be a symbol")?;
+    let params = self.parse_param_list("trait method")?;
+    self.expect_arrow("trait method signatures require a return type")?;
+    let return_type = self.parse_type()?;
+    self.expect_close("trait method signatures cannot have a body")?;
+    Ok(TraitMethod {
+      name,
+      params: params
+        .into_iter()
+        .map(|(name, annotation)| (name, annotation.expect("parameters are annotated")))
+        .collect(),
+      return_type,
+    })
+  }
+
+  fn parse_impl(&mut self, start: usize) -> Result<AST, ParseError> {
+    self.expect_open("`impl` requires a parenthesized header")?;
+    let trait_name = self.expect_symbol("impl header must name a trait")?;
+    let target = self.parse_type()?;
+    self.expect_close("impl header must contain exactly a trait and target type")?;
+
+    let mut methods = Vec::new();
+    while !matches!(self.peek().kind, TokenKind::RParen) {
+      if matches!(self.peek().kind, TokenKind::Eof) {
+        return Err(
+          ParseError::new(self.peek().span.clone(), "unterminated `impl` form")
+            .expected("a method")
+            .expected("`)`"),
+        );
+      }
+      let method = self.parse_expr()?;
+      let span = method.span.clone();
+      match method.kind {
+        ASTKind::DefineFn(function) => methods.push(function),
+        _ => {
+          return Err(ParseError::new(
+            span,
+            "impl entries must be `fn` definitions",
+          ))
+        }
+      }
+    }
+    let close = self.advance();
+    let span = start..close.span.end;
+    Ok(AST::new(
+      ASTKind::DefineImpl(ImplDef {
+        trait_name,
+        target,
+        methods,
+      }),
+      span,
+    ))
   }
 
   fn parse_new(&mut self, start: usize) -> Result<AST, ParseError> {
@@ -1321,6 +1461,15 @@ impl Parser {
       Ok(token)
     } else {
       Err(ParseError::new(token.span, message).expected("`)`"))
+    }
+  }
+
+  fn expect_arrow(&mut self, message: &'static str) -> Result<Token, ParseError> {
+    let token = self.advance();
+    if matches!(token.kind, TokenKind::Arrow) {
+      Ok(token)
+    } else {
+      Err(ParseError::new(token.span, message).expected("`->`"))
     }
   }
 

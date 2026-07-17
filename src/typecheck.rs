@@ -3,10 +3,11 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::rc::Rc;
 
-use crate::builtins::{BuiltinSignature, BuiltinSpec, Trait, TypeConst};
+use crate::builtins::{BuiltinSignature, BuiltinSpec, TraitName, TypeConst};
 use crate::parser::{
   source_position, ASTKind, AstId, BindingId, Enum as EnumAst, EnumVariant, Function, Identifier,
-  MatchArm, MatchPattern, ResolvedName, Span, Struct as StructAst, TypeAst, AST,
+  ImplDef, MatchArm, MatchPattern, ResolvedName, Span, Struct as StructAst, TraitDef, TraitMethod,
+  TypeAst, AST,
 };
 
 pub type TvRef = Rc<RefCell<TypeVar>>;
@@ -52,12 +53,12 @@ impl Type {
 pub enum TypeVar {
   Unbound {
     id: usize,
-    bounds: Vec<Trait>,
+    bounds: Vec<TraitName>,
     origin: Option<String>,
   },
   Rigid {
     name: String,
-    bounds: Vec<Trait>,
+    bounds: Vec<TraitName>,
   },
   Link(Type),
 }
@@ -157,6 +158,11 @@ pub struct CheckedModule {
 pub struct TypecheckInfo {
   field_accesses: HashMap<AstId, FieldAccessInfo>,
   matches: HashMap<AstId, MatchInfo>,
+  trait_calls: HashMap<AstId, TraitCallInfo>,
+  call_dictionaries: HashMap<AstId, Vec<DictionaryArg>>,
+  traits: Vec<TraitDef>,
+  impls: Vec<ImplDictionaryInfo>,
+  function_dictionaries: HashMap<(String, String), Vec<DictionaryParam>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -179,6 +185,39 @@ pub enum MatchArmInfo {
   Default,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraitCallInfo {
+  pub trait_name: String,
+  pub method_slot: u16,
+  pub method: DictionaryArg,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DictionaryArg {
+  ImplMethod {
+    function: String,
+  },
+  BoundMethod {
+    type_var: String,
+    trait_name: String,
+    method_slot: u16,
+  },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DictionaryParam {
+  pub type_var: String,
+  pub trait_name: String,
+  pub method_slot: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImplDictionaryInfo {
+  pub trait_name: String,
+  pub target_key: String,
+  pub methods: Vec<String>,
+}
+
 impl CheckedModule {
   pub fn asts(&self) -> &[AST] {
     &self.asts
@@ -196,6 +235,29 @@ impl TypecheckInfo {
 
   pub fn match_info(&self, match_: AstId) -> Option<&MatchInfo> {
     self.matches.get(&match_)
+  }
+
+  pub fn trait_call(&self, call: AstId) -> Option<&TraitCallInfo> {
+    self.trait_calls.get(&call)
+  }
+
+  pub fn call_dictionaries(&self, call: AstId) -> &[DictionaryArg] {
+    self.call_dictionaries.get(&call).map_or(&[], Vec::as_slice)
+  }
+
+  pub fn traits(&self) -> &[TraitDef] {
+    &self.traits
+  }
+
+  pub fn impls(&self) -> &[ImplDictionaryInfo] {
+    &self.impls
+  }
+
+  pub fn function_dictionaries(&self, module: &str, function: &str) -> &[DictionaryParam] {
+    self
+      .function_dictionaries
+      .get(&(module.to_string(), function.to_string()))
+      .map_or(&[], Vec::as_slice)
   }
 }
 
@@ -235,8 +297,13 @@ pub fn typecheck_named<'a>(
 struct Checker {
   schemes: HashMap<(String, String), FnScheme>,
   types: HashMap<String, UserType>,
+  traits: HashMap<String, TraitDef>,
+  impls: HashMap<(String, String), ImplDictionaryInfo>,
+  function_dictionaries: HashMap<(String, String), Vec<DictionaryParam>>,
   field_accesses: HashMap<AstId, FieldAccessInfo>,
   matches: HashMap<AstId, MatchInfo>,
+  trait_calls: HashMap<AstId, TraitCallInfo>,
+  call_dictionaries: HashMap<AstId, Vec<DictionaryArg>>,
   next_var: usize,
   inference_vars: Vec<TvRef>,
 }
@@ -246,12 +313,25 @@ impl Checker {
     let mut checker = Self {
       schemes: HashMap::new(),
       types: HashMap::new(),
+      traits: HashMap::new(),
+      impls: HashMap::new(),
+      function_dictionaries: HashMap::new(),
       field_accesses: HashMap::new(),
       matches: HashMap::new(),
+      trait_calls: HashMap::new(),
+      call_dictionaries: HashMap::new(),
       next_var: 0,
       inference_vars: Vec::new(),
     };
     for (module, name, signature) in builtins {
+      for (_, bounds) in &signature.type_vars {
+        for bound in bounds {
+          checker.traits.entry(bound.0.clone()).or_insert(TraitDef {
+            name: bound.0.clone(),
+            methods: Vec::new(),
+          });
+        }
+      }
       let scheme = checker.scheme_from_builtin(signature);
       checker
         .schemes
@@ -294,44 +374,105 @@ impl Checker {
     }
 
     for ast in asts {
-      let ASTKind::DefineFn(function) = &ast.kind else {
-        if matches!(ast.kind, ASTKind::DefineStruct(_) | ASTKind::DefineEnum(_)) {
-          continue;
+      if let ASTKind::DefineTrait(trait_) = &ast.kind {
+        if self.traits.contains_key(&trait_.name) {
+          return Err(
+            TypeError::new(format!("duplicate trait `{}`", trait_.name)).at(ast.span.clone()),
+          );
         }
-        return Err(
-          TypeError::new("only function, struct, and enum definitions are allowed at top level")
-            .at(ast.span.clone()),
-        );
-      };
-      let key = ("main".to_string(), function.name.name.clone());
-      if self.schemes.contains_key(&key) {
-        return Err(
-          TypeError::new(format!("duplicate function `main::{}`", function.name))
-            .at(ast.span.clone()),
-        );
+        self.validate_trait(trait_).map_err(|error| {
+          error
+            .context(format!("in trait `{}`", trait_.name))
+            .at(ast.span.clone())
+        })?;
+        self.traits.insert(trait_.name.clone(), trait_.clone());
       }
-      let (scheme, _) = self
-        .declared_scheme(function, &HashMap::new())
-        .map_err(|error| error.at(ast.span.clone()))?;
-      self.schemes.insert(key, scheme);
     }
 
     for ast in asts {
-      if let ASTKind::DefineFn(function) = &ast.kind {
-        let scheme = self.schemes[&("main".to_string(), function.name.name.clone())].clone();
-        let vars = rigid_vars_by_name(&scheme.quantified);
-        self
-          .check_function(function, &scheme, Env::new(), vars, true)
-          .map_err(|error| {
+      if let ASTKind::DefineImpl(impl_) = &ast.kind {
+        let info = self.validate_impl_header(impl_).map_err(|error| {
+          error
+            .context(format!("in impl `{}`", impl_.trait_name))
+            .at(ast.span.clone())
+        })?;
+        let key = (info.trait_name.clone(), info.target_key.clone());
+        if self.impls.contains_key(&key) {
+          return Err(
+            TypeError::new(format!(
+              "duplicate impl for `{} {}`",
+              info.trait_name, info.target_key
+            ))
+            .at(ast.span.clone()),
+          );
+        }
+        self.impls.insert(key, info);
+      }
+    }
+
+    for ast in asts {
+      match &ast.kind {
+        ASTKind::DefineFn(function) => {
+          let key = ("main".to_string(), function.name.name.clone());
+          if self.schemes.contains_key(&key) {
+            return Err(
+              TypeError::new(format!("duplicate function `main::{}`", function.name))
+                .at(ast.span.clone()),
+            );
+          }
+          let (scheme, _) = self
+            .declared_scheme(function, &HashMap::new())
+            .map_err(|error| error.at(ast.span.clone()))?;
+          let dictionaries = self.dictionary_params_for_scheme(&scheme)?;
+          self.function_dictionaries.insert(key.clone(), dictionaries);
+          self.schemes.insert(key, scheme);
+        }
+        ASTKind::DefineStruct(_)
+        | ASTKind::DefineEnum(_)
+        | ASTKind::DefineTrait(_)
+        | ASTKind::DefineImpl(_) => {}
+        _ => {
+          return Err(
+            TypeError::new(
+              "only function, struct, enum, trait, and impl definitions are allowed at top level",
+            )
+            .at(ast.span.clone()),
+          );
+        }
+      }
+    }
+
+    for ast in asts {
+      match &ast.kind {
+        ASTKind::DefineImpl(impl_) => {
+          self.validate_impl_methods(impl_).map_err(|error| {
             error
-              .context(format!("in function `{}`", function.name))
+              .context(format!("in impl `{}`", impl_.trait_name))
               .at(ast.span.clone())
           })?;
+        }
+        ASTKind::DefineFn(function) => {
+          let scheme = self.schemes[&("main".to_string(), function.name.name.clone())].clone();
+          let vars = rigid_vars_by_name(&scheme.quantified);
+          self
+            .check_function(function, &scheme, Env::new(), vars, true)
+            .map_err(|error| {
+              error
+                .context(format!("in function `{}`", function.name))
+                .at(ast.span.clone())
+            })?;
+        }
+        _ => {}
       }
     }
     Ok(TypecheckInfo {
       field_accesses: self.field_accesses,
       matches: self.matches,
+      trait_calls: self.trait_calls,
+      call_dictionaries: self.call_dictionaries,
+      traits: self.traits.into_values().collect(),
+      impls: self.impls.into_values().collect(),
+      function_dictionaries: self.function_dictionaries,
     })
   }
 
@@ -372,6 +513,188 @@ impl Checker {
       self.resolve_type(ty, &HashMap::new())?;
     }
     Ok(())
+  }
+
+  fn validate_trait(&self, trait_: &TraitDef) -> Result<(), TypeError> {
+    let mut seen = HashSet::new();
+    for method in &trait_.methods {
+      if !seen.insert(method.name.as_str()) {
+        return Err(TypeError::new(format!(
+          "duplicate method `{}` in trait `{}`",
+          method.name, trait_.name
+        )));
+      }
+      for (_, ty) in &method.params {
+        self.resolve_trait_type(
+          ty,
+          &Type::Var(Rc::new(RefCell::new(TypeVar::Rigid {
+            name: "Self".to_string(),
+            bounds: Vec::new(),
+          }))),
+        )?;
+      }
+      self.resolve_trait_type(
+        &method.return_type,
+        &Type::Var(Rc::new(RefCell::new(TypeVar::Rigid {
+          name: "Self".to_string(),
+          bounds: Vec::new(),
+        }))),
+      )?;
+    }
+    Ok(())
+  }
+
+  fn validate_impl_header(&self, impl_: &ImplDef) -> Result<ImplDictionaryInfo, TypeError> {
+    if !self.traits.contains_key(&impl_.trait_name) {
+      return Err(TypeError::new(format!(
+        "unknown trait `{}` in impl",
+        impl_.trait_name
+      )));
+    }
+    let target = self.resolve_type(&impl_.target, &HashMap::new())?;
+    if type_contains_var(&target) {
+      return Err(TypeError::new("impl target type must be concrete"));
+    }
+    let target_key = type_key(&target);
+    let trait_ = self.traits.get(&impl_.trait_name).unwrap();
+    Ok(ImplDictionaryInfo {
+      trait_name: impl_.trait_name.clone(),
+      target_key: target_key.clone(),
+      methods: trait_
+        .methods
+        .iter()
+        .map(|method| hidden_impl_method_name(&impl_.trait_name, &target_key, &method.name))
+        .collect(),
+    })
+  }
+
+  fn validate_impl_methods(&mut self, impl_: &ImplDef) -> Result<(), TypeError> {
+    let target = self.resolve_type(&impl_.target, &HashMap::new())?;
+    let target_key = type_key(&target);
+    let trait_ = self
+      .traits
+      .get(&impl_.trait_name)
+      .cloned()
+      .ok_or_else(|| TypeError::new(format!("unknown trait `{}`", impl_.trait_name)))?;
+
+    let mut methods = HashMap::new();
+    for method in &impl_.methods {
+      if methods.insert(method.name.as_str(), method).is_some() {
+        return Err(TypeError::new(format!(
+          "duplicate method `{}` in impl `{}`",
+          method.name, impl_.trait_name
+        )));
+      }
+    }
+
+    for method in &trait_.methods {
+      let Some(impl_method) = methods.remove(method.name.as_str()) else {
+        return Err(TypeError::new(format!(
+          "missing method `{}` in impl `{}`",
+          method.name, impl_.trait_name
+        )));
+      };
+      self.validate_impl_method_signature(&trait_, method, impl_method, &target)?;
+      let scheme = self.scheme_from_impl_method(impl_method)?;
+      let vars = rigid_vars_by_name(&scheme.quantified);
+      self
+        .check_function(impl_method, &scheme, Env::new(), vars, true)
+        .map_err(|error| {
+          error.context(format!(
+            "in impl method `{}` for `{} {}`",
+            impl_method.name, impl_.trait_name, target_key
+          ))
+        })?;
+    }
+
+    if let Some(extra) = methods.keys().next() {
+      return Err(TypeError::new(format!(
+        "extra method `{extra}` in impl `{}`",
+        impl_.trait_name
+      )));
+    }
+    Ok(())
+  }
+
+  fn validate_impl_method_signature(
+    &self,
+    trait_: &TraitDef,
+    method: &TraitMethod,
+    impl_method: &Function,
+    target: &Type,
+  ) -> Result<(), TypeError> {
+    if method.params.len() != impl_method.params.len() {
+      return Err(TypeError::new(format!(
+        "method `{}` in impl `{}` has wrong arity",
+        method.name, trait_.name
+      )));
+    }
+    for ((_, expected), (_, actual)) in method.params.iter().zip(&impl_method.params) {
+      let actual = actual
+        .as_ref()
+        .ok_or_else(|| TypeError::new("impl method parameters require type annotations"))?;
+      let expected = self.resolve_trait_type(expected, target)?;
+      let actual = self.resolve_type(actual, &HashMap::new())?;
+      if !types_equivalent(&expected, &actual) {
+        return Err(TypeError::new(format!(
+          "method `{}` in impl `{}` has signature mismatch: expected `{}`, got `{}`",
+          method.name,
+          trait_.name,
+          display_type(&expected),
+          display_type(&actual)
+        )));
+      }
+    }
+    let expected = self.resolve_trait_type(&method.return_type, target)?;
+    let actual = impl_method
+      .return_type
+      .as_ref()
+      .map(|ret| self.resolve_type(ret, &HashMap::new()))
+      .transpose()?
+      .unwrap_or(Type::Void);
+    if !types_equivalent(&expected, &actual) {
+      return Err(TypeError::new(format!(
+        "method `{}` in impl `{}` has return type mismatch: expected `{}`, got `{}`",
+        method.name,
+        trait_.name,
+        display_type(&expected),
+        display_type(&actual)
+      )));
+    }
+    Ok(())
+  }
+
+  fn scheme_from_impl_method(&mut self, method: &Function) -> Result<FnScheme, TypeError> {
+    self
+      .declared_scheme(method, &HashMap::new())
+      .map(|(scheme, _)| scheme)
+  }
+
+  fn dictionary_params_for_scheme(
+    &self,
+    scheme: &FnScheme,
+  ) -> Result<Vec<DictionaryParam>, TypeError> {
+    let mut params = Vec::new();
+    for quantified in &scheme.quantified {
+      let TypeVar::Rigid { name, bounds } = &*quantified.borrow() else {
+        unreachable!("schemes quantify rigid variables")
+      };
+      for bound in bounds {
+        let Some(trait_) = self.traits.get(bound.as_str()) else {
+          return Err(TypeError::new(format!("unknown trait `{bound}`")));
+        };
+        for (slot, _) in trait_.methods.iter().enumerate() {
+          let method_slot = u16::try_from(slot)
+            .map_err(|_| TypeError::new(format!("trait `{}` has too many methods", trait_.name)))?;
+          params.push(DictionaryParam {
+            type_var: name.clone(),
+            trait_name: trait_.name.clone(),
+            method_slot,
+          });
+        }
+      }
+    }
+    Ok(params)
   }
 
   fn struct_def(&self, name: &str) -> Result<StructAst, TypeError> {
@@ -546,7 +869,7 @@ impl Checker {
         Ok(ret)
       }
       ASTKind::CallFixed(identifier, args) => {
-        self.infer_fixed_call(env, type_vars, identifier, args)
+        self.infer_fixed_call(ast.id(), env, type_vars, identifier, args)
       }
       ASTKind::NewStruct(name, fields) => self.infer_new_struct(env, type_vars, name, fields),
       ASTKind::NewEnum(name, variant, fields) => {
@@ -583,6 +906,12 @@ impl Checker {
       )),
       ASTKind::DefineEnum(_) => Err(TypeError::new(
         "enum definitions are only allowed at top level",
+      )),
+      ASTKind::DefineTrait(_) => Err(TypeError::new(
+        "trait definitions are only allowed at top level",
+      )),
+      ASTKind::DefineImpl(_) => Err(TypeError::new(
+        "impl definitions are only allowed at top level",
       )),
     }
   }
@@ -827,6 +1156,7 @@ impl Checker {
 
   fn infer_fixed_call(
     &mut self,
+    call_id: AstId,
     env: &mut Env,
     type_vars: &TypeVars,
     identifier: &Identifier,
@@ -838,13 +1168,17 @@ impl Checker {
         return Err(TypeError::new(format!("unknown function `{name}`")));
       }
     };
+    if self.traits.contains_key(module) {
+      return self.infer_trait_call(call_id, env, type_vars, module, name, args);
+    }
     let label = format!("{module}::{name}");
     let scheme = self.schemes.get(&(module.clone(), name.clone())).cloned();
     let Some(scheme) = scheme else {
       return Err(TypeError::new(format!("unknown function `{label}`")));
     };
 
-    let instantiated = self.instantiate(&scheme, Some(format!("call to `{label}`")));
+    let (instantiated, type_args) =
+      self.instantiate_with_type_args(&scheme, Some(format!("call to `{label}`")));
     let minimum = instantiated.params.len();
     if (instantiated.rest.is_none() && args.len() != minimum)
       || (instantiated.rest.is_some() && args.len() < minimum)
@@ -879,7 +1213,155 @@ impl Checker {
         ))
       })?;
     }
+    if let Some(dictionary_params) = self
+      .function_dictionaries
+      .get(&(module.clone(), name.clone()))
+      .cloned()
+    {
+      let mut dictionary_args = Vec::with_capacity(dictionary_params.len());
+      for param in dictionary_params {
+        let Some(actual) = type_args.get(&param.type_var) else {
+          continue;
+        };
+        dictionary_args.push(self.dictionary_arg_for_type(
+          actual,
+          &param.trait_name,
+          param.method_slot,
+        )?);
+      }
+      if !dictionary_args.is_empty() {
+        self.call_dictionaries.insert(call_id, dictionary_args);
+      }
+    }
     Ok(instantiated.ret)
+  }
+
+  fn infer_trait_call(
+    &mut self,
+    call_id: AstId,
+    env: &mut Env,
+    type_vars: &TypeVars,
+    trait_name: &str,
+    method_name: &str,
+    args: &[AST],
+  ) -> Result<Type, TypeError> {
+    if args.is_empty() {
+      return Err(TypeError::new(format!(
+        "trait method `{trait_name}::{method_name}` requires a receiver"
+      )));
+    }
+    let trait_ = self
+      .traits
+      .get(trait_name)
+      .cloned()
+      .ok_or_else(|| TypeError::new(format!("unknown trait `{trait_name}`")))?;
+    let (method_slot, method) = trait_
+      .methods
+      .iter()
+      .enumerate()
+      .find(|(_, method)| method.name == method_name)
+      .ok_or_else(|| {
+        TypeError::new(format!(
+          "trait `{trait_name}` has no method `{method_name}`"
+        ))
+      })?;
+    let method_slot = u16::try_from(method_slot)
+      .map_err(|_| TypeError::new(format!("trait `{trait_name}` has too many methods")))?;
+    if args.len() != method.params.len() {
+      return Err(TypeError::new(format!(
+        "trait method `{trait_name}::{method_name}` expects {} arguments, got {}",
+        method.params.len(),
+        args.len()
+      )));
+    }
+
+    let receiver = self.infer(env, type_vars, &args[0])?;
+    let receiver = prune(&receiver);
+    let dictionary_arg = self.dictionary_arg_for_type(&receiver, trait_name, method_slot)?;
+    for (index, (arg, (_, expected))) in args.iter().zip(&method.params).enumerate() {
+      let actual = if index == 0 {
+        receiver.clone()
+      } else {
+        self.infer(env, type_vars, arg)?
+      };
+      let expected = self.resolve_trait_type(expected, &receiver)?;
+      self.unify(actual, expected).map_err(|error| {
+        error.at(arg.span.clone()).context(format!(
+          "while checking argument {} of trait call `{trait_name}::{method_name}`",
+          index + 1
+        ))
+      })?;
+    }
+    self.trait_calls.insert(
+      call_id,
+      TraitCallInfo {
+        trait_name: trait_name.to_string(),
+        method_slot,
+        method: dictionary_arg,
+      },
+    );
+    self.resolve_trait_type(&method.return_type, &receiver)
+  }
+
+  fn dictionary_arg_for_type(
+    &self,
+    ty: &Type,
+    trait_name: &str,
+    method_slot: u16,
+  ) -> Result<DictionaryArg, TypeError> {
+    match prune(ty) {
+      Type::Var(var) => match &*var.borrow() {
+        TypeVar::Rigid { name, bounds }
+        | TypeVar::Unbound {
+          origin: Some(name),
+          bounds,
+          ..
+        } => {
+          if bounds.iter().any(|bound| bound.as_str() == trait_name) {
+            Ok(DictionaryArg::BoundMethod {
+              type_var: name.clone(),
+              trait_name: trait_name.to_string(),
+              method_slot,
+            })
+          } else {
+            Err(TypeError::new(format!(
+              "type variable `{name}` requires trait `{trait_name}` here"
+            )))
+          }
+        }
+        TypeVar::Unbound { bounds, .. } => {
+          if bounds.iter().any(|bound| bound.as_str() == trait_name) {
+            Err(TypeError::new(
+              "type annotation needed: cannot choose dictionary for unresolved inference variable",
+            ))
+          } else {
+            Err(TypeError::new(format!(
+              "unresolved type variable requires trait `{trait_name}` here"
+            )))
+          }
+        }
+        TypeVar::Link(link) => self.dictionary_arg_for_type(link, trait_name, method_slot),
+      },
+      concrete => {
+        let target_key = type_key(&concrete);
+        let impl_ = self
+          .impls
+          .get(&(trait_name.to_string(), target_key.clone()))
+          .ok_or_else(|| {
+            TypeError::new(format!(
+              "type `{}` does not satisfy trait `{trait_name}`",
+              display_type(&concrete)
+            ))
+          })?;
+        let function = impl_
+          .methods
+          .get(method_slot as usize)
+          .ok_or_else(|| TypeError::new(format!("invalid method slot {method_slot}")))?;
+        Ok(DictionaryArg::ImplMethod {
+          function: function.clone(),
+        })
+      }
+    }
   }
 
   fn resolve_bare(&mut self, env: &Env, name: &ResolvedName) -> Result<Type, TypeError> {
@@ -924,7 +1406,7 @@ impl Checker {
       .filter(|name| !enclosing.contains_key(*name))
       .cloned()
       .collect();
-    let mut declared_bounds: HashMap<String, Vec<Trait>> = HashMap::new();
+    let mut declared_bounds: HashMap<String, Vec<TraitName>> = HashMap::new();
     for bound in &function.bounds {
       if !own_names.contains(&bound.var) {
         let reason = if enclosing.contains_key(&bound.var) {
@@ -937,6 +1419,9 @@ impl Checker {
       let traits = declared_bounds.entry(bound.var.clone()).or_default();
       for name in &bound.traits {
         let trait_ = parse_trait(name)?;
+        if !self.traits.contains_key(trait_.as_str()) {
+          return Err(TypeError::new(format!("unknown trait `{name}`")));
+        }
         if !traits.contains(&trait_) {
           traits.push(trait_);
         }
@@ -1002,30 +1487,41 @@ impl Checker {
   }
 
   fn instantiate(&mut self, scheme: &FnScheme, origin: Option<String>) -> FnScheme {
+    self.instantiate_with_type_args(scheme, origin).0
+  }
+
+  fn instantiate_with_type_args(
+    &mut self,
+    scheme: &FnScheme,
+    origin: Option<String>,
+  ) -> (FnScheme, HashMap<String, Type>) {
     let mut replacements = HashMap::new();
+    let mut type_args = HashMap::new();
     for quantified in &scheme.quantified {
       let (name, bounds) = match &*quantified.borrow() {
         TypeVar::Rigid { name, bounds } => (name.clone(), bounds.clone()),
         _ => unreachable!("schemes quantify rigid variables"),
       };
-      replacements.insert(
-        Rc::as_ptr(quantified) as usize,
-        self.fresh(origin.clone().or(Some(name)), bounds),
-      );
+      let replacement = self.fresh(origin.clone().or(Some(name.clone())), bounds);
+      replacements.insert(Rc::as_ptr(quantified) as usize, replacement.clone());
+      type_args.insert(name, replacement);
     }
-    FnScheme {
-      params: scheme
-        .params
-        .iter()
-        .map(|ty| replace_quantified(ty, &replacements))
-        .collect(),
-      rest: scheme
-        .rest
-        .as_ref()
-        .map(|ty| replace_quantified(ty, &replacements)),
-      ret: replace_quantified(&scheme.ret, &replacements),
-      quantified: Vec::new(),
-    }
+    (
+      FnScheme {
+        params: scheme
+          .params
+          .iter()
+          .map(|ty| replace_quantified(ty, &replacements))
+          .collect(),
+        rest: scheme
+          .rest
+          .as_ref()
+          .map(|ty| replace_quantified(ty, &replacements)),
+        ret: replace_quantified(&scheme.ret, &replacements),
+        quantified: Vec::new(),
+      },
+      type_args,
+    )
   }
 
   fn instantiate_binding(
@@ -1042,7 +1538,7 @@ impl Checker {
     }
   }
 
-  fn fresh(&mut self, origin: Option<String>, bounds: Vec<Trait>) -> Type {
+  fn fresh(&mut self, origin: Option<String>, bounds: Vec<TraitName>) -> Type {
     let var = Rc::new(RefCell::new(TypeVar::Unbound {
       id: self.next_var,
       bounds,
@@ -1229,9 +1725,9 @@ impl Checker {
           }
         } else {
           for bound in &bounds {
-            if !satisfies(&ty, *bound) {
+            if !self.satisfies_trait(&ty, bound) {
               return Err(TypeError::new(format!(
-                "type `{}` does not satisfy trait `{:?}`",
+                "type `{}` does not satisfy trait `{}`",
                 display_type(&ty),
                 bound
               )));
@@ -1261,6 +1757,29 @@ impl Checker {
 
   fn resolve_type(&self, ast: &TypeAst, vars: &TypeVars) -> Result<Type, TypeError> {
     resolve_type(ast, vars, &self.types)
+  }
+
+  fn resolve_trait_type(&self, ast: &TypeAst, self_type: &Type) -> Result<Type, TypeError> {
+    if matches!(ast, TypeAst::Named(name) if name == "Self") {
+      return Ok(self_type.clone());
+    }
+    resolve_type_with_self(ast, &HashMap::new(), &self.types, self_type)
+  }
+
+  fn satisfies_trait(&self, ty: &Type, trait_: &TraitName) -> bool {
+    let ty = prune(ty);
+    if builtin_satisfies(&ty, trait_) {
+      return true;
+    }
+    match &ty {
+      Type::Var(var) => match &*var.borrow() {
+        TypeVar::Rigid { bounds, .. } | TypeVar::Unbound { bounds, .. } => bounds.contains(trait_),
+        TypeVar::Link(link) => self.satisfies_trait(link, trait_),
+      },
+      concrete => self
+        .impls
+        .contains_key(&(trait_.0.clone(), type_key(concrete))),
+    }
   }
 
   fn collect_type_vars(&self, ast: &TypeAst, names: &mut HashSet<String>) -> Result<(), TypeError> {
@@ -1413,6 +1932,96 @@ fn resolve_type(
   }
 }
 
+fn resolve_type_with_self(
+  ast: &TypeAst,
+  vars: &TypeVars,
+  types: &HashMap<String, UserType>,
+  self_type: &Type,
+) -> Result<Type, TypeError> {
+  match ast {
+    TypeAst::Named(name) if name == "Self" => Ok(self_type.clone()),
+    TypeAst::Named(_) => resolve_type(ast, vars, types),
+    TypeAst::Apply(name, args) => match (name.as_str(), args.as_slice()) {
+      ("List", [item]) => Ok(Type::List(Box::new(resolve_type_with_self(
+        item, vars, types, self_type,
+      )?))),
+      ("Cell", [item]) => Ok(Type::Cell(Box::new(resolve_type_with_self(
+        item, vars, types, self_type,
+      )?))),
+      ("List" | "Cell", _) => Err(TypeError::new(format!(
+        "type constructor `{name}` expects one argument, got {}",
+        args.len()
+      ))),
+      _ => Err(TypeError::new(format!("unknown type constructor `{name}`"))),
+    },
+    TypeAst::Fn(params, rest, ret) => Ok(Type::Fn {
+      params: params
+        .iter()
+        .map(|param| resolve_type_with_self(param, vars, types, self_type))
+        .collect::<Result<Vec<_>, _>>()?,
+      rest: rest
+        .as_ref()
+        .map(|rest| resolve_type_with_self(rest, vars, types, self_type).map(Box::new))
+        .transpose()?,
+      ret: Box::new(resolve_type_with_self(ret, vars, types, self_type)?),
+    }),
+  }
+}
+
+fn type_contains_var(ty: &Type) -> bool {
+  match prune(ty) {
+    Type::Var(_) => true,
+    Type::Cell(item) | Type::List(item) => type_contains_var(&item),
+    Type::Fn { params, rest, ret } => {
+      params.iter().any(type_contains_var)
+        || rest.as_ref().is_some_and(|rest| type_contains_var(rest))
+        || type_contains_var(&ret)
+    }
+    Type::Int
+    | Type::Float
+    | Type::String
+    | Type::Bool
+    | Type::Void
+    | Type::Struct(_)
+    | Type::Enum(_) => false,
+  }
+}
+
+fn type_key(ty: &Type) -> String {
+  match prune(ty) {
+    Type::Int => "Int".to_string(),
+    Type::Float => "Float".to_string(),
+    Type::String => "String".to_string(),
+    Type::Bool => "Bool".to_string(),
+    Type::Void => "Void".to_string(),
+    Type::Struct(name) | Type::Enum(name) => name,
+    Type::Cell(item) => format!("Cell_{}", type_key(&item)),
+    Type::List(item) => format!("List_{}", type_key(&item)),
+    Type::Fn { .. } => "Fn".to_string(),
+    Type::Var(_) => "Var".to_string(),
+  }
+}
+
+pub(crate) fn hidden_impl_method_name(
+  trait_name: &str,
+  target_key: &str,
+  method_name: &str,
+) -> String {
+  format!(
+    "__impl_{}_{}_{}",
+    sanitize_symbol(trait_name),
+    sanitize_symbol(target_key),
+    sanitize_symbol(method_name)
+  )
+}
+
+fn sanitize_symbol(value: &str) -> String {
+  value
+    .chars()
+    .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+    .collect()
+}
+
 fn collect_type_vars(
   ast: &TypeAst,
   names: &mut HashSet<String>,
@@ -1457,46 +2066,47 @@ fn collect_type_vars(
   Ok(())
 }
 
-fn parse_trait(name: &str) -> Result<Trait, TypeError> {
-  match name {
-    "Add" => Ok(Trait::Add),
-    "Sub" => Ok(Trait::Sub),
-    "Eq" => Ok(Trait::Eq),
-    "Concat" => Ok(Trait::Concat),
-    "Slice" => Ok(Trait::Slice),
-    _ => Err(TypeError::new(format!("unknown trait `{name}`"))),
-  }
+fn parse_trait(name: &str) -> Result<TraitName, TypeError> {
+  Ok(TraitName::new(name))
 }
 
-pub fn satisfies(ty: &Type, trait_: Trait) -> bool {
+fn builtin_satisfies(ty: &Type, trait_: &TraitName) -> bool {
   let ty = prune(ty);
-  if trait_ == Trait::Eq {
+  if trait_.as_str() == "Eq" {
     return true;
   }
-  match (&ty, trait_) {
-    (Type::Int | Type::Float, Trait::Add | Trait::Sub) => true,
-    (Type::String | Type::List(_), Trait::Concat | Trait::Slice) => true,
-    (Type::Var(var), required) => match &*var.borrow() {
-      TypeVar::Rigid { bounds, .. } | TypeVar::Unbound { bounds, .. } => bounds.contains(&required),
-      TypeVar::Link(link) => satisfies(link, required),
-    },
+  match (&ty, trait_.as_str()) {
+    (Type::Int | Type::Float, "Add" | "Sub") => true,
+    (Type::String | Type::List(_), "Concat" | "Slice") => true,
     _ => false,
   }
 }
 
 fn ensure_bounds_available(
-  required: &[Trait],
-  available: &[Trait],
+  required: &[TraitName],
+  available: &[TraitName],
   rigid_name: &str,
 ) -> Result<(), TypeError> {
   for required in required {
     if !available.contains(required) {
       return Err(TypeError::new(format!(
-        "type variable `{rigid_name}` requires trait `{required:?}` here, but its declared bounds are `{available:?}`"
+        "type variable `{rigid_name}` requires trait `{required}` here, but its declared bounds are `{}`",
+        display_bounds(available)
       )));
     }
   }
   Ok(())
+}
+
+fn display_bounds(bounds: &[TraitName]) -> String {
+  format!(
+    "[{}]",
+    bounds
+      .iter()
+      .map(TraitName::as_str)
+      .collect::<Vec<_>>()
+      .join(", ")
+  )
 }
 
 fn type_from_const(ty: &TypeConst, vars: &HashMap<String, TvRef>) -> Type {

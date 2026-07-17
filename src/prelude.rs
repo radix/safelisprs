@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::builtins::BuiltinSpec;
 use crate::parser::{
-  try_map_ast_children, ASTKind, BindingId, Function, Identifier, MatchArm, MatchPattern,
+  try_map_ast_children, ASTKind, BindingId, Function, Identifier, ImplDef, MatchArm, MatchPattern,
   ResolvedName, AST,
 };
 
@@ -64,6 +64,9 @@ impl Resolver<'_> {
         (ASTKind::DefineFn(function), Some(name)) => Ok(ast.with_kind(ASTKind::DefineFn(
           self.resolve_function(function, name, &module_scope)?,
         ))),
+        (ASTKind::DefineImpl(impl_), _) => Ok(ast.with_kind(ASTKind::DefineImpl(
+          self.resolve_impl(impl_, &module_scope)?,
+        ))),
         _ => Ok(ast.clone()),
       })
       .collect()
@@ -97,6 +100,19 @@ impl Resolver<'_> {
       return_type: function.return_type.clone(),
       bounds: function.bounds.clone(),
       code: self.resolve_sequence(&function.code, &mut scope)?,
+    })
+  }
+
+  fn resolve_impl(&mut self, impl_: &ImplDef, outer_scope: &Scope) -> Result<ImplDef, String> {
+    let mut methods = Vec::with_capacity(impl_.methods.len());
+    for method in &impl_.methods {
+      let name = self.fresh_name(method.name.as_str());
+      methods.push(self.resolve_function(method, name, outer_scope)?);
+    }
+    Ok(ImplDef {
+      trait_name: impl_.trait_name.clone(),
+      target: impl_.target.clone(),
+      methods,
     })
   }
 

@@ -257,10 +257,34 @@ fn declared_trait_bound_allows_polymorphic_builtin_use() {
 }
 
 #[test]
+fn user_trait_method_requires_impl_for_concrete_receiver() {
+  let error = check(
+    "(trait Foo (fn bar (x:Self) -> Int))
+     (fn main () ->Int (Foo::bar 1))",
+  )
+  .unwrap_err();
+  assert!(
+    error.message.contains("does not satisfy trait `Foo`"),
+    "{error}"
+  );
+}
+
+#[test]
+fn user_trait_bound_allows_polymorphic_trait_call() {
+  check(
+    "(trait Foo (fn bar (x:Self) -> Int))
+     (impl (Foo Int) (fn bar (x:Int) -> Int x))
+     (fn f (x:A) ->Int where ((A Foo)) (Foo::bar x))
+     (fn main () ->Int (f 3))",
+  )
+  .unwrap();
+}
+
+#[test]
 fn unbound_variable_bounds_are_merged() {
   let mut checker = Checker::new(std::iter::empty());
-  let add = checker.fresh(Some("add".to_string()), vec![Trait::Add]);
-  let sub = checker.fresh(Some("sub".to_string()), vec![Trait::Sub]);
+  let add = checker.fresh(Some("add".to_string()), vec![TraitName::new("Add")]);
+  let sub = checker.fresh(Some("sub".to_string()), vec![TraitName::new("Sub")]);
   checker.unify(add.clone(), sub).unwrap();
   let error = checker.unify(add, Type::String).unwrap_err();
   assert!(error.message.contains("does not satisfy trait"), "{error}");

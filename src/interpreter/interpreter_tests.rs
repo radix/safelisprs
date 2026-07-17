@@ -58,6 +58,21 @@ fn test_interpret_identity() {
 }
 
 #[test]
+fn user_trait_method_dispatch_executes_impl_method() {
+  let source = "
+    (trait Foo
+      (fn bar (x:Self y:Int) -> Int))
+    (impl (Foo Int)
+      (fn bar (x:Int y:Int) -> Int
+        (std::+ x y)))
+    (fn call-bar (x:A) ->Int where ((A Foo))
+      (Foo::bar x 4))
+    (fn main () ->Int
+      (std::+ (Foo::bar 3 2) (call-bar 5)))";
+  assert_eq!(eval_main(source), SLValue::Int(14));
+}
+
+#[test]
 fn std_eq_strings() {
   assert_eq!(
     eval_main("(fn main () ->Bool (std::== \"abc\" \"abc\"))"),
