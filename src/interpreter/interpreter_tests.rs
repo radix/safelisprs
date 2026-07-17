@@ -20,8 +20,7 @@ fn test_module(name: &str, functions: Vec<(String, LinkedCallable)>) -> LinkedMo
   LinkedModule {
     name: name.to_string(),
     functions,
-    structs: vec![],
-    enums: vec![],
+    types: vec![],
   }
 }
 

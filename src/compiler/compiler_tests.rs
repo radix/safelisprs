@@ -171,10 +171,13 @@ fn linked_struct_bytecode_uses_indices() {
     ]
   );
   assert_eq!(
-    package.modules[0].structs,
-    vec![StructDef {
+    package.modules[0].types,
+    vec![TypeDef {
       name: "Foo".to_string(),
-      fields: vec!["x".to_string(), "y".to_string()],
+      constructors: vec![ConstructorDef {
+        name: "Foo".to_string(),
+        fields: vec!["x".to_string(), "y".to_string()],
+      }],
     }]
   );
 }
@@ -203,15 +206,15 @@ fn linked_enum_bytecode_uses_indices() {
     ]
   );
   assert_eq!(
-    package.modules[0].enums,
-    vec![EnumDef {
+    package.modules[0].types,
+    vec![TypeDef {
       name: "Foo".to_string(),
-      variants: vec![
-        EnumVariantDef {
+      constructors: vec![
+        ConstructorDef {
           name: "Var1".to_string(),
           fields: vec![],
         },
-        EnumVariantDef {
+        ConstructorDef {
           name: "Var2".to_string(),
           fields: vec!["x".to_string(), "y".to_string()],
         },

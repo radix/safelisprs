@@ -1317,7 +1317,7 @@ impl<'gc> ExecRoot<'gc> {
         let enum_def = package
           .get_enum(enum_.0, enum_.1)
           .ok_or_else(|| format!("Enum not found: {}/{}", enum_.0, enum_.1))?;
-        let variant_def = enum_def.variants.get(variant as usize).ok_or_else(|| {
+        let variant_def = enum_def.constructors.get(variant as usize).ok_or_else(|| {
           format!(
             "enum variant index {} out of range for enum {}/{}",
             variant, enum_.0, enum_.1

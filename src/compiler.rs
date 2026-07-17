@@ -102,19 +102,13 @@ type LinkedInstruction = Instruction<(u32, u32), (u32, u32)>;
 type CompiledInstruction = Instruction<(String, String), (String, String)>;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct StructDef {
+pub struct TypeDef {
   pub name: String,
-  pub fields: Vec<String>,
+  pub constructors: Vec<ConstructorDef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct EnumDef {
-  pub name: String,
-  pub variants: Vec<EnumVariantDef>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct EnumVariantDef {
+pub struct ConstructorDef {
   pub name: String,
   pub fields: Vec<String>,
 }
@@ -123,8 +117,7 @@ pub struct EnumVariantDef {
 pub struct Module<CallType, StructType> {
   pub name: String,
   pub functions: Vec<(String, Callable<CallType, StructType>)>,
-  pub structs: Vec<StructDef>,
-  pub enums: Vec<EnumDef>,
+  pub types: Vec<TypeDef>,
 }
 
 type CompiledModule = Module<(String, String), (String, String)>;
@@ -135,8 +128,7 @@ pub type LinkedModules = Vec<LinkedModule>;
 struct ModuleIndexEntry {
   module: u32,
   functions: HashMap<String, u32>,
-  structs: HashMap<String, u32>,
-  enums: HashMap<String, u32>,
+  types: HashMap<String, u32>,
 }
 
 type ModuleIndex = HashMap<String, ModuleIndexEntry>;
@@ -182,18 +174,21 @@ impl Package {
       .map(|(_, f)| f)
   }
 
-  pub fn get_struct(&self, module: u32, struct_: u32) -> Option<&StructDef> {
+  pub fn get_type(&self, module: u32, type_: u32) -> Option<&TypeDef> {
     self
       .modules
       .get(module as usize)
-      .and_then(|m| m.structs.get(struct_ as usize))
+      .and_then(|m| m.types.get(type_ as usize))
   }
 
-  pub fn get_enum(&self, module: u32, enum_: u32) -> Option<&EnumDef> {
+  pub fn get_struct(&self, module: u32, struct_: u32) -> Option<&ConstructorDef> {
     self
-      .modules
-      .get(module as usize)
-      .and_then(|m| m.enums.get(enum_ as usize))
+      .get_type(module, struct_)
+      .and_then(|type_| type_.constructors.first())
+  }
+
+  pub fn get_enum(&self, module: u32, enum_: u32) -> Option<&TypeDef> {
+    self.get_type(module, enum_)
   }
 }
 
@@ -203,23 +198,17 @@ fn index_modules<'a>(modules: impl Iterator<Item = &'a CompiledModule>) -> Modul
     let mut entry = ModuleIndexEntry {
       module: mod_index as u32,
       functions: hashmap! {},
-      structs: hashmap! {},
-      enums: hashmap! {},
+      types: hashmap! {},
     };
     for (func_index, (func_name, _)) in module.functions.iter().enumerate() {
       entry
         .functions
         .insert(func_name.to_string(), func_index as u32);
     }
-    for (struct_index, struct_) in module.structs.iter().enumerate() {
+    for (type_index, type_) in module.types.iter().enumerate() {
       entry
-        .structs
-        .insert(struct_.name.to_string(), struct_index as u32);
-    }
-    for (enum_index, enum_) in module.enums.iter().enumerate() {
-      entry
-        .enums
-        .insert(enum_.name.to_string(), enum_index as u32);
+        .types
+        .insert(type_.name.to_string(), type_index as u32);
     }
     module_table.insert(module.name.to_string(), entry);
   }
@@ -248,8 +237,7 @@ fn link(module_table: &ModuleIndex, modules: CompiledModules) -> Result<LinkedMo
     result.push(LinkedModule {
       name: module.name,
       functions: new_functions,
-      structs: module.structs,
-      enums: module.enums,
+      types: module.types,
     });
   }
   Ok(result)
@@ -290,7 +278,7 @@ fn link_instruction(
     }
     Instruction::NewStruct((mod_name, struct_name)) => {
       let (mod_idx, struct_idx) =
-        find_struct(module_table, &mod_name, &struct_name).ok_or_else(|| {
+        find_type(module_table, &mod_name, &struct_name).ok_or_else(|| {
           format!(
             "Construction of undefined struct {}.{}",
             mod_name, struct_name
@@ -299,7 +287,7 @@ fn link_instruction(
       Instruction::NewStruct((mod_idx, struct_idx))
     }
     Instruction::NewEnum((mod_name, enum_name), variant) => {
-      let (mod_idx, enum_idx) = find_enum(module_table, &mod_name, &enum_name)
+      let (mod_idx, enum_idx) = find_type(module_table, &mod_name, &enum_name)
         .ok_or_else(|| format!("Construction of undefined enum {}.{}", mod_name, enum_name))?;
       Instruction::NewEnum((mod_idx, enum_idx), variant)
     }
@@ -340,21 +328,12 @@ fn find_function(
   })
 }
 
-fn find_struct(index: &ModuleIndex, module_name: &str, struct_name: &str) -> Option<(u32, u32)> {
+fn find_type(index: &ModuleIndex, module_name: &str, type_name: &str) -> Option<(u32, u32)> {
   index.get(module_name).and_then(|entry| {
     entry
-      .structs
-      .get(struct_name)
-      .map(|struct_index| (entry.module, *struct_index))
-  })
-}
-
-fn find_enum(index: &ModuleIndex, module_name: &str, enum_name: &str) -> Option<(u32, u32)> {
-  index.get(module_name).and_then(|entry| {
-    entry
-      .enums
-      .get(enum_name)
-      .map(|enum_index| (entry.module, *enum_index))
+      .types
+      .get(type_name)
+      .map(|type_index| (entry.module, *type_index))
   })
 }
 
@@ -368,40 +347,39 @@ fn compile_resolved_module(
 
 struct ModuleCompiler<'types> {
   module_name: String,
-  struct_indices: HashMap<String, usize>,
-  struct_defs: Vec<StructDef>,
-  enum_indices: HashMap<String, usize>,
-  enum_defs: Vec<EnumDef>,
+  type_indices: HashMap<String, usize>,
+  type_defs: Vec<TypeDef>,
   type_info: &'types TypecheckInfo,
 }
 
 impl<'types> ModuleCompiler<'types> {
   fn new(module_name: &str, asts: &[AST], type_info: &'types TypecheckInfo) -> Self {
-    let mut struct_indices = HashMap::new();
-    let mut struct_defs = vec![];
-    let mut enum_indices = HashMap::new();
-    let mut enum_defs = vec![];
+    let mut type_indices = HashMap::new();
+    let mut type_defs = vec![];
     for ast in asts {
       match &ast.kind {
         ASTKind::DefineStruct(struct_) => {
-          struct_indices.insert(struct_.name.clone(), struct_defs.len());
-          struct_defs.push(StructDef {
+          type_indices.insert(struct_.name.clone(), type_defs.len());
+          type_defs.push(TypeDef {
             name: struct_.name.clone(),
-            fields: struct_
-              .fields
-              .iter()
-              .map(|(field, _)| field.clone())
-              .collect(),
+            constructors: vec![ConstructorDef {
+              name: struct_.name.clone(),
+              fields: struct_
+                .fields
+                .iter()
+                .map(|(field, _)| field.clone())
+                .collect(),
+            }],
           });
         }
         ASTKind::DefineEnum(enum_) => {
-          enum_indices.insert(enum_.name.clone(), enum_defs.len());
-          enum_defs.push(EnumDef {
+          type_indices.insert(enum_.name.clone(), type_defs.len());
+          type_defs.push(TypeDef {
             name: enum_.name.clone(),
-            variants: enum_
+            constructors: enum_
               .variants
               .iter()
-              .map(|variant| EnumVariantDef {
+              .map(|variant| ConstructorDef {
                 name: variant.name.clone(),
                 fields: variant
                   .fields
@@ -417,10 +395,8 @@ impl<'types> ModuleCompiler<'types> {
     }
     Self {
       module_name: module_name.to_string(),
-      struct_indices,
-      struct_defs,
-      enum_indices,
-      enum_defs,
+      type_indices,
+      type_defs,
       type_info,
     }
   }
@@ -438,8 +414,7 @@ impl<'types> ModuleCompiler<'types> {
     Ok(CompiledModule {
       name: self.module_name,
       functions,
-      structs: self.struct_defs,
-      enums: self.enum_defs,
+      types: self.type_defs,
     })
   }
 
@@ -447,22 +422,23 @@ impl<'types> ModuleCompiler<'types> {
     FunctionCompiler::new(self, f).compile(f)
   }
 
-  fn struct_def(&self, name: &str) -> Result<&StructDef, String> {
+  fn struct_def(&self, name: &str) -> Result<&ConstructorDef, String> {
     self
-      .struct_indices
+      .type_indices
       .get(name)
-      .and_then(|index| self.struct_defs.get(*index))
+      .and_then(|index| self.type_defs.get(*index))
+      .and_then(|type_| type_.constructors.first())
       .ok_or_else(|| format!("unknown struct `{name}`"))
   }
 
-  fn enum_variant(&self, name: &str, variant: &str) -> Result<(u16, &EnumVariantDef), String> {
+  fn enum_variant(&self, name: &str, variant: &str) -> Result<(u16, &ConstructorDef), String> {
     let enum_ = self
-      .enum_indices
+      .type_indices
       .get(name)
-      .and_then(|index| self.enum_defs.get(*index))
+      .and_then(|index| self.type_defs.get(*index))
       .ok_or_else(|| format!("unknown enum `{name}`"))?;
     enum_
-      .variants
+      .constructors
       .iter()
       .enumerate()
       .find(|(_, candidate)| candidate.name == variant)
@@ -802,8 +778,7 @@ fn inject_builtin_specs(
         modules.push(CompiledModule {
           name: spec.module.to_string(),
           functions: vec![],
-          structs: vec![],
-          enums: vec![],
+          types: vec![],
         });
         &mut modules.last_mut().unwrap().functions
       }
