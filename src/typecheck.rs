@@ -167,7 +167,6 @@ pub struct FieldAccessInfo {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MatchInfo {
-  enum_type: String,
   arms: Vec<MatchArmInfo>,
 }
 
@@ -211,10 +210,6 @@ impl FieldAccessInfo {
 }
 
 impl MatchInfo {
-  pub fn enum_type(&self) -> &str {
-    &self.enum_type
-  }
-
   pub fn arms(&self) -> &[MatchArmInfo] {
     &self.arms
   }
@@ -795,13 +790,7 @@ impl Checker {
       )));
     }
 
-    self.matches.insert(
-      match_id,
-      MatchInfo {
-        enum_type: enum_name,
-        arms: arm_infos,
-      },
-    );
+    self.matches.insert(match_id, MatchInfo { arms: arm_infos });
 
     result.ok_or_else(|| TypeError::new("match must have at least one arm"))
   }
