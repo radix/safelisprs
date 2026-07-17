@@ -5,8 +5,8 @@ use std::rc::Rc;
 
 use crate::builtins::{BuiltinSignature, BuiltinSpec, Trait, TypeConst};
 use crate::parser::{
-  source_position, ASTKind, AstId, BindingId, Function, Identifier, ResolvedName, Span,
-  Struct as StructAst, TypeAst, AST,
+  source_position, ASTKind, AstId, BindingId, Enum as EnumAst, EnumVariant, Function, Identifier,
+  MatchArm, MatchPattern, ResolvedName, Span, Struct as StructAst, TypeAst, AST,
 };
 
 pub type TvRef = Rc<RefCell<TypeVar>>;
@@ -19,6 +19,7 @@ pub enum Type {
   Bool,
   Void,
   Struct(String),
+  Enum(String),
   Cell(Box<Type>),
   List(Box<Type>),
   Fn {
@@ -149,12 +150,28 @@ pub struct CheckedModule {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TypecheckInfo {
   field_accesses: HashMap<AstId, FieldAccessInfo>,
+  matches: HashMap<AstId, MatchInfo>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FieldAccessInfo {
   receiver_type: String,
   field_index: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatchInfo {
+  enum_type: String,
+  arms: Vec<MatchArmInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MatchArmInfo {
+  Variant {
+    variant_index: u16,
+    field_indices: Vec<u16>,
+  },
+  Default,
 }
 
 impl CheckedModule {
@@ -171,6 +188,10 @@ impl TypecheckInfo {
   pub fn field_access(&self, access: AstId) -> Option<&FieldAccessInfo> {
     self.field_accesses.get(&access)
   }
+
+  pub fn match_info(&self, match_: AstId) -> Option<&MatchInfo> {
+    self.matches.get(&match_)
+  }
 }
 
 impl FieldAccessInfo {
@@ -180,6 +201,16 @@ impl FieldAccessInfo {
 
   pub fn field_index(&self) -> u16 {
     self.field_index
+  }
+}
+
+impl MatchInfo {
+  pub fn enum_type(&self) -> &str {
+    &self.enum_type
+  }
+
+  pub fn arms(&self) -> &[MatchArmInfo] {
+    &self.arms
   }
 }
 
@@ -203,7 +234,9 @@ pub fn typecheck_named<'a>(
 struct Checker {
   schemes: HashMap<(String, String), FnScheme>,
   structs: HashMap<String, StructAst>,
+  enums: HashMap<String, EnumAst>,
   field_accesses: HashMap<AstId, FieldAccessInfo>,
+  matches: HashMap<AstId, MatchInfo>,
   next_var: usize,
   inference_vars: Vec<TvRef>,
 }
@@ -213,7 +246,9 @@ impl Checker {
     let mut checker = Self {
       schemes: HashMap::new(),
       structs: HashMap::new(),
+      enums: HashMap::new(),
       field_accesses: HashMap::new(),
+      matches: HashMap::new(),
       next_var: 0,
       inference_vars: Vec::new(),
     };
@@ -228,33 +263,54 @@ impl Checker {
 
   fn check(mut self, asts: &[AST]) -> Result<TypecheckInfo, TypeError> {
     for ast in asts {
-      if let ASTKind::DefineStruct(struct_) = &ast.kind {
-        if self.structs.contains_key(&struct_.name) {
-          return Err(
-            TypeError::new(format!("duplicate struct `{}`", struct_.name)).at(ast.span.clone()),
-          );
+      match &ast.kind {
+        ASTKind::DefineStruct(struct_) => {
+          if self.structs.contains_key(&struct_.name) || self.enums.contains_key(&struct_.name) {
+            return Err(
+              TypeError::new(format!("duplicate type `{}`", struct_.name)).at(ast.span.clone()),
+            );
+          }
+          self.structs.insert(struct_.name.clone(), struct_.clone());
         }
-        self.structs.insert(struct_.name.clone(), struct_.clone());
+        ASTKind::DefineEnum(enum_) => {
+          if self.structs.contains_key(&enum_.name) || self.enums.contains_key(&enum_.name) {
+            return Err(
+              TypeError::new(format!("duplicate type `{}`", enum_.name)).at(ast.span.clone()),
+            );
+          }
+          self.enums.insert(enum_.name.clone(), enum_.clone());
+        }
+        _ => {}
       };
     }
 
     for ast in asts {
-      if let ASTKind::DefineStruct(struct_) = &ast.kind {
-        self.validate_struct(struct_).map_err(|error| {
-          error
-            .context(format!("in struct `{}`", struct_.name))
-            .at(ast.span.clone())
-        })?;
+      match &ast.kind {
+        ASTKind::DefineStruct(struct_) => {
+          self.validate_struct(struct_).map_err(|error| {
+            error
+              .context(format!("in struct `{}`", struct_.name))
+              .at(ast.span.clone())
+          })?;
+        }
+        ASTKind::DefineEnum(enum_) => {
+          self.validate_enum(enum_).map_err(|error| {
+            error
+              .context(format!("in enum `{}`", enum_.name))
+              .at(ast.span.clone())
+          })?;
+        }
+        _ => {}
       }
     }
 
     for ast in asts {
       let ASTKind::DefineFn(function) = &ast.kind else {
-        if matches!(ast.kind, ASTKind::DefineStruct(_)) {
+        if matches!(ast.kind, ASTKind::DefineStruct(_) | ASTKind::DefineEnum(_)) {
           continue;
         }
         return Err(
-          TypeError::new("only function and struct definitions are allowed at top level")
+          TypeError::new("only function, struct, and enum definitions are allowed at top level")
             .at(ast.span.clone()),
         );
       };
@@ -286,6 +342,7 @@ impl Checker {
     }
     Ok(TypecheckInfo {
       field_accesses: self.field_accesses,
+      matches: self.matches,
     })
   }
 
@@ -294,6 +351,34 @@ impl Checker {
     for (field, ty) in &struct_.fields {
       if !seen.insert(field) {
         return Err(TypeError::new(format!("duplicate field `{field}`")));
+      }
+      self.resolve_type(ty, &HashMap::new())?;
+    }
+    Ok(())
+  }
+
+  fn validate_enum(&self, enum_: &EnumAst) -> Result<(), TypeError> {
+    let mut seen_variants = HashSet::new();
+    for variant in &enum_.variants {
+      if !seen_variants.insert(variant.name.as_str()) {
+        return Err(TypeError::new(format!(
+          "duplicate variant `{}`",
+          variant.name
+        )));
+      }
+      self.validate_enum_variant(enum_, variant)?;
+    }
+    Ok(())
+  }
+
+  fn validate_enum_variant(&self, enum_: &EnumAst, variant: &EnumVariant) -> Result<(), TypeError> {
+    let mut seen_fields = HashSet::new();
+    for (field, ty) in &variant.fields {
+      if !seen_fields.insert(field) {
+        return Err(TypeError::new(format!(
+          "duplicate field `{field}` in variant `{}::{}`",
+          enum_.name, variant.name
+        )));
       }
       self.resolve_type(ty, &HashMap::new())?;
     }
@@ -461,9 +546,15 @@ impl Checker {
         self.infer_fixed_call(env, type_vars, identifier, args)
       }
       ASTKind::NewStruct(name, fields) => self.infer_new_struct(env, type_vars, name, fields),
+      ASTKind::NewEnum(name, variant, fields) => {
+        self.infer_new_enum(env, type_vars, name, variant, fields)
+      }
       ASTKind::FieldAccess(receiver, field) => {
         let receiver = self.infer(env, type_vars, receiver)?;
         self.field_type(ast.id(), receiver, field)
+      }
+      ASTKind::Match(scrutinee, arms) => {
+        self.infer_match(env, type_vars, ast.id(), scrutinee, arms)
       }
       ASTKind::If(condition, then_branch, else_branch) => {
         let condition_type = self.infer(env, type_vars, condition)?;
@@ -486,6 +577,9 @@ impl Checker {
       )),
       ASTKind::DefineStruct(_) => Err(TypeError::new(
         "struct definitions are only allowed at top level",
+      )),
+      ASTKind::DefineEnum(_) => Err(TypeError::new(
+        "enum definitions are only allowed at top level",
       )),
     }
   }
@@ -530,6 +624,190 @@ impl Checker {
       }
     }
     Ok(Type::Struct(name.to_string()))
+  }
+
+  fn infer_new_enum(
+    &mut self,
+    env: &mut Env,
+    type_vars: &TypeVars,
+    name: &str,
+    variant: &str,
+    fields: &[(String, AST)],
+  ) -> Result<Type, TypeError> {
+    let enum_ = self
+      .enums
+      .get(name)
+      .cloned()
+      .ok_or_else(|| TypeError::new(format!("unknown enum `{name}`")))?;
+    let variant = enum_
+      .variants
+      .iter()
+      .find(|candidate| candidate.name == variant)
+      .ok_or_else(|| TypeError::new(format!("unknown variant `{variant}` for enum `{name}`")))?;
+    let mut provided = HashSet::new();
+    for (field, expr) in fields {
+      if !provided.insert(field.as_str()) {
+        return Err(TypeError::new(format!(
+          "duplicate initializer for field `{field}`"
+        )));
+      }
+      let expected = variant
+        .fields
+        .iter()
+        .find(|(expected, _)| expected == field)
+        .ok_or_else(|| {
+          TypeError::new(format!(
+            "unknown field `{field}` for variant `{name}::{}`",
+            variant.name
+          ))
+        })?;
+      let actual = self.infer(env, type_vars, expr)?;
+      let expected = self.resolve_type(&expected.1, type_vars)?;
+      self.unify(actual, expected).map_err(|error| {
+        error.at(expr.span.clone()).context(format!(
+          "while checking field `{field}` of `{name}::{}`",
+          variant.name
+        ))
+      })?;
+    }
+    for (field, _) in &variant.fields {
+      if !provided.contains(field.as_str()) {
+        return Err(TypeError::new(format!(
+          "missing initializer for field `{field}` of `{name}::{}`",
+          variant.name
+        )));
+      }
+    }
+    Ok(Type::Enum(name.to_string()))
+  }
+
+  fn infer_match(
+    &mut self,
+    env: &mut Env,
+    type_vars: &TypeVars,
+    match_id: AstId,
+    scrutinee: &AST,
+    arms: &[MatchArm],
+  ) -> Result<Type, TypeError> {
+    let scrutinee_type = self.infer(env, type_vars, scrutinee)?;
+    let enum_name = match prune(&scrutinee_type) {
+      Type::Enum(name) => name,
+      other => {
+        return Err(TypeError::new(format!(
+          "match expected an enum, got `{}`",
+          display_type(&other)
+        )))
+      }
+    };
+    let enum_ = self
+      .enums
+      .get(&enum_name)
+      .cloned()
+      .ok_or_else(|| TypeError::new(format!("unknown enum `{enum_name}`")))?;
+
+    let mut seen_variants = HashSet::new();
+    let mut seen_default = false;
+    let mut result: Option<Type> = None;
+    let mut arm_infos = Vec::with_capacity(arms.len());
+
+    for (arm_index, arm) in arms.iter().enumerate() {
+      let mut arm_env = env.clone();
+      match &arm.pattern {
+        MatchPattern::Variant { variant, fields } => {
+          if seen_default {
+            return Err(
+              TypeError::new("variant match arm after default arm is unreachable")
+                .at(arm.body.span.clone()),
+            );
+          }
+          let (variant_index, variant_def) = enum_
+            .variants
+            .iter()
+            .enumerate()
+            .find(|(_, candidate)| candidate.name == *variant)
+            .ok_or_else(|| {
+              TypeError::new(format!(
+                "unknown variant `{variant}` for enum `{enum_name}`"
+              ))
+            })?;
+          if !seen_variants.insert(variant.as_str()) {
+            return Err(TypeError::new(format!(
+              "duplicate match arm for variant `{enum_name}::{variant}`"
+            )));
+          }
+          let mut seen_fields = HashSet::new();
+          let mut field_indices = Vec::with_capacity(fields.len());
+          for binding in fields {
+            if !seen_fields.insert(binding.as_str()) {
+              return Err(TypeError::new(format!(
+                "duplicate match binding for field `{}` in `{enum_name}::{variant}`",
+                binding.as_str()
+              )));
+            }
+            let (field_index, (_, field_type)) = variant_def
+              .fields
+              .iter()
+              .enumerate()
+              .find(|(_, (field, _))| field == binding.as_str())
+              .ok_or_else(|| {
+                TypeError::new(format!(
+                  "variant `{enum_name}::{variant}` has no field `{}`",
+                  binding.as_str()
+                ))
+              })?;
+            let field_index = u16::try_from(field_index).map_err(|_| {
+              TypeError::new(format!(
+                "variant `{enum_name}::{variant}` has too many fields"
+              ))
+            })?;
+            let field_type = self.resolve_type(field_type, &HashMap::new())?;
+            arm_env.insert(binding.binding, Binding::Mono(field_type));
+            field_indices.push(field_index);
+          }
+          let variant_index = u16::try_from(variant_index)
+            .map_err(|_| TypeError::new(format!("enum `{enum_name}` has too many variants")))?;
+          arm_infos.push(MatchArmInfo::Variant {
+            variant_index,
+            field_indices,
+          });
+        }
+        MatchPattern::Default => {
+          if seen_default {
+            return Err(TypeError::new("duplicate default match arm"));
+          }
+          seen_default = true;
+          if arm_index + 1 != arms.len() {
+            return Err(TypeError::new("default match arm must be last"));
+          }
+          arm_infos.push(MatchArmInfo::Default);
+        }
+      }
+
+      let arm_type = self.infer(&mut arm_env, type_vars, &arm.body)?;
+      if let Some(result) = &result {
+        self
+          .unify(arm_type, result.clone())
+          .map_err(|error| error.at(arm.body.span.clone()))?;
+      } else {
+        result = Some(arm_type);
+      }
+    }
+
+    if !seen_default && seen_variants.len() != enum_.variants.len() {
+      return Err(TypeError::new(format!(
+        "non-exhaustive match on enum `{enum_name}`"
+      )));
+    }
+
+    self.matches.insert(
+      match_id,
+      MatchInfo {
+        enum_type: enum_name,
+        arms: arm_infos,
+      },
+    );
+
+    result.ok_or_else(|| TypeError::new("match must have at least one arm"))
   }
 
   fn field_type(&mut self, access: AstId, receiver: Type, field: &str) -> Result<Type, TypeError> {
@@ -802,6 +1080,7 @@ impl Checker {
       | (Type::Bool, Type::Bool)
       | (Type::Void, Type::Void) => Ok(()),
       (Type::Struct(a), Type::Struct(b)) if a == b => Ok(()),
+      (Type::Enum(a), Type::Enum(b)) if a == b => Ok(()),
       (Type::Cell(a), Type::Cell(b)) | (Type::List(a), Type::List(b)) => self.unify(*a, *b),
       (
         Type::Fn {
@@ -998,11 +1277,11 @@ impl Checker {
   }
 
   fn resolve_type(&self, ast: &TypeAst, vars: &TypeVars) -> Result<Type, TypeError> {
-    resolve_type(ast, vars, &self.structs)
+    resolve_type(ast, vars, &self.structs, &self.enums)
   }
 
   fn collect_type_vars(&self, ast: &TypeAst, names: &mut HashSet<String>) -> Result<(), TypeError> {
-    collect_type_vars(ast, names, &self.structs)
+    collect_type_vars(ast, names, &self.structs, &self.enums)
   }
 }
 
@@ -1070,6 +1349,7 @@ fn types_equivalent(left: &Type, right: &Type) -> bool {
     | (Type::Bool, Type::Bool)
     | (Type::Void, Type::Void) => true,
     (Type::Struct(left), Type::Struct(right)) => left == right,
+    (Type::Enum(left), Type::Enum(right)) => left == right,
     (Type::Cell(left), Type::Cell(right)) | (Type::List(left), Type::List(right)) => {
       types_equivalent(&left, &right)
     }
@@ -1106,6 +1386,7 @@ fn resolve_type(
   ast: &TypeAst,
   vars: &TypeVars,
   structs: &HashMap<String, StructAst>,
+  enums: &HashMap<String, EnumAst>,
 ) -> Result<Type, TypeError> {
   match ast {
     TypeAst::Named(name) => match name.as_str() {
@@ -1118,6 +1399,7 @@ fn resolve_type(
         "type constructor `{name}` requires arguments"
       ))),
       _ if structs.contains_key(name) => Ok(Type::Struct(name.clone())),
+      _ if enums.contains_key(name) => Ok(Type::Enum(name.clone())),
       _ => vars
         .get(name)
         .cloned()
@@ -1125,8 +1407,12 @@ fn resolve_type(
         .ok_or_else(|| TypeError::new(format!("unknown type `{name}`"))),
     },
     TypeAst::Apply(name, args) => match (name.as_str(), args.as_slice()) {
-      ("List", [item]) => Ok(Type::List(Box::new(resolve_type(item, vars, structs)?))),
-      ("Cell", [item]) => Ok(Type::Cell(Box::new(resolve_type(item, vars, structs)?))),
+      ("List", [item]) => Ok(Type::List(Box::new(resolve_type(
+        item, vars, structs, enums,
+      )?))),
+      ("Cell", [item]) => Ok(Type::Cell(Box::new(resolve_type(
+        item, vars, structs, enums,
+      )?))),
       ("List" | "Cell", _) => Err(TypeError::new(format!(
         "type constructor `{name}` expects one argument, got {}",
         args.len()
@@ -1136,13 +1422,13 @@ fn resolve_type(
     TypeAst::Fn(params, rest, ret) => Ok(Type::Fn {
       params: params
         .iter()
-        .map(|param| resolve_type(param, vars, structs))
+        .map(|param| resolve_type(param, vars, structs, enums))
         .collect::<Result<Vec<_>, _>>()?,
       rest: rest
         .as_ref()
-        .map(|rest| resolve_type(rest, vars, structs).map(Box::new))
+        .map(|rest| resolve_type(rest, vars, structs, enums).map(Box::new))
         .transpose()?,
-      ret: Box::new(resolve_type(ret, vars, structs)?),
+      ret: Box::new(resolve_type(ret, vars, structs, enums)?),
     }),
   }
 }
@@ -1151,6 +1437,7 @@ fn collect_type_vars(
   ast: &TypeAst,
   names: &mut HashSet<String>,
   structs: &HashMap<String, StructAst>,
+  enums: &HashMap<String, EnumAst>,
 ) -> Result<(), TypeError> {
   match ast {
     TypeAst::Named(name) => match name.as_str() {
@@ -1161,6 +1448,7 @@ fn collect_type_vars(
         )))
       }
       _ if structs.contains_key(name) => {}
+      _ if enums.contains_key(name) => {}
       _ if name.chars().next().is_some_and(char::is_uppercase) => {
         names.insert(name.clone());
       }
@@ -1176,16 +1464,16 @@ fn collect_type_vars(
           args.len()
         )));
       }
-      collect_type_vars(&args[0], names, structs)?;
+      collect_type_vars(&args[0], names, structs, enums)?;
     }
     TypeAst::Fn(params, rest, ret) => {
       for param in params {
-        collect_type_vars(param, names, structs)?;
+        collect_type_vars(param, names, structs, enums)?;
       }
       if let Some(rest) = rest {
-        collect_type_vars(rest, names, structs)?;
+        collect_type_vars(rest, names, structs, enums)?;
       }
-      collect_type_vars(ret, names, structs)?;
+      collect_type_vars(ret, names, structs, enums)?;
     }
   }
   Ok(())
@@ -1323,6 +1611,7 @@ fn display_type(ty: &Type) -> String {
     Type::Bool => "Bool".to_string(),
     Type::Void => "Void".to_string(),
     Type::Struct(name) => name,
+    Type::Enum(name) => name,
     Type::Cell(item) => format!("(Cell {})", display_type(&item)),
     Type::List(item) => format!("(List {})", display_type(&item)),
     Type::Fn { params, rest, ret } => {

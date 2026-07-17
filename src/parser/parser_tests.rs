@@ -1,4 +1,3 @@
-
 use super::*;
 
 #[test]
@@ -155,6 +154,81 @@ fn parses_variadic_function_type() {
       ))
     ))
   );
+}
+
+#[test]
+fn parses_enum_definitions_and_construction() {
+  let asts = read_multiple(
+    "(enum Foo
+       (Var1)
+       (Var2 x:Int)
+       (Var3 y:String z:(Cell Int)))
+     (fn main () ->Foo (new Foo::Var2 x:3))",
+  )
+  .unwrap();
+
+  let ASTKind::DefineEnum(enum_) = &asts[0].kind else {
+    panic!("expected enum definition");
+  };
+  assert_eq!(enum_.name, "Foo");
+  assert_eq!(enum_.variants.len(), 3);
+  assert_eq!(enum_.variants[0].name, "Var1");
+  assert!(enum_.variants[0].fields.is_empty());
+  assert_eq!(
+    enum_.variants[2].fields,
+    vec![
+      ("y".to_string(), TypeAst::Named("String".to_string())),
+      (
+        "z".to_string(),
+        TypeAst::Apply("Cell".to_string(), vec![TypeAst::Named("Int".to_string())])
+      )
+    ]
+  );
+
+  let ASTKind::DefineFn(main) = &asts[1].kind else {
+    panic!("expected function");
+  };
+  assert!(matches!(
+    main.code[0].kind,
+    ASTKind::NewEnum(ref enum_name, ref variant, _)
+      if enum_name == "Foo" && variant == "Var2"
+  ));
+}
+
+#[test]
+fn parses_match_with_variant_and_default_arms() {
+  let asts = read_multiple(
+    "(fn main (foo:Foo) ->Int
+       (match foo
+         (Var1) => 1
+         (Var2 x) => x
+         _ => 5))",
+  )
+  .unwrap();
+
+  let ASTKind::DefineFn(main) = &asts[0].kind else {
+    panic!("expected function");
+  };
+  let ASTKind::Match(scrutinee, arms) = &main.code[0].kind else {
+    panic!("expected match");
+  };
+  assert!(matches!(scrutinee.kind, ASTKind::Variable(_)));
+  assert_eq!(arms.len(), 3);
+  assert_eq!(
+    arms[0].pattern,
+    MatchPattern::Variant {
+      variant: "Var1".to_string(),
+      fields: vec![],
+    }
+  );
+  assert_eq!(
+    arms[1].pattern,
+    MatchPattern::Variant {
+      variant: "Var2".to_string(),
+      fields: vec!["x".into()],
+    }
+  );
+  assert_eq!(arms[2].pattern, MatchPattern::Default);
 }
 
 #[test]

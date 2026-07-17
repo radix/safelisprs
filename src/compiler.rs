@@ -2,9 +2,9 @@ use std::collections::HashMap;
 
 use crate::builtins::BuiltinSpec;
 use crate::closure::transform_closures_in_module;
-use crate::parser::{self, ASTKind, BindingId, Identifier, AST};
+use crate::parser::{self, ASTKind, BindingId, Identifier, MatchPattern, ResolvedName, AST};
 use crate::prelude::resolve_module_names;
-use crate::typecheck::{CheckedModule, TypecheckInfo};
+use crate::typecheck::{CheckedModule, MatchArmInfo, TypecheckInfo};
 
 /// A Package can either represent a "program" or a "library".
 /// If a `main` is provided, then it can be executed as a program directly.
@@ -56,8 +56,15 @@ pub enum Instruction<CallType, StructType> {
   PushVoid,
   /// Pop all declared fields and allocate a heap-backed struct instance.
   NewStruct(StructType),
+  /// Pop all variant fields and allocate a heap-backed enum instance.
+  NewEnum(StructType, u16),
   /// Pop a struct value and push the field at this declaration-order offset.
   GetField(u16),
+  /// Pop an enum value and push whether it has this variant index.
+  // GetEnumVariant would be more flexible but less performant...
+  IsEnumVariant(u16),
+  /// Pop an enum value and push the field at this variant-field offset.
+  GetEnumField(u16),
   /// discards topmost stack item
   Pop,
   /// Call the function at `(module, function)` in the function table.
@@ -101,10 +108,23 @@ pub struct StructDef {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EnumDef {
+  pub name: String,
+  pub variants: Vec<EnumVariantDef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EnumVariantDef {
+  pub name: String,
+  pub fields: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Module<CallType, StructType> {
   pub name: String,
   pub functions: Vec<(String, Callable<CallType, StructType>)>,
   pub structs: Vec<StructDef>,
+  pub enums: Vec<EnumDef>,
 }
 
 type CompiledModule = Module<(String, String), (String, String)>;
@@ -116,6 +136,7 @@ struct ModuleIndexEntry {
   module: u32,
   functions: HashMap<String, u32>,
   structs: HashMap<String, u32>,
+  enums: HashMap<String, u32>,
 }
 
 type ModuleIndex = HashMap<String, ModuleIndexEntry>;
@@ -167,6 +188,13 @@ impl Package {
       .get(module as usize)
       .and_then(|m| m.structs.get(struct_ as usize))
   }
+
+  pub fn get_enum(&self, module: u32, enum_: u32) -> Option<&EnumDef> {
+    self
+      .modules
+      .get(module as usize)
+      .and_then(|m| m.enums.get(enum_ as usize))
+  }
 }
 
 fn index_modules<'a>(modules: impl Iterator<Item = &'a CompiledModule>) -> ModuleIndex {
@@ -176,6 +204,7 @@ fn index_modules<'a>(modules: impl Iterator<Item = &'a CompiledModule>) -> Modul
       module: mod_index as u32,
       functions: hashmap! {},
       structs: hashmap! {},
+      enums: hashmap! {},
     };
     for (func_index, (func_name, _)) in module.functions.iter().enumerate() {
       entry
@@ -186,6 +215,11 @@ fn index_modules<'a>(modules: impl Iterator<Item = &'a CompiledModule>) -> Modul
       entry
         .structs
         .insert(struct_.name.to_string(), struct_index as u32);
+    }
+    for (enum_index, enum_) in module.enums.iter().enumerate() {
+      entry
+        .enums
+        .insert(enum_.name.to_string(), enum_index as u32);
     }
     module_table.insert(module.name.to_string(), entry);
   }
@@ -215,6 +249,7 @@ fn link(module_table: &ModuleIndex, modules: CompiledModules) -> Result<LinkedMo
       name: module.name,
       functions: new_functions,
       structs: module.structs,
+      enums: module.enums,
     });
   }
   Ok(result)
@@ -263,6 +298,11 @@ fn link_instruction(
         })?;
       Instruction::NewStruct((mod_idx, struct_idx))
     }
+    Instruction::NewEnum((mod_name, enum_name), variant) => {
+      let (mod_idx, enum_idx) = find_enum(module_table, &mod_name, &enum_name)
+        .ok_or_else(|| format!("Construction of undefined enum {}.{}", mod_name, enum_name))?;
+      Instruction::NewEnum((mod_idx, enum_idx), variant)
+    }
 
     // Here's what I want to say:
     // x => Ok(x),
@@ -277,6 +317,8 @@ fn link_instruction(
     Instruction::PushBool(b) => Instruction::PushBool(b),
     Instruction::PushVoid => Instruction::PushVoid,
     Instruction::GetField(field) => Instruction::GetField(field),
+    Instruction::IsEnumVariant(variant) => Instruction::IsEnumVariant(variant),
+    Instruction::GetEnumField(field) => Instruction::GetEnumField(field),
     Instruction::Pop => Instruction::Pop,
     Instruction::Return => Instruction::Return,
     Instruction::PartialApply(size) => Instruction::PartialApply(size),
@@ -307,6 +349,15 @@ fn find_struct(index: &ModuleIndex, module_name: &str, struct_name: &str) -> Opt
   })
 }
 
+fn find_enum(index: &ModuleIndex, module_name: &str, enum_name: &str) -> Option<(u32, u32)> {
+  index.get(module_name).and_then(|entry| {
+    entry
+      .enums
+      .get(enum_name)
+      .map(|enum_index| (entry.module, *enum_index))
+  })
+}
+
 fn compile_resolved_module(
   module_name: &str,
   checked: &CheckedModule,
@@ -319,6 +370,8 @@ struct ModuleCompiler<'types> {
   module_name: String,
   struct_indices: HashMap<String, usize>,
   struct_defs: Vec<StructDef>,
+  enum_indices: HashMap<String, usize>,
+  enum_defs: Vec<EnumDef>,
   type_info: &'types TypecheckInfo,
 }
 
@@ -326,23 +379,48 @@ impl<'types> ModuleCompiler<'types> {
   fn new(module_name: &str, asts: &[AST], type_info: &'types TypecheckInfo) -> Self {
     let mut struct_indices = HashMap::new();
     let mut struct_defs = vec![];
+    let mut enum_indices = HashMap::new();
+    let mut enum_defs = vec![];
     for ast in asts {
-      if let ASTKind::DefineStruct(struct_) = &ast.kind {
-        struct_indices.insert(struct_.name.clone(), struct_defs.len());
-        struct_defs.push(StructDef {
-          name: struct_.name.clone(),
-          fields: struct_
-            .fields
-            .iter()
-            .map(|(field, _)| field.clone())
-            .collect(),
-        });
+      match &ast.kind {
+        ASTKind::DefineStruct(struct_) => {
+          struct_indices.insert(struct_.name.clone(), struct_defs.len());
+          struct_defs.push(StructDef {
+            name: struct_.name.clone(),
+            fields: struct_
+              .fields
+              .iter()
+              .map(|(field, _)| field.clone())
+              .collect(),
+          });
+        }
+        ASTKind::DefineEnum(enum_) => {
+          enum_indices.insert(enum_.name.clone(), enum_defs.len());
+          enum_defs.push(EnumDef {
+            name: enum_.name.clone(),
+            variants: enum_
+              .variants
+              .iter()
+              .map(|variant| EnumVariantDef {
+                name: variant.name.clone(),
+                fields: variant
+                  .fields
+                  .iter()
+                  .map(|(field, _)| field.clone())
+                  .collect(),
+              })
+              .collect(),
+          });
+        }
+        _ => {}
       }
     }
     Self {
       module_name: module_name.to_string(),
       struct_indices,
       struct_defs,
+      enum_indices,
+      enum_defs,
       type_info,
     }
   }
@@ -352,6 +430,7 @@ impl<'types> ModuleCompiler<'types> {
     for ast in asts {
       match &ast.kind {
         ASTKind::DefineStruct(_) => {}
+        ASTKind::DefineEnum(_) => {}
         ASTKind::DefineFn(func) => functions.push(self.compile_function(func)?),
         x => return Err(format!("Unexpected form at top-level: {:?}", x)),
       };
@@ -360,6 +439,7 @@ impl<'types> ModuleCompiler<'types> {
       name: self.module_name,
       functions,
       structs: self.struct_defs,
+      enums: self.enum_defs,
     })
   }
 
@@ -373,6 +453,26 @@ impl<'types> ModuleCompiler<'types> {
       .get(name)
       .and_then(|index| self.struct_defs.get(*index))
       .ok_or_else(|| format!("unknown struct `{name}`"))
+  }
+
+  fn enum_variant(&self, name: &str, variant: &str) -> Result<(u16, &EnumVariantDef), String> {
+    let enum_ = self
+      .enum_indices
+      .get(name)
+      .and_then(|index| self.enum_defs.get(*index))
+      .ok_or_else(|| format!("unknown enum `{name}`"))?;
+    enum_
+      .variants
+      .iter()
+      .enumerate()
+      .find(|(_, candidate)| candidate.name == variant)
+      .map(|(index, variant)| {
+        u16::try_from(index)
+          .map(|index| (index, variant))
+          .map_err(|_| format!("enum `{name}` has too many variants"))
+      })
+      .transpose()?
+      .ok_or_else(|| format!("unknown variant `{variant}` for enum `{name}`"))
   }
 }
 
@@ -451,6 +551,23 @@ impl<'module, 'types> FunctionCompiler<'module, 'types> {
     }
   }
 
+  fn ensure_local(&mut self, name: &ResolvedName) -> Result<u16, String> {
+    if !self.locals.contains_key(&name.binding) {
+      let index =
+        u16::try_from(self.locals.len()).map_err(|_| "function has too many locals".to_string())?;
+      self.locals.insert(name.binding, index);
+    }
+    Ok(*self.locals.get(&name.binding).expect("local was inserted"))
+  }
+
+  fn alloc_temp_local(&mut self) -> Result<u16, String> {
+    let index =
+      u16::try_from(self.locals.len()).map_err(|_| "function has too many locals".to_string())?;
+    let synthetic = BindingId::synthetic(u32::from(index));
+    self.locals.insert(synthetic, index);
+    Ok(index)
+  }
+
   /// Compile `ast` into instructions.
   fn compile_expr(&mut self, ast: &AST) -> Result<(), String> {
     match &ast.kind {
@@ -482,14 +599,8 @@ impl<'module, 'types> FunctionCompiler<'module, 'types> {
         self.emit(Instruction::MakeFunctionRef((module.clone(), name.clone())));
       }
       ASTKind::Let(name, _, expression) => {
-        if !self.locals.contains_key(&name.binding) {
-          self.locals.insert(name.binding, self.locals.len() as u16);
-        }
+        let local_index = self.ensure_local(name)?;
         self.compile_expr(expression)?;
-        let local_index = *self
-          .locals
-          .get(&name.binding)
-          .expect("local was inserted above");
         self.emit(Instruction::SetLocal(local_index));
         self.emit(Instruction::LoadLocal(local_index));
       }
@@ -516,6 +627,24 @@ impl<'module, 'types> FunctionCompiler<'module, 'types> {
           name.clone(),
         )));
       }
+      ASTKind::NewEnum(name, variant, fields) => {
+        let (variant_index, variant_def) = self.module.enum_variant(name, variant)?;
+        let field_names = variant_def.fields.clone();
+        for field_name in field_names {
+          let expression = fields
+            .iter()
+            .find(|(field, _)| field == &field_name)
+            .map(|(_, expression)| expression)
+            .ok_or_else(|| {
+              format!("missing initializer for field `{field_name}` of `{name}::{variant}`")
+            })?;
+          self.compile_expr(expression)?;
+        }
+        self.emit(Instruction::NewEnum(
+          (self.module.module_name.clone(), name.clone()),
+          variant_index,
+        ));
+      }
       ASTKind::FieldAccess(receiver, _) => {
         let field_index = self
           .module
@@ -525,6 +654,53 @@ impl<'module, 'types> FunctionCompiler<'module, 'types> {
           .ok_or_else(|| format!("field access has no typechecking information: {ast:?}"))?;
         self.compile_expr(receiver)?;
         self.emit(Instruction::GetField(field_index));
+      }
+      ASTKind::Match(scrutinee, arms) => {
+        let match_info = self
+          .module
+          .type_info
+          .match_info(ast.id())
+          .ok_or_else(|| format!("match has no typechecking information: {ast:?}"))?
+          .clone();
+        let scrutinee_local = self.alloc_temp_local()?;
+        self.compile_expr(scrutinee)?;
+        self.emit(Instruction::SetLocal(scrutinee_local));
+
+        let mut end_jumps = Vec::new();
+        for (arm, arm_info) in arms.iter().zip(match_info.arms()) {
+          match (&arm.pattern, arm_info) {
+            (
+              MatchPattern::Variant { variant: _, fields },
+              MatchArmInfo::Variant {
+                variant_index,
+                field_indices,
+              },
+            ) => {
+              self.emit(Instruction::LoadLocal(scrutinee_local));
+              self.emit(Instruction::IsEnumVariant(*variant_index));
+              let next_arm_jump = self.emit(Instruction::JumpIfFalse(0));
+              for (field, field_index) in fields.iter().zip(field_indices) {
+                let local_index = self.ensure_local(field)?;
+                self.emit(Instruction::LoadLocal(scrutinee_local));
+                self.emit(Instruction::GetEnumField(*field_index));
+                self.emit(Instruction::SetLocal(local_index));
+              }
+              self.compile_expr(&arm.body)?;
+              end_jumps.push(self.emit(Instruction::Jump(0)));
+              self.patch_jump_to_here(next_arm_jump)?;
+            }
+            (MatchPattern::Default, MatchArmInfo::Default) => {
+              self.compile_expr(&arm.body)?;
+              end_jumps.push(self.emit(Instruction::Jump(0)));
+            }
+            _ => {
+              return Err("match pattern and typechecking metadata disagree".to_string());
+            }
+          }
+        }
+        for jump in end_jumps {
+          self.patch_jump_to_here(jump)?;
+        }
       }
       ASTKind::If(condition, then_branch, else_branch) => {
         // Emit placeholder jumps, then patch their relative offsets once both
@@ -562,6 +738,7 @@ impl<'module, 'types> FunctionCompiler<'module, 'types> {
       ASTKind::DefineStruct(_) => {
         return Err("Unexpected struct definition in expression".to_string())
       }
+      ASTKind::DefineEnum(_) => return Err("Unexpected enum definition in expression".to_string()),
       kind => return Err(format!("Unexpected form at top-level: {kind:?}")),
     }
     Ok(())
@@ -626,6 +803,7 @@ fn inject_builtin_specs(
           name: spec.module.to_string(),
           functions: vec![],
           structs: vec![],
+          enums: vec![],
         });
         &mut modules.last_mut().unwrap().functions
       }

@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::builtins::{default_builtins, sig, Builtin, Builtins, TypeConst};
 use crate::compiler::{self, *};
@@ -22,6 +21,7 @@ fn test_module(name: &str, functions: Vec<(String, LinkedCallable)>) -> LinkedMo
     name: name.to_string(),
     functions,
     structs: vec![],
+    enums: vec![],
   }
 }
 
@@ -120,6 +120,70 @@ fn struct_field_initializers_are_named() {
       (fn main () ->Int
         (let foo (new Foo y:2 x:3))
         (std::+ foo.x foo.y))";
+  assert_eq!(eval_main(source), SLValue::Int(5));
+}
+
+#[test]
+fn constructs_enum_values_with_named_fields() {
+  let source = "
+      (enum Foo
+        (Var1)
+        (Var2 x:Int)
+        (Var3 y:String z:(Cell Int)))
+      (fn main () ->Foo
+        (new Foo::Var3 z:(std::cell 7) y:\"hi\"))";
+  assert_eq!(
+    eval_main(source),
+    SLValue::Enum {
+      enum_: (0, 0),
+      variant: 2,
+      fields: vec![
+        SLValue::String("hi".to_string()),
+        SLValue::Cell(Box::new(SLValue::Int(7))),
+      ],
+    }
+  );
+}
+
+#[test]
+fn matches_enum_variants_and_binds_fields() {
+  let source = "
+      (enum Foo
+        (Var1)
+        (Var2 x:Int)
+        (Var3 y:String z:(Cell Int)))
+      (fn main () ->Int
+        (let foo (new Foo::Var2 x:42))
+        (match foo
+          (Var1) => 1
+          (Var2 x) => x
+          (Var3 y z) => 2))";
+  assert_eq!(eval_main(source), SLValue::Int(42));
+}
+
+#[test]
+fn match_binds_fields_by_name_not_position() {
+  let source = "
+      (enum Foo
+        (Var x:Int y:Int))
+      (fn main () ->Int
+        (let foo (new Foo::Var x:3 y:9))
+        (match foo
+          (Var y x) => (std::- y x)))";
+  assert_eq!(eval_main(source), SLValue::Int(6));
+}
+
+#[test]
+fn match_default_arm_handles_remaining_variants() {
+  let source = "
+      (enum Foo
+        (Var1)
+        (Var2 x:Int))
+      (fn main () ->Int
+        (let foo (new Foo::Var1))
+        (match foo
+          (Var2 x) => x
+          _ => 5))";
   assert_eq!(eval_main(source), SLValue::Int(5));
 }
 

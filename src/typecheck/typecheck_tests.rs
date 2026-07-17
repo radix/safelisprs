@@ -100,6 +100,100 @@ fn struct_construction_requires_all_fields() {
 }
 
 #[test]
+fn enums_typecheck_variant_construction() {
+  check(
+    "(enum Foo
+       (Var1)
+       (Var2 x:Int)
+       (Var3 y:String z:(Cell Int)))
+     (fn main () ->Foo
+       (new Foo::Var3 y:\"hi\" z:(std::cell 2)))",
+  )
+  .unwrap();
+}
+
+#[test]
+fn enum_construction_requires_known_fields() {
+  let error = check(
+    "(enum Foo (Var x:Int))
+     (fn main () ->Foo
+       (new Foo::Var x:1 y:2))",
+  )
+  .unwrap_err();
+  assert!(error.message.contains("unknown field `y`"), "{error}");
+}
+
+#[test]
+fn enum_construction_requires_all_variant_fields() {
+  let error = check(
+    "(enum Foo (Var x:Int y:Int))
+     (fn main () ->Foo
+       (new Foo::Var x:1))",
+  )
+  .unwrap_err();
+  assert!(
+    error.message.contains("missing initializer for field `y`"),
+    "{error}"
+  );
+}
+
+#[test]
+fn match_typechecks_exhaustive_enum_arms() {
+  check(
+    "(enum Foo
+       (Var1)
+       (Var2 x:Int)
+       (Var3 y:String z:(Cell Int)))
+     (fn main (foo:Foo) ->Int
+       (match foo
+         (Var1) => 1
+         (Var2 x) => x
+         (Var3 y z) => 2))",
+  )
+  .unwrap();
+}
+
+#[test]
+fn match_default_arm_covers_remaining_variants() {
+  check(
+    "(enum Foo
+       (Var1)
+       (Var2 x:Int))
+     (fn main (foo:Foo) ->Int
+       (match foo
+         (Var2 x) => x
+         _ => 5))",
+  )
+  .unwrap();
+}
+
+#[test]
+fn match_requires_exhaustive_arms_without_default() {
+  let error = check(
+    "(enum Foo
+       (Var1)
+       (Var2 x:Int))
+     (fn main (foo:Foo) ->Int
+       (match foo
+         (Var1) => 1))",
+  )
+  .unwrap_err();
+  assert!(error.message.contains("non-exhaustive match"), "{error}");
+}
+
+#[test]
+fn match_pattern_names_must_be_variant_fields() {
+  let error = check(
+    "(enum Foo (Var x:Int y:Int))
+     (fn main (foo:Foo) ->Int
+       (match foo
+         (Var z) => z))",
+  )
+  .unwrap_err();
+  assert!(error.message.contains("has no field `z`"), "{error}");
+}
+
+#[test]
 fn missing_bound_is_rejected() {
   let error = check("(fn double (a:A) ->A (std::+ a a))").unwrap_err();
   assert!(error.message.contains("requires trait `Add`"), "{error}");

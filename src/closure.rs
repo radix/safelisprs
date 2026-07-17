@@ -2,7 +2,10 @@ use std::collections::HashSet;
 
 #[cfg(test)]
 use crate::parser::TypeAst;
-use crate::parser::{try_map_ast_children, ASTKind, BindingId, Function, ResolvedName, Span, AST};
+use crate::parser::{
+  try_map_ast_children, ASTKind, BindingId, Function, MatchArm, MatchPattern, ResolvedName, Span,
+  AST,
+};
 use crate::prelude::resolve_module_names;
 
 pub fn transform_closures_in_module(module_name: &str, items: &[AST]) -> Result<Vec<AST>, String> {
@@ -426,6 +429,48 @@ fn transform_ast(
       recursive_bindings,
       recursive_refs,
     )?))),
+    ASTKind::Match(scrutinee, arms) => {
+      // It's kind of unfortunate that we have to know about matches in closure
+      // transformation; a better design would be to have a separate IR with
+      // simpler forms. e.g. a match would be transformed to bindings +
+      // conditionals + scopes and this closure would not need to treat "block
+      // with a let" any different from match arms.
+      let scrutinee = transform_ast(
+        module_name,
+        scrutinee,
+        lexical_path,
+        environment,
+        locals,
+        captures,
+        lifted,
+        names,
+        recursive_bindings,
+        recursive_refs,
+      )?;
+      let mut transformed_arms = Vec::with_capacity(arms.len());
+      for arm in arms {
+        let mut arm_locals = locals.clone();
+        if let MatchPattern::Variant { fields, .. } = &arm.pattern {
+          arm_locals.extend(fields.iter().map(|field| field.binding));
+        }
+        transformed_arms.push(MatchArm {
+          pattern: arm.pattern.clone(),
+          body: transform_ast(
+            module_name,
+            &arm.body,
+            lexical_path,
+            environment,
+            &mut arm_locals,
+            captures,
+            lifted,
+            names,
+            recursive_bindings,
+            recursive_refs,
+          )?,
+        });
+      }
+      Ok(ast.with_kind(ASTKind::Match(Box::new(scrutinee), transformed_arms)))
+    }
     _ => try_map_ast_children(ast, |child| {
       transform_ast(
         module_name,

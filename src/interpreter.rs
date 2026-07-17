@@ -229,6 +229,7 @@ pub(crate) fn external_bytes_of<'gc>(value: &SLVal<'gc>) -> usize {
     SLVal::List(items) => items.capacity() * std::mem::size_of::<Value<'gc>>(),
     SLVal::Partial(p) => p.args.capacity() * std::mem::size_of::<Value<'gc>>(),
     SLVal::Struct(s) => s.fields.capacity() * std::mem::size_of::<Value<'gc>>(),
+    SLVal::Enum(e) => e.fields.capacity() * std::mem::size_of::<Value<'gc>>(),
   }
 }
 
@@ -496,6 +497,24 @@ impl<'gc> ExecRoot<'gc> {
           }),
         )
       }
+      SLValue::Enum {
+        enum_,
+        variant,
+        fields,
+      } => {
+        let sub = fields
+          .iter()
+          .map(|value| self.import_value(mc, value))
+          .collect();
+        self.alloc_heap(
+          mc,
+          SLVal::Enum(EnumInstance {
+            enum_: *enum_,
+            variant: *variant,
+            fields: sub,
+          }),
+        )
+      }
     }
   }
 }
@@ -617,6 +636,7 @@ pub enum SLVal<'gc> {
   Partial(Partial<'gc>),
   List(Vec<Value<'gc>>),
   Struct(StructInstance<'gc>),
+  Enum(EnumInstance<'gc>),
 }
 
 #[derive(Debug, PartialEq, Collect)]
@@ -630,6 +650,14 @@ pub struct Partial<'gc> {
 #[collect(no_drop)]
 pub struct StructInstance<'gc> {
   pub struct_: (u32, u32),
+  pub fields: Vec<Value<'gc>>,
+}
+
+#[derive(Debug, PartialEq, Collect)]
+#[collect(no_drop)]
+pub struct EnumInstance<'gc> {
+  pub enum_: (u32, u32),
+  pub variant: u16,
   pub fields: Vec<Value<'gc>>,
 }
 
@@ -654,6 +682,11 @@ pub enum SLValue {
   List(Vec<SLValue>),
   Struct {
     struct_: (u32, u32),
+    fields: Vec<SLValue>,
+  },
+  Enum {
+    enum_: (u32, u32),
+    variant: u16,
     fields: Vec<SLValue>,
   },
 }
@@ -712,6 +745,7 @@ impl<'gc> SLVal<'gc> {
       SLVal::Partial(_) => "Partial",
       SLVal::List(_) => "List",
       SLVal::Struct(_) => "Struct",
+      SLVal::Enum(_) => "Enum",
     }
   }
 
@@ -726,6 +760,11 @@ impl<'gc> SLVal<'gc> {
       SLVal::Struct(s) => SLValue::Struct {
         struct_: s.struct_,
         fields: s.fields.iter().map(|value| value.to_value()).collect(),
+      },
+      SLVal::Enum(e) => SLValue::Enum {
+        enum_: e.enum_,
+        variant: e.variant,
+        fields: e.fields.iter().map(|value| value.to_value()).collect(),
       },
     }
   }
@@ -1274,6 +1313,48 @@ impl<'gc> ExecRoot<'gc> {
         let value = self.alloc_heap(mc, SLVal::Struct(StructInstance { struct_, fields }));
         self.stack.push(value);
       }
+      Instruction::NewEnum(enum_, variant) => {
+        let enum_def = package
+          .get_enum(enum_.0, enum_.1)
+          .ok_or_else(|| format!("Enum not found: {}/{}", enum_.0, enum_.1))?;
+        let variant_def = enum_def.variants.get(variant as usize).ok_or_else(|| {
+          format!(
+            "enum variant index {} out of range for enum {}/{}",
+            variant, enum_.0, enum_.1
+          )
+        })?;
+        let field_count = variant_def.fields.len();
+        let field_bytes = field_count
+          .checked_mul(std::mem::size_of::<Value<'gc>>())
+          .ok_or_else(|| "enum field buffer size overflow".to_string())?;
+        let mut fields_reservation = self.reserve_memory(mc, field_bytes)?;
+        let mut fields = Vec::new();
+        fields.try_reserve_exact(field_count).map_err(|_| {
+          format!(
+            "failed to allocate enum field buffer for {} fields",
+            field_count
+          )
+        })?;
+        let actual_field_bytes = fields
+          .capacity()
+          .checked_mul(std::mem::size_of::<Value<'gc>>())
+          .ok_or_else(|| "enum field buffer capacity overflow".to_string())?;
+        self.reconcile_reservation(mc, &mut fields_reservation, actual_field_bytes)?;
+        for _ in 0..field_count {
+          fields.push(self.pop()?);
+        }
+        fields.reverse();
+        drop(fields_reservation);
+        let value = self.alloc_heap(
+          mc,
+          SLVal::Enum(EnumInstance {
+            enum_,
+            variant,
+            fields,
+          }),
+        );
+        self.stack.push(value);
+      }
       Instruction::GetField(field) => {
         let receiver = self.pop()?;
         let value = match receiver {
@@ -1294,6 +1375,53 @@ impl<'gc> ExecRoot<'gc> {
           _ => {
             return Err(format!(
               "field access expected a struct, got {}",
+              receiver.type_name()
+            ))
+          }
+        };
+        self.stack.push(value);
+      }
+      Instruction::IsEnumVariant(variant) => {
+        let receiver = self.pop()?;
+        let matches = match receiver {
+          Value::Heap(heap) => match &heap.value {
+            SLVal::Enum(instance) => instance.variant == variant,
+            _ => {
+              return Err(format!(
+                "match expected an enum, got {}",
+                receiver.type_name()
+              ))
+            }
+          },
+          _ => {
+            return Err(format!(
+              "match expected an enum, got {}",
+              receiver.type_name()
+            ))
+          }
+        };
+        self.stack.push(Value::Bool(matches));
+      }
+      Instruction::GetEnumField(field) => {
+        let receiver = self.pop()?;
+        let value = match receiver {
+          Value::Heap(heap) => match &heap.value {
+            SLVal::Enum(instance) => *instance.fields.get(field as usize).ok_or_else(|| {
+              format!(
+                "enum field index {} out of range for enum {}/{} variant {}",
+                field, instance.enum_.0, instance.enum_.1, instance.variant
+              )
+            })?,
+            _ => {
+              return Err(format!(
+                "enum field access expected an enum, got {}",
+                receiver.type_name()
+              ))
+            }
+          },
+          _ => {
+            return Err(format!(
+              "enum field access expected an enum, got {}",
               receiver.type_name()
             ))
           }

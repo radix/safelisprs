@@ -180,6 +180,94 @@ fn linked_struct_bytecode_uses_indices() {
 }
 
 #[test]
+fn linked_enum_bytecode_uses_indices() {
+  let builtins = crate::builtins::default_builtins();
+  let source = "
+      (enum Foo
+        (Var1)
+        (Var2 x:Int y:Int))
+      (fn main () ->Foo
+        (new Foo::Var2 y:2 x:3))";
+  let package =
+    compile_executable_from_source(source, ("main", "main"), &builtins.specs(), &[]).unwrap();
+  let Callable::Function(main) = package.get_function(0, 0).unwrap() else {
+    panic!("expected main function");
+  };
+  assert_eq!(
+    main.instructions,
+    vec![
+      Instruction::PushInt(3),
+      Instruction::PushInt(2),
+      Instruction::NewEnum((0, 0), 1),
+      Instruction::Return,
+    ]
+  );
+  assert_eq!(
+    package.modules[0].enums,
+    vec![EnumDef {
+      name: "Foo".to_string(),
+      variants: vec![
+        EnumVariantDef {
+          name: "Var1".to_string(),
+          fields: vec![],
+        },
+        EnumVariantDef {
+          name: "Var2".to_string(),
+          fields: vec!["x".to_string(), "y".to_string()],
+        },
+      ],
+    }]
+  );
+}
+
+#[test]
+fn enum_match_lowers_to_variant_tests_and_field_loads() {
+  let builtins = crate::builtins::default_builtins();
+  let source = "
+      (enum Foo
+        (Var1)
+        (Var2 x:Int y:Int))
+      (fn main () ->Int
+        (match (new Foo::Var2 x:3 y:7)
+          (Var1) => 1
+          (Var2 y x) => (std::- y x)))";
+  let package =
+    compile_executable_from_source(source, ("main", "main"), &builtins.specs(), &[]).unwrap();
+  let Callable::Function(main) = package.get_function(0, 0).unwrap() else {
+    panic!("expected main function");
+  };
+  assert_eq!(
+    main.instructions,
+    vec![
+      Instruction::PushInt(3),
+      Instruction::PushInt(7),
+      Instruction::NewEnum((0, 0), 1),
+      Instruction::SetLocal(0),
+      Instruction::LoadLocal(0),
+      Instruction::IsEnumVariant(0),
+      Instruction::JumpIfFalse(2),
+      Instruction::PushInt(1),
+      Instruction::Jump(13),
+      Instruction::LoadLocal(0),
+      Instruction::IsEnumVariant(1),
+      Instruction::JumpIfFalse(10),
+      Instruction::LoadLocal(0),
+      Instruction::GetEnumField(1),
+      Instruction::SetLocal(1),
+      Instruction::LoadLocal(0),
+      Instruction::GetEnumField(0),
+      Instruction::SetLocal(2),
+      Instruction::LoadLocal(1),
+      Instruction::LoadLocal(2),
+      Instruction::Call((1, 1), 2),
+      Instruction::Jump(0),
+      Instruction::Return,
+    ]
+  );
+  assert_eq!(main.num_locals, 3);
+}
+
+#[test]
 fn chained_field_access_emits_multiple_field_indices() {
   let builtins = crate::builtins::default_builtins();
   let source = "

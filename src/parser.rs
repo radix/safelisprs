@@ -125,6 +125,7 @@ pub enum ASTKind {
   Let(ResolvedName, Option<TypeAst>, Box<AST>),
   DefineFn(Function),
   DefineStruct(Struct),
+  DefineEnum(Enum),
   Call(Box<AST>, Vec<AST>),
   CallFixed(Identifier, Vec<AST>),
   Variable(ResolvedName),
@@ -133,7 +134,9 @@ pub enum ASTKind {
   String(String),
   Bool(bool),
   NewStruct(String, Vec<(String, AST)>),
+  NewEnum(String, String, Vec<(String, AST)>),
   FieldAccess(Box<AST>, String),
+  Match(Box<AST>, Vec<MatchArm>),
 
   /// Bind up some arguments with a callable. This is used for closure captures.
   /// Not represented directly in source syntax.
@@ -212,9 +215,29 @@ pub(crate) fn try_map_ast_children<E>(
         .map(|(field, expression)| Ok((field.clone(), map(expression)?)))
         .collect::<Result<_, _>>()?,
     ),
+    ASTKind::NewEnum(name, variant, fields) => ASTKind::NewEnum(
+      name.clone(),
+      variant.clone(),
+      fields
+        .iter()
+        .map(|(field, expression)| Ok((field.clone(), map(expression)?)))
+        .collect::<Result<_, _>>()?,
+    ),
     ASTKind::FieldAccess(receiver, field) => {
       ASTKind::FieldAccess(Box::new(map(receiver)?), field.clone())
     }
+    ASTKind::Match(scrutinee, arms) => ASTKind::Match(
+      Box::new(map(scrutinee)?),
+      arms
+        .iter()
+        .map(|arm| {
+          Ok(MatchArm {
+            pattern: arm.pattern.clone(),
+            body: map(&arm.body)?,
+          })
+        })
+        .collect::<Result<_, _>>()?,
+    ),
     ASTKind::PartialApply(callable, args) => ASTKind::PartialApply(
       Box::new(map(callable)?),
       args.iter().map(&mut map).collect::<Result<_, _>>()?,
@@ -231,7 +254,8 @@ pub(crate) fn try_map_ast_children<E>(
     | ASTKind::String(_)
     | ASTKind::Bool(_)
     | ASTKind::FunctionRef(_, _)
-    | ASTKind::DefineStruct(_) => return Ok(ast.clone()),
+    | ASTKind::DefineStruct(_)
+    | ASTKind::DefineEnum(_) => return Ok(ast.clone()),
   };
   Ok(ast.with_kind(kind))
 }
@@ -323,7 +347,23 @@ pub(crate) fn erase_bindings(asts: &[AST]) -> Vec<AST> {
           erase_ast(expression);
         }
       }
+      ASTKind::NewEnum(_, _, fields) => {
+        for (_, expression) in fields {
+          erase_ast(expression);
+        }
+      }
       ASTKind::FieldAccess(receiver, _) => erase_ast(receiver),
+      ASTKind::Match(scrutinee, arms) => {
+        erase_ast(scrutinee);
+        for arm in arms {
+          if let MatchPattern::Variant { fields, .. } = &mut arm.pattern {
+            for field in fields {
+              erase_name(field);
+            }
+          }
+          erase_ast(&mut arm.body);
+        }
+      }
       ASTKind::If(condition, then_branch, else_branch) => {
         erase_ast(condition);
         erase_ast(then_branch);
@@ -339,7 +379,8 @@ pub(crate) fn erase_bindings(asts: &[AST]) -> Vec<AST> {
       | ASTKind::String(_)
       | ASTKind::Bool(_)
       | ASTKind::FunctionRef(_, _)
-      | ASTKind::DefineStruct(_) => {}
+      | ASTKind::DefineStruct(_)
+      | ASTKind::DefineEnum(_) => {}
     }
   }
 
@@ -379,6 +420,33 @@ impl Function {
 pub struct Struct {
   pub name: String,
   pub fields: Vec<(String, TypeAst)>,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct Enum {
+  pub name: String,
+  pub variants: Vec<EnumVariant>,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct EnumVariant {
+  pub name: String,
+  pub fields: Vec<(String, TypeAst)>,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct MatchArm {
+  pub pattern: MatchPattern,
+  pub body: AST,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum MatchPattern {
+  Variant {
+    variant: String,
+    fields: Vec<ResolvedName>,
+  },
+  Default,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -754,9 +822,17 @@ impl Parser {
         self.advance();
         self.parse_struct(start)
       }
+      TokenKind::Sym(name) if name == "enum" => {
+        self.advance();
+        self.parse_enum(start)
+      }
       TokenKind::Sym(name) if name == "new" => {
         self.advance();
         self.parse_new(start)
+      }
+      TokenKind::Sym(name) if name == "match" => {
+        self.advance();
+        self.parse_match(start)
       }
       TokenKind::Sym(name) if name == "if" => {
         self.advance();
@@ -900,8 +976,51 @@ impl Parser {
     ))
   }
 
+  fn parse_enum(&mut self, start: usize) -> Result<AST, ParseError> {
+    let name = self.expect_symbol("`enum` name must be a symbol")?;
+    let mut variants = Vec::new();
+    while !matches!(self.peek().kind, TokenKind::RParen) {
+      if matches!(self.peek().kind, TokenKind::Eof) {
+        return Err(
+          ParseError::new(self.peek().span.clone(), "unterminated `enum` form")
+            .expected("a variant")
+            .expected("`)`"),
+        );
+      }
+      self.expect_open("enum variants must be parenthesized")?;
+      let variant = self.expect_symbol("enum variant names must be symbols")?;
+      let mut fields = Vec::new();
+      while !matches!(self.peek().kind, TokenKind::RParen) {
+        if matches!(self.peek().kind, TokenKind::Eof) {
+          return Err(
+            ParseError::new(self.peek().span.clone(), "unterminated enum variant")
+              .expected("a field")
+              .expected("`)`"),
+          );
+        }
+        let field = self.expect_symbol("enum variant field names must be symbols")?;
+        self.expect_colon("enum variant fields require a type annotation")?;
+        fields.push((field, self.parse_type()?));
+      }
+      self.advance();
+      variants.push(EnumVariant {
+        name: variant,
+        fields,
+      });
+    }
+    let close = self.advance();
+    let span = start..close.span.end;
+    Ok(AST::new(ASTKind::DefineEnum(Enum { name, variants }), span))
+  }
+
   fn parse_new(&mut self, start: usize) -> Result<AST, ParseError> {
     let name = self.expect_symbol("`new` requires a struct name")?;
+    let variant = if matches!(self.peek().kind, TokenKind::DoubleColon) {
+      self.advance();
+      Some(self.expect_symbol("enum construction requires a variant name after `::`")?)
+    } else {
+      None
+    };
     let mut fields = Vec::new();
     while !matches!(self.peek().kind, TokenKind::RParen) {
       if matches!(self.peek().kind, TokenKind::Eof) {
@@ -917,7 +1036,71 @@ impl Parser {
     }
     let close = self.advance();
     let span = start..close.span.end;
-    Ok(AST::new(ASTKind::NewStruct(name, fields), span))
+    if let Some(variant) = variant {
+      Ok(AST::new(ASTKind::NewEnum(name, variant, fields), span))
+    } else {
+      Ok(AST::new(ASTKind::NewStruct(name, fields), span))
+    }
+  }
+
+  fn parse_match(&mut self, start: usize) -> Result<AST, ParseError> {
+    let scrutinee = self.parse_expr()?;
+    let mut arms = Vec::new();
+    while !matches!(self.peek().kind, TokenKind::RParen) {
+      if matches!(self.peek().kind, TokenKind::Eof) {
+        return Err(
+          ParseError::new(self.peek().span.clone(), "unterminated `match` form")
+            .expected("a match arm")
+            .expected("`)`"),
+        );
+      }
+      arms.push(self.parse_match_arm()?);
+    }
+    if arms.is_empty() {
+      return Err(ParseError::new(
+        self.peek().span.clone(),
+        "`match` must have at least one arm",
+      ));
+    }
+    let close = self.advance();
+    let span = start..close.span.end;
+    Ok(AST::new(ASTKind::Match(Box::new(scrutinee), arms), span))
+  }
+
+  fn parse_match_arm(&mut self) -> Result<MatchArm, ParseError> {
+    let pattern = if matches!(self.peek().kind, TokenKind::LParen) {
+      self.advance();
+      let variant = self.expect_symbol("match variant patterns must name a variant")?;
+      let mut fields = Vec::new();
+      while !matches!(self.peek().kind, TokenKind::RParen) {
+        if matches!(self.peek().kind, TokenKind::Eof) {
+          return Err(
+            ParseError::new(self.peek().span.clone(), "unterminated match pattern")
+              .expected("a binding name")
+              .expected("`)`"),
+          );
+        }
+        fields.push(
+          self
+            .expect_symbol("match pattern fields must be symbols")?
+            .into(),
+        );
+      }
+      self.advance();
+      MatchPattern::Variant { variant, fields }
+    } else {
+      let wildcard = self.expect_symbol("match arms require a pattern")?;
+      if wildcard != "_" {
+        return Err(ParseError::new(
+          self.previous_span(),
+          "default match arm must use `_`",
+        ));
+      }
+      MatchPattern::Default
+    };
+    self.expect_arrow_arm()?;
+    let body = self.parse_expr()?;
+    Ok(MatchArm { pattern, body })
   }
 
   fn parse_if(&mut self, start: usize) -> Result<AST, ParseError> {
@@ -1141,8 +1324,20 @@ impl Parser {
     }
   }
 
+  fn expect_arrow_arm(&mut self) -> Result<Token, ParseError> {
+    let token = self.advance();
+    match token.kind {
+      TokenKind::Sym(ref separator) if separator == "=>" => Ok(token),
+      _ => Err(ParseError::new(token.span, "match arms require `=>`").expected("`=>`")),
+    }
+  }
+
   fn peek(&self) -> &Token {
     &self.tokens[self.current]
+  }
+
+  fn previous_span(&self) -> Span {
+    self.tokens[self.current.saturating_sub(1)].span.clone()
   }
 
   fn advance(&mut self) -> Token {

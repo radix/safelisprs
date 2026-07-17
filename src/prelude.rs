@@ -2,7 +2,8 @@ use std::collections::{HashMap, HashSet};
 
 use crate::builtins::BuiltinSpec;
 use crate::parser::{
-  try_map_ast_children, ASTKind, BindingId, Function, Identifier, ResolvedName, AST,
+  try_map_ast_children, ASTKind, BindingId, Function, Identifier, MatchArm, MatchPattern,
+  ResolvedName, AST,
 };
 
 pub fn std_prelude_from_specs(specs: &[BuiltinSpec]) -> Vec<(&str, &str)> {
@@ -234,6 +235,33 @@ impl Resolver<'_> {
       }
       ASTKind::Block(body) => {
         Ok(ast.with_kind(ASTKind::Block(self.resolve_sequence(body, scope)?)))
+      }
+      ASTKind::Match(scrutinee, arms) => {
+        let scrutinee = self.resolve_expr(scrutinee, scope)?;
+        let mut resolved_arms = Vec::with_capacity(arms.len());
+        for arm in arms {
+          let mut arm_scope = scope.clone();
+          let pattern = match &arm.pattern {
+            MatchPattern::Variant { variant, fields } => {
+              let mut resolved_fields = Vec::with_capacity(fields.len());
+              for field in fields {
+                let field = self.fresh_name(field.as_str());
+                arm_scope.insert(field.name.clone(), field.binding);
+                resolved_fields.push(field);
+              }
+              MatchPattern::Variant {
+                variant: variant.clone(),
+                fields: resolved_fields,
+              }
+            }
+            MatchPattern::Default => MatchPattern::Default,
+          };
+          resolved_arms.push(MatchArm {
+            pattern,
+            body: self.resolve_expr(&arm.body, &mut arm_scope)?,
+          });
+        }
+        Ok(ast.with_kind(ASTKind::Match(Box::new(scrutinee), resolved_arms)))
       }
       _ => try_map_ast_children(ast, |child| self.resolve_expr(child, scope)),
     }
