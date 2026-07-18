@@ -6,8 +6,8 @@ use crate::parser::{self, ASTKind, BindingId, Identifier, MatchPattern, Resolved
 use crate::prelude::resolve_module_names;
 use crate::typecheck::{CheckedModule, MatchArmInfo, TypecheckInfo};
 
-/// A Package can either represent a "program" or a "library".
-/// If a `main` is provided, then it can be executed as a program directly.
+/// A compiled SafeLisp package.
+/// If a `main` is present, the interpreter can execute it directly.
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Package {
   /// While the names here *can* be used for function lookup, they are only
@@ -134,16 +134,7 @@ struct ModuleIndexEntry {
 type ModuleIndex = HashMap<String, ModuleIndexEntry>;
 
 impl Package {
-  pub fn from_modules(modules: CompiledModules, specs: &[BuiltinSpec]) -> Result<Self, String> {
-    let modules = inject_builtin_specs(modules, specs)?;
-    let index = index_modules(modules.iter());
-    Ok(Package {
-      modules: link(&index, modules)?,
-      main: None,
-    })
-  }
-
-  pub fn from_modules_with_main(
+  fn from_modules_with_main(
     compiled_modules: CompiledModules,
     path: (&str, &str),
     specs: &[BuiltinSpec],
@@ -193,12 +184,12 @@ impl Package {
 }
 
 fn index_modules<'a>(modules: impl Iterator<Item = &'a CompiledModule>) -> ModuleIndex {
-  let mut module_table = hashmap! {};
+  let mut module_table = HashMap::new();
   for (mod_index, module) in modules.enumerate() {
     let mut entry = ModuleIndexEntry {
       module: mod_index as u32,
-      functions: hashmap! {},
-      types: hashmap! {},
+      functions: HashMap::new(),
+      types: HashMap::new(),
     };
     for (func_index, (func_name, _)) in module.functions.iter().enumerate() {
       entry
@@ -728,21 +719,13 @@ pub fn compile_executable_from_source(
   prelude: &[(&str, &str)],
 ) -> Result<Package, String> {
   Package::from_modules_with_main(
-    _compile_from_source(module_source, specs, prelude)?,
+    compile_modules_from_source(module_source, specs, prelude)?,
     main,
     specs,
   )
 }
 
-pub fn compile_from_source(
-  module_source: &str,
-  specs: &[BuiltinSpec],
-  prelude: &[(&str, &str)],
-) -> Result<Package, String> {
-  Package::from_modules(_compile_from_source(module_source, specs, prelude)?, specs)
-}
-
-fn _compile_from_source(
+fn compile_modules_from_source(
   module_source: &str,
   specs: &[BuiltinSpec],
   prelude: &[(&str, &str)],

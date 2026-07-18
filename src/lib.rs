@@ -1,6 +1,4 @@
 #[macro_use]
-extern crate maplit;
-#[macro_use]
 extern crate serde_derive;
 
 #[cfg(test)]

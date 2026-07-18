@@ -105,7 +105,7 @@ fn transform_function(
   //! - captured variables become hidden leading parameters
   //! - nested `fn` definitions are lifted into `lifted` as separate functions
   //! - the original nested `fn` expression becomes `let name (partial-apply func [captures...])`
-  let mut locals = hashset! {};
+  let mut locals = HashSet::new();
   locals.extend(func.params.iter().map(|(name, _)| name.binding));
   locals.extend(
     recursive_bindings

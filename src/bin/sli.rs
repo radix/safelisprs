@@ -1,8 +1,3 @@
-extern crate bincode;
-extern crate clap;
-extern crate safelisp;
-extern crate serde_yaml;
-
 use std::fs::File;
 use std::io::prelude::*;
 use std::time::Duration;

@@ -1,8 +1,3 @@
-extern crate bincode;
-extern crate clap;
-extern crate safelisp;
-extern crate serde_yaml;
-
 use std::fs::File;
 use std::io::prelude::*;
 use std::path::PathBuf;
@@ -11,7 +6,7 @@ use anyhow::{anyhow, Result};
 use clap::Parser;
 
 use safelisp::builtins::default_builtins;
-use safelisp::compiler::{compile_executable_from_source, compile_from_source};
+use safelisp::compiler::compile_executable_from_source;
 use safelisp::prelude::std_prelude_from_specs;
 
 #[derive(Parser)]
@@ -25,9 +20,6 @@ struct Args {
 
   #[clap(long, default_value = "main", help = "name of the main function")]
   main_function: String,
-
-  #[clap(long, help = "skip main generation")]
-  no_main: bool,
 
   #[clap(help = "Main .sl file")]
   input_file: String,
@@ -53,13 +45,9 @@ fn main() -> Result<()> {
 
   let specs = default_builtins().specs();
   let prelude = std_prelude_from_specs(&specs);
-  let package = if args.no_main {
-    compile_from_source(&input_data, &specs, &prelude)
-  } else {
-    let main_func = args.main_function;
-    compile_executable_from_source(&input_data, ("main", &main_func), &specs, &prelude)
-  }
-  .map_err(|e| anyhow!("{}", e))?;
+  let main_func = args.main_function;
+  let package = compile_executable_from_source(&input_data, ("main", &main_func), &specs, &prelude)
+    .map_err(|e| anyhow!("{}", e))?;
 
   let output = match format.as_str() {
     "yaml" => serde_yaml::to_string(&package)?.into_bytes(),
