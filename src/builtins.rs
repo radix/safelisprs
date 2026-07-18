@@ -17,7 +17,6 @@ pub enum Trait {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum TypeConst {
   Int,
   Float,
