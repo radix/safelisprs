@@ -5,7 +5,7 @@ use gc_arena::{Gc, RefLock};
 use rand_chacha::rand_core::{RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
-use crate::interpreter::{CellContents, HostCtx, MemoryReservation, SLVal, Value};
+use crate::interpreter::{CellContents, HostCtx, HostPoll, MemoryReservation, SLVal, Value};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum Trait {
@@ -102,11 +102,30 @@ pub(crate) type HostFn = Arc<
   dyn for<'gc, 'call> Fn(&mut HostCtx<'gc, 'call>, &[Value<'gc>]) -> Result<Value<'gc>, String>,
 >;
 
+pub(crate) type HostStartFn =
+  Arc<dyn for<'gc, 'call> Fn(&mut HostCtx<'gc, 'call>, &[Value<'gc>]) -> Result<(), String>>;
+
+pub(crate) type HostResumeFn = Arc<
+  dyn for<'gc, 'call> Fn(
+    &mut HostCtx<'gc, 'call>,
+    Option<Value<'gc>>,
+  ) -> Result<HostPoll<'gc>, String>,
+>;
+
+#[derive(Clone)]
+enum BuiltinImpl {
+  Sync(HostFn),
+  Resumable {
+    start: HostStartFn,
+    resume: HostResumeFn,
+  },
+}
+
 /// A builtin: metadata ([`BuiltinSpec`]) plus its host handler.
 #[derive(Clone)]
 pub struct Builtin {
   spec: BuiltinSpec,
-  func: HostFn,
+  func: BuiltinImpl,
 }
 
 impl Builtin {
@@ -118,11 +137,36 @@ impl Builtin {
   pub(crate) fn call<'gc, 'call>(
     &self,
     ctx: &mut HostCtx<'gc, 'call>,
+    builtin_id: (u32, u32),
     args: &[Value<'gc>],
   ) -> Result<(), String> {
-    let result = (self.func)(ctx, args)?;
-    ctx.push_value(result);
-    Ok(())
+    match &self.func {
+      BuiltinImpl::Sync(func) => {
+        let result = func(ctx, args)?;
+        ctx.push(result);
+        Ok(())
+      }
+      BuiltinImpl::Resumable { start, .. } => {
+        let stack_base = ctx.stack_len();
+        start(ctx, args)?;
+        ctx.push_host_frame_at(builtin_id, stack_base);
+        Ok(())
+      }
+    }
+  }
+
+  pub(crate) fn resume<'gc, 'call>(
+    &self,
+    ctx: &mut HostCtx<'gc, 'call>,
+    pending_result: Option<Value<'gc>>,
+  ) -> Result<HostPoll<'gc>, String> {
+    match &self.func {
+      BuiltinImpl::Sync(_) => Err(format!(
+        "{}::{} is not a resumable builtin",
+        self.spec.module, self.spec.name
+      )),
+      BuiltinImpl::Resumable { resume, .. } => resume(ctx, pending_result),
+    }
   }
 
   /// Construct a builtin that receives the full execution context and raw
@@ -147,10 +191,10 @@ impl Builtin {
         num_params,
         signature,
       },
-      func: Arc::new(move |ctx, args| {
+      func: BuiltinImpl::Sync(Arc::new(move |ctx, args| {
         let value = func(ctx, args)?;
         Ok(ctx.alloc_heap(value))
-      }),
+      })),
     }
   }
 
@@ -172,7 +216,38 @@ impl Builtin {
         num_params,
         signature,
       },
-      func: Arc::new(func),
+      func: BuiltinImpl::Sync(Arc::new(func)),
+    }
+  }
+
+  /// Construct a builtin whose callback into SafeLisp can pause and resume
+  /// through the ordinary interpreter loop. The start function stores durable
+  /// state on the VM stack; the resume function advances that state by one
+  /// host scheduling step.
+  pub fn resumable(
+    module: &'static str,
+    name: &'static str,
+    num_params: Option<u16>,
+    signature: BuiltinSignature,
+    start: impl for<'gc, 'call> Fn(&mut HostCtx<'gc, 'call>, &[Value<'gc>]) -> Result<(), String>
+      + 'static,
+    resume: impl for<'gc, 'call> Fn(
+        &mut HostCtx<'gc, 'call>,
+        Option<Value<'gc>>,
+      ) -> Result<HostPoll<'gc>, String>
+      + 'static,
+  ) -> Self {
+    Builtin {
+      spec: BuiltinSpec {
+        module,
+        name,
+        num_params,
+        signature,
+      },
+      func: BuiltinImpl::Resumable {
+        start: Arc::new(start),
+        resume: Arc::new(resume),
+      },
     }
   }
 
@@ -190,7 +265,7 @@ impl Builtin {
         num_params: Some(1),
         signature,
       },
-      func: Arc::new(move |_ctx, args| func(args[0])),
+      func: BuiltinImpl::Sync(Arc::new(move |_ctx, args| func(args[0]))),
     }
   }
 
@@ -208,7 +283,7 @@ impl Builtin {
         num_params: Some(2),
         signature,
       },
-      func: Arc::new(move |_ctx, args| func(args[0], args[1])),
+      func: BuiltinImpl::Sync(Arc::new(move |_ctx, args| func(args[0], args[1]))),
     }
   }
 
@@ -229,7 +304,7 @@ impl Builtin {
         num_params: None,
         signature,
       },
-      func: Arc::new(move |_ctx, args| func(args)),
+      func: BuiltinImpl::Sync(Arc::new(move |_ctx, args| func(args))),
     }
   }
 }
@@ -315,6 +390,123 @@ fn char_boundary(value: &str, char_index: usize) -> usize {
     .char_indices()
     .nth(char_index)
     .map_or(value.len(), |(byte_index, _)| byte_index)
+}
+
+fn map_start<'gc, 'call>(ctx: &mut HostCtx<'gc, 'call>, args: &[Value<'gc>]) -> Result<(), String> {
+  let (list, func) = (args[0], args[1]);
+  match &list {
+    Value::Heap(heap) if matches!(&heap.value, SLVal::List(_)) => {}
+    _ => {
+      return Err(format!(
+        "std::map: expected a List, got {}",
+        list.type_name()
+      ))
+    }
+  }
+  ctx.push(list);
+  ctx.push(func);
+  ctx.push(Value::Int(0)); // index we're currently working on
+  ctx.push(Value::Int(0)); // number of results we've accumulated
+  Ok(())
+}
+
+fn pop_map_state<'gc, 'call>(
+  ctx: &mut HostCtx<'gc, 'call>,
+) -> Result<(Value<'gc>, Value<'gc>, usize, usize), String> {
+  let result_count = match ctx.pop()? {
+    Value::Int(value) if value >= 0 => {
+      usize::try_from(value).map_err(|_| "std::map: result count does not fit usize".to_string())?
+    }
+    other => {
+      return Err(format!(
+        "std::map: expected result count Int, got {}",
+        other.type_name()
+      ))
+    }
+  };
+  let index = match ctx.pop()? {
+    Value::Int(value) if value >= 0 => {
+      usize::try_from(value).map_err(|_| "std::map: index does not fit usize".to_string())?
+    }
+    other => {
+      return Err(format!(
+        "std::map: expected index Int, got {}",
+        other.type_name()
+      ))
+    }
+  };
+  let func = ctx.pop()?;
+  let source_list = ctx.pop()?;
+  Ok((source_list, func, index, result_count))
+}
+
+fn push_map_state<'gc, 'call>(
+  ctx: &mut HostCtx<'gc, 'call>,
+  source_list: Value<'gc>,
+  func: Value<'gc>,
+  index: usize,
+  result_count: usize,
+) -> Result<(), String> {
+  let index = i64::try_from(index).map_err(|_| "std::map: index overflow".to_string())?;
+  let result_count =
+    i64::try_from(result_count).map_err(|_| "std::map: result count overflow".to_string())?;
+  ctx.push(source_list);
+  ctx.push(func);
+  ctx.push(Value::Int(index));
+  ctx.push(Value::Int(result_count));
+  Ok(())
+}
+
+fn map_resume<'gc, 'call>(
+  ctx: &mut HostCtx<'gc, 'call>,
+  pending_result: Option<Value<'gc>>,
+) -> Result<HostPoll<'gc>, String> {
+  if let Some(callback_result) = pending_result {
+    let (source_list, func, index, result_count) = pop_map_state(ctx)?;
+    let next_index = index + 1;
+    let next_result_count = result_count + 1;
+    ctx.push(callback_result);
+    push_map_state(ctx, source_list, func, next_index, next_result_count)?;
+    return Ok(HostPoll::Pending);
+  }
+
+  let (source_list, func, index, result_count) = pop_map_state(ctx)?;
+  let (len, item) = match &source_list {
+    Value::Heap(heap) => match &heap.value {
+      SLVal::List(items) => {
+        let item = items.get(index).copied();
+        (items.len(), item)
+      }
+      _ => {
+        return Err(format!(
+          "std::map: expected a List, got {}",
+          source_list.type_name()
+        ))
+      }
+    },
+    _ => {
+      return Err(format!(
+        "std::map: expected a List, got {}",
+        source_list.type_name()
+      ))
+    }
+  };
+
+  if index == len {
+    let (mut results, _reservation) = reserved_vec(ctx, result_count, "map")?;
+    for _ in 0..result_count {
+      results.push(ctx.pop()?);
+    }
+    results.reverse();
+    let result = ctx.alloc_heap(SLVal::List(results));
+    Ok(HostPoll::Ready(result))
+  } else {
+    let item = item
+      .ok_or_else(|| format!("std::map: index {index} out of range for list of length {len}"))?;
+    push_map_state(ctx, source_list, func, index, result_count)?;
+    ctx.call(func, &[item])?;
+    Ok(HostPoll::Pending)
+  }
 }
 
 /// The default builtin registry.
@@ -617,9 +809,9 @@ pub fn default_builtins() -> Builtins {
     // (std::map list fn) -> List
     //   Applies `fn` (a callable value: FunctionRef or Partial) to each element
     //   of `list` and collects the results into a new list. Implemented as a
-    //   builtin with [`HostCtx`] access so it can synchronously invoke the
-    //   callable for each element.
-    .with_builtin(Builtin::contextual(
+    //   builtin with [`HostCtx`] access so callback execution is scheduled
+    //   through the ordinary resumable interpreter loop.
+    .with_builtin(Builtin::resumable(
       "std",
       "map",
       Some(2),
@@ -632,32 +824,8 @@ pub fn default_builtins() -> Builtins {
         None,
         TypeConst::list(TypeConst::var("B")),
       ),
-      |ctx, args| {
-        let (list, func) = (args[0], args[1]);
-        let items = match &list {
-          Value::Heap(heap) => match &heap.value {
-            SLVal::List(items) => items,
-            _ => {
-              return Err(format!(
-                "std::map: expected a List, got {}",
-                list.type_name()
-              ))
-            }
-          },
-          _ => {
-            return Err(format!(
-              "std::map: expected a List, got {}",
-              list.type_name()
-            ))
-          }
-        };
-        let (mut results, _reservation) = reserved_vec(ctx, items.len(), "map")?;
-        for item in items.iter().copied() {
-          let result = ctx.call(func, &[item])?;
-          results.push(result);
-        }
-        Ok(SLVal::List(results))
-      },
+      map_start,
+      map_resume,
     ))
     .with_builtin(Builtin::contextual(
       "std",

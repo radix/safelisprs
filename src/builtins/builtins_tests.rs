@@ -106,12 +106,6 @@ fn allocating_builtins_reserve_before_building_results() {
       10_000 * ptr,
     ),
     (
-      "(fn main () ->(List Int) (fn id (x:Int) ->Int x) (std::map (std::list 1 2 3) id))"
-        .to_string(),
-      2,
-      3 * ptr,
-    ),
-    (
       "(fn main () ->(List Int) (std::slice (std::list 1 2 3 4) 1 3))".to_string(),
       3,
       2 * ptr,

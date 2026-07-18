@@ -2115,16 +2115,14 @@ fn std_set_still_returns_void() {
   );
 }
 
-/// `HostCtx::call` with a value-returning callback returns the callee's
-/// result, exercising the frame-boundary bookkeeping under a nested sub-loop.
+/// A resumable host builtin can schedule a value-returning callback and
+/// consume its result when the host frame resumes.
 #[test]
-fn host_call_with_value_returning_callback() {
-  // A builtin that calls a guest function via HostCtx::call and returns its
-  // result, doubling it.
-  let builtins = default_builtins().with_builtin(Builtin::contextual_value(
+fn resumable_host_call_with_value_returning_callback() {
+  let builtins = default_builtins().with_builtin(Builtin::resumable(
     "main",
     "applydouble",
-    None,
+    Some(1),
     sig(
       &[],
       vec![TypeConst::function(vec![TypeConst::Int], TypeConst::Int)],
@@ -2132,16 +2130,22 @@ fn host_call_with_value_returning_callback() {
       TypeConst::Int,
     ),
     |ctx, args| {
-      let f = args[0];
-      let arg = Value::Int(7);
-      let result = ctx.call(f, &[arg])?;
-      match result {
-        Value::Int(n) => Ok(Value::Int(n * 2)),
-        other => Err(format!(
-          "expected Int from callback, got {}",
-          other.type_name()
-        )),
+      ctx.push(args[0]);
+      Ok(())
+    },
+    |ctx, pending_result| {
+      if let Some(result) = pending_result {
+        return match result {
+          Value::Int(n) => Ok(HostPoll::Ready(Value::Int(n * 2))),
+          other => Err(format!(
+            "expected Int from callback, got {}",
+            other.type_name()
+          )),
+        };
       }
+      let f = ctx.pop()?;
+      ctx.call(f, &[Value::Int(7)])?;
+      Ok(HostPoll::Pending)
     },
   ));
   let source = "
@@ -2155,14 +2159,14 @@ fn host_call_with_value_returning_callback() {
   assert_eq!(exec.run_until_done().unwrap(), SLValue::Int(28));
 }
 
-/// `HostCtx::call` with a Void-returning callback supplies a Void value in
-/// the result slot, so the builtin sees Void.
+/// A Void-returning scheduled callback leaves Void on the stack for the host
+/// continuation to consume.
 #[test]
-fn host_call_with_void_returning_callback() {
-  let builtins = default_builtins().with_builtin(Builtin::contextual_value(
+fn resumable_host_call_with_void_returning_callback() {
+  let builtins = default_builtins().with_builtin(Builtin::resumable(
     "main",
     "callvoid",
-    None,
+    Some(1),
     sig(
       &[],
       vec![TypeConst::function(vec![TypeConst::Int], TypeConst::Void)],
@@ -2170,16 +2174,22 @@ fn host_call_with_void_returning_callback() {
       TypeConst::Bool,
     ),
     |ctx, args| {
-      let f = args[0];
-      let arg = Value::Int(7);
-      let result = ctx.call(f, &[arg])?;
-      match result {
-        Value::Void => Ok(Value::Bool(true)),
-        other => Err(format!(
-          "expected Void from callback, got {}",
-          other.type_name()
-        )),
+      ctx.push(args[0]);
+      Ok(())
+    },
+    |ctx, pending_result| {
+      if let Some(result) = pending_result {
+        return match result {
+          Value::Void => Ok(HostPoll::Ready(Value::Bool(true))),
+          other => Err(format!(
+            "expected Void from callback, got {}",
+            other.type_name()
+          )),
+        };
       }
+      let f = ctx.pop()?;
+      ctx.call(f, &[Value::Int(7)])?;
+      Ok(HostPoll::Pending)
     },
   ));
   let source = "
@@ -2191,4 +2201,89 @@ fn host_call_with_void_returning_callback() {
   let interp = Interpreter::with_builtins(pkg, builtins);
   let mut exec = interp.call_main().unwrap();
   assert_eq!(exec.run_until_done().unwrap(), SLValue::Bool(true));
+}
+
+#[test]
+fn map_callback_bytecodes_count_toward_budget() {
+  let source = "
+      (fn spin (x:Int) ->Int
+        (let a (std::+ x 1))
+        (let b (std::+ a 1))
+        (let c (std::+ b 1))
+        c)
+      (fn main () ->(List Int) (std::map (std::list 1) spin))
+    ";
+  let pkg =
+    compile_executable_from_source(source, ("main", "main"), &default_builtins().specs(), &[])
+      .unwrap();
+  let interp = Interpreter::new(pkg);
+  let mut exec = interp.call_main().unwrap();
+
+  assert_eq!(exec.run(10).unwrap(), Status::Paused);
+  assert_eq!(exec.executed(), 10);
+  assert_eq!(
+    exec.run(1_000).unwrap(),
+    Status::Done(SLValue::List(vec![SLValue::Int(4)]))
+  );
+}
+
+#[test]
+fn map_can_pause_inside_callback_and_resume() {
+  let source = "
+      (fn bump (x:Int) ->Int
+        (let a (std::+ x 1))
+        (let b (std::+ a 1))
+        b)
+      (fn main () ->(List Int) (std::map (std::list 1 2) bump))
+    ";
+  let pkg =
+    compile_executable_from_source(source, ("main", "main"), &default_builtins().specs(), &[])
+      .unwrap();
+  let interp = Interpreter::new(pkg);
+  let mut exec = interp.call_main().unwrap();
+
+  assert_eq!(exec.run(12).unwrap(), Status::Paused);
+  assert_eq!(
+    exec.run(1_000).unwrap(),
+    Status::Done(SLValue::List(vec![SLValue::Int(3), SLValue::Int(4)]))
+  );
+}
+
+#[test]
+fn non_terminating_map_callback_pauses_under_instruction_limit() {
+  let source = "
+      (fn loop (x:Int) ->Int (loop x))
+      (fn main () ->(List Int) (std::map (std::list 1) loop))
+    ";
+  let pkg =
+    compile_executable_from_source(source, ("main", "main"), &default_builtins().specs(), &[])
+      .unwrap();
+  let interp = Interpreter::new(pkg);
+  let mut exec = interp.call_main().unwrap();
+
+  assert_eq!(exec.run(100).unwrap(), Status::Paused);
+  assert_eq!(exec.executed(), 100);
+  assert!(!exec.is_done());
+}
+
+#[test]
+fn memory_limit_catches_map_result_allocation_after_pause() {
+  let source = "
+      (fn id (x:String) ->String x)
+      (fn main () ->(List String) (std::map (std::list \"a\" \"b\" \"c\" \"d\") id))
+    ";
+  let pkg =
+    compile_executable_from_source(source, ("main", "main"), &default_builtins().specs(), &[])
+      .unwrap();
+  let interp = Interpreter::new(pkg);
+  let mut exec = interp.call_main().unwrap();
+
+  assert_eq!(exec.run(10).unwrap(), Status::Paused);
+  let limit = exec.memory_usage() + (3 * std::mem::size_of::<Value<'static>>());
+  exec.set_memory_limit(Some(limit));
+  let err = exec.run_until_done().unwrap_err();
+  assert!(
+    err.contains("memory limit exceeded"),
+    "unexpected error: {err}"
+  );
 }

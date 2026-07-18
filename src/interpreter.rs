@@ -514,19 +514,41 @@ impl<'gc> ExecRoot<'gc> {
   }
 }
 
-/// A stack frame. The function is stored by `(module, function)` index so a
-/// frame is cheap to push — no `instructions: Vec<…>` clone — and the
-/// `Function` is looked up via `package.get_function(...)` at `step` time.
+/// A stack frame.
 #[derive(Collect)]
 #[collect(no_drop)]
 struct Frame<'gc> {
-  function: (u32, u32),
-  locals: TrackedVec<Value<'gc>>,
+  /// The package callable slot currently executing in this frame.
+  callable: (u32, u32),
   /// The index into the global `stack` at which this frame's segment begins.
   /// Everything at or above this index belongs to this frame or its callees.
   /// When we return, we can truncate to this and push the return value.
   stack_base: usize,
+  kind: FrameKind<'gc>,
+}
+
+#[derive(Collect)]
+#[collect(no_drop)]
+enum FrameKind<'gc> {
+  Function(FunctionFrame<'gc>),
+  Host(HostFrame),
+}
+
+/// A SafeLisp function frame. The shared frame's callable is looked up via
+/// `package.get_function(...)` at `step` time.
+#[derive(Collect)]
+#[collect(no_drop)]
+struct FunctionFrame<'gc> {
+  locals: TrackedVec<Value<'gc>>,
   ip: usize,
+}
+
+/// A frame representing a resumable builtin function that may be waiting for a
+/// SafeLisp call to finish.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Collect)]
+#[collect(no_drop)]
+struct HostFrame {
+  awaiting_call: bool,
 }
 
 /// The mutable contents of a `Cell`: a shared handle to any runtime value.
@@ -786,6 +808,12 @@ pub enum Status {
   /// Execution completed: the frame stack is empty and the final result
   /// is carried here. The `Execution` should not be resumed after this.
   Done(SLValue),
+}
+
+/// Indicator for whether a resumable builtin function has completed or not.
+pub enum HostPoll<'gc> {
+  Pending,
+  Ready(Value<'gc>),
 }
 
 /// A single, independent SafeLisp execution. Each `Execution` owns its own
@@ -1101,6 +1129,42 @@ impl<'gc> ExecRoot<'gc> {
       .ok_or_else(|| "Return with no frame".to_string())
   }
 
+  fn push_host_frame(&mut self, callable: (u32, u32), stack_base: usize) {
+    self.frames.push(Frame {
+      callable,
+      stack_base,
+      kind: FrameKind::Host(HostFrame {
+        awaiting_call: false,
+      }),
+    });
+  }
+
+  fn current_host_frame_mut(&mut self) -> Result<&mut HostFrame, String> {
+    match self.frames.last_mut() {
+      Some(Frame {
+        kind: FrameKind::Host(frame),
+        ..
+      }) => Ok(frame),
+      Some(_) => Err("current frame is not a host frame".to_string()),
+      None => Err("no current frame".to_string()),
+    }
+  }
+
+  fn complete_host_frame(&mut self, value: Value<'gc>) -> Result<(), String> {
+    let frame = self
+      .frames
+      .pop()
+      .ok_or_else(|| "host completion with no frame".to_string())?;
+    match frame.kind {
+      FrameKind::Host(_) => {
+        self.stack.truncate(frame.stack_base);
+        self.stack.push(value);
+        Ok(())
+      }
+      FrameKind::Function(_) => Err("host completion on a function frame".to_string()),
+    }
+  }
+
   /// Run up to `n` bytecodes starting from `start` executed count. Returns
   /// `Paused` if the budget exhausted before completion, or `Done(v)` if the
   /// program completed. Errors propagate via `Err`.
@@ -1177,16 +1241,79 @@ impl<'gc> ExecRoot<'gc> {
     // made them.
     self.check_memory_limit(mc)?;
 
-    // Resolve the current frame's instructions by looking up the indexed
-    // function in the package, then advance `ip` after fetching the
+    if let Some(callable_id) = {
+      let frame = self
+        .frames
+        .last()
+        .ok_or_else(|| "step with no frames".to_string())?;
+      match &frame.kind {
+        FrameKind::Host(_) => Some(frame.callable),
+        FrameKind::Function(_) => None,
+      }
+    } {
+      let module = package
+        .get_module(callable_id.0)
+        .ok_or_else(|| format!("Module not found: {}", callable_id.0))?;
+      let (func_name, callable) = module
+        .functions
+        .get(callable_id.1 as usize)
+        .ok_or_else(|| format!("Function not found: {}/{}", callable_id.0, callable_id.1))?;
+      if !matches!(callable, Callable::Builtin) {
+        return Err(format!(
+          "{}.{} is not a builtin host frame",
+          module.name, func_name
+        ));
+      }
+      let builtin = builtins
+        .lookup(&module.name, func_name)
+        .ok_or_else(|| format!("No builtin {}::{}", module.name, func_name))?;
+      let pending_result = {
+        let awaiting_call = match self.frames.last() {
+          Some(Frame {
+            kind: FrameKind::Host(host),
+            ..
+          }) => host.awaiting_call,
+          Some(_) => return Err("host dispatch found a function frame".to_string()),
+          None => return Err("host dispatch with no frame".to_string()),
+        };
+        if awaiting_call {
+          let result = self.pop()?;
+          self.current_host_frame_mut()?.awaiting_call = false;
+          Some(result)
+        } else {
+          None
+        }
+      };
+      let poll = {
+        let mut ctx = HostCtx {
+          root: self,
+          mc,
+          package,
+          builtins,
+        };
+        builtin.resume(&mut ctx, pending_result)?
+      };
+      if let HostPoll::Ready(value) = poll {
+        self.complete_host_frame(value)?;
+      }
+      self.check_memory_limit(mc)?;
+      return Ok(());
+    }
+
+    // Resolve the current function frame's instructions by looking up the
+    // indexed function in the package, then advance `ip` after fetching the
     // instruction.
     let (ip, inst) = {
       let frame = self
         .frames
         .last()
         .ok_or_else(|| "step with no frames".to_string())?;
-      let ip = frame.ip;
-      let (mod_idx, func_idx) = frame.function;
+      let function_frame = match &frame.kind {
+        FrameKind::Function(function_frame) => function_frame,
+        FrameKind::Host(_) => unreachable!("host frames return from step above"),
+      };
+      let ip = function_frame.ip;
+      let (mod_idx, func_idx) = frame.callable;
       let inst = match package.get_function(mod_idx, func_idx) {
         Some(crate::compiler::Callable::Function(f)) => {
           if ip >= f.instructions.len() {
@@ -1208,7 +1335,11 @@ impl<'gc> ExecRoot<'gc> {
         .frames
         .last_mut()
         .ok_or_else(|| "step with no frames".to_string())?;
-      frame.ip = ip + 1;
+      let function_frame = match &mut frame.kind {
+        FrameKind::Function(function_frame) => function_frame,
+        FrameKind::Host(_) => unreachable!("host frames return from step above"),
+      };
+      function_frame.ip = ip + 1;
     }
 
     match inst {
@@ -1399,14 +1530,22 @@ impl<'gc> ExecRoot<'gc> {
           .frames
           .last_mut()
           .ok_or_else(|| "SetLocal with no frame".to_string())?;
-        frame.locals[usize::from(i)] = val;
+        let function_frame = match &mut frame.kind {
+          FrameKind::Function(function_frame) => function_frame,
+          FrameKind::Host(_) => return Err("SetLocal in host frame".to_string()),
+        };
+        function_frame.locals[usize::from(i)] = val;
       }
       Instruction::LoadLocal(i) => {
         let frame = self
           .frames
           .last()
           .ok_or_else(|| "LoadLocal with no frame".to_string())?;
-        self.stack.push(frame.locals[usize::from(i)]);
+        let function_frame = match &frame.kind {
+          FrameKind::Function(function_frame) => function_frame,
+          FrameKind::Host(_) => return Err("LoadLocal in host frame".to_string()),
+        };
+        self.stack.push(function_frame.locals[usize::from(i)]);
       }
       Instruction::Call((mod_index, func_index), arity) => {
         self.call_fixed(mc, package, builtins, mod_index, func_index, arity)?;
@@ -1425,9 +1564,13 @@ impl<'gc> ExecRoot<'gc> {
           .frames
           .last_mut()
           .ok_or_else(|| "Jump with no frame".to_string())?;
+        let function_frame = match &mut frame.kind {
+          FrameKind::Function(function_frame) => function_frame,
+          FrameKind::Host(_) => return Err("Jump in host frame".to_string()),
+        };
         // `offset` is relative to the instruction following the `Jump` (the IP
         // has already been advanced past it), so `Jump(0)` is a no-op.
-        frame.ip = frame.ip.wrapping_add(offset as usize);
+        function_frame.ip = function_frame.ip.wrapping_add(offset as usize);
       }
       Instruction::JumpIfFalse(offset) => {
         let val = self.pop()?;
@@ -1437,7 +1580,11 @@ impl<'gc> ExecRoot<'gc> {
               .frames
               .last_mut()
               .ok_or_else(|| "JumpIfFalse with no frame".to_string())?;
-            frame.ip = frame.ip.wrapping_add(offset as usize);
+            let function_frame = match &mut frame.kind {
+              FrameKind::Function(function_frame) => function_frame,
+              FrameKind::Host(_) => return Err("JumpIfFalse in host frame".to_string()),
+            };
+            function_frame.ip = function_frame.ip.wrapping_add(offset as usize);
           }
           Value::Bool(true) => {}
           ref other => {
@@ -1568,7 +1715,7 @@ impl<'gc> ExecRoot<'gc> {
           package,
           builtins,
         };
-        builtin.call(&mut ctx, &args)?;
+        builtin.call(&mut ctx, (mod_index, func_index), &args)?;
       }
     }
     Ok(())
@@ -1660,10 +1807,9 @@ impl<'gc> ExecRoot<'gc> {
     // to the caller; record the boundary so `Return` can restore it.
     let stack_base = self.stack.len();
     self.frames.push(Frame {
-      function: (mod_idx, func_idx),
-      locals,
+      callable: (mod_idx, func_idx),
       stack_base,
-      ip: 0,
+      kind: FrameKind::Function(FunctionFrame { locals, ip: 0 }),
     });
     Ok(())
   }
@@ -1713,8 +1859,20 @@ impl<'gc, 'call> HostCtx<'gc, 'call> {
   }
 
   /// Push a value onto the execution's value stack.
-  pub fn push_value(&mut self, value: Value<'gc>) {
+  pub fn push(&mut self, value: Value<'gc>) {
     self.root.push_value(value);
+  }
+
+  pub fn pop(&mut self) -> Result<Value<'gc>, String> {
+    self.root.pop()
+  }
+
+  pub(crate) fn push_host_frame_at(&mut self, callable: (u32, u32), stack_base: usize) {
+    self.root.push_host_frame(callable, stack_base);
+  }
+
+  pub(crate) fn stack_len(&self) -> usize {
+    self.root.stack.len()
   }
 
   /// Reserve temporary Rust-heap memory against this execution's memory
@@ -1739,40 +1897,26 @@ impl<'gc, 'call> HostCtx<'gc, 'call> {
     self.root.reconcile_reservation(self.mc, reservation, bytes)
   }
 
-  /// Synchronously invoke a SafeLisp callable (`FunctionRef` or `Partial`)
-  /// with the given arguments, returning its result. This pushes a frame for
-  /// the callable, drives a sub-loop until that frame returns, and pops the
-  /// result off the stack — so the builtin gets the return value before
-  /// control returns to the caller's bytecode dispatch loop.
-  ///
-  /// The `callable` must be a `FunctionRef` or `Partial` value; anything else
-  /// is a runtime error. The `args` are pushed left-to-right (so the first arg
-  /// is the callable's first parameter).
-  pub fn call(&mut self, callable: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, String> {
-    let root: &mut ExecRoot<'gc> = self.root;
-    // Remember the current frame depth so we know when the sub-call has
-    // returned: we push a frame for the callable, run until the frame stack
-    // is back to the original depth, then the result is on top of the stack.
-    let depth_before = root.frames.len();
-
-    // Push args left-to-right (the interpreter pops in reverse for the callee).
+  /// Schedule a SafeLisp callable (`FunctionRef` or `Partial`) with the given
+  /// arguments and return immediately. The callback result will be left on top
+  /// of the VM stack before this host frame is resumed again.
+  pub fn call(&mut self, callable: Value<'gc>, args: &[Value<'gc>]) -> Result<(), String> {
+    let arity =
+      u16::try_from(args.len()).map_err(|_| format!("too many call arguments: {}", args.len()))?;
+    {
+      let frame = self.root.current_host_frame_mut()?;
+      if frame.awaiting_call {
+        return Err("host frame already has a pending call".to_string());
+      }
+      frame.awaiting_call = true;
+    }
     for arg in args {
-      root.stack.push(*arg);
+      self.root.stack.push(*arg);
     }
-    // Push the callable and invoke call_dynamic with the matching arity.
-    root.stack.push(callable);
-    root.call_dynamic(self.mc, self.package, self.builtins, args.len() as u16)?;
-
-    // Drive the sub-loop: step until the frame we just pushed has returned
-    // (i.e. the frame stack is back to `depth_before`). Each step may push
-    // further frames (nested calls), but the net effect is that when
-    // `frames.len() == depth_before`, the sub-call's result is on TOS.
-    while root.frames.len() > depth_before {
-      root.step(self.mc, self.package, self.builtins, &mut 0)?;
-    }
-
-    // The sub-call's return value is now on top of the stack.
-    root.pop()
+    self.root.stack.push(callable);
+    self
+      .root
+      .call_dynamic(self.mc, self.package, self.builtins, arity)
   }
 }
 

@@ -20,7 +20,7 @@ pub use builtins::{
 };
 pub use compiler::{compile_executable_from_source, Package};
 pub use interpreter::{
-  Accounted, CellContents, EnumInstance, Execution, HostCtx, Interpreter, MemoryReservation,
-  Partial, SLVal, SLValue, Status, StructInstance, Value,
+  Accounted, CellContents, EnumInstance, Execution, HostCtx, HostPoll, Interpreter,
+  MemoryReservation, Partial, SLVal, SLValue, Status, StructInstance, Value,
 };
 pub use prelude::std_prelude_from_specs;
