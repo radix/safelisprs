@@ -1034,5 +1034,5 @@ pub fn std_builtins() -> Builtins {
     ))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "wasm-tests"))]
 mod wasm_tests;

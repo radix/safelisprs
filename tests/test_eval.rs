@@ -1,5 +1,5 @@
-//! Shared end-to-end tests that run the same SafeLisp source through both
-//! the SLC bytecode compiler + interpreter and the WASM backend + wasmtime.
+//! Shared end-to-end tests for the SLC bytecode compiler + interpreter and,
+//! when `wasm-tests` is enabled, the WASM backend + wasmtime.
 //!
 //! Only features supported by *both* backends are tested here (Int, Float,
 //! Bool, `let`, `if`, same-module function calls, and the `std::+`/`std::-`/
@@ -10,7 +10,9 @@ use rstest::rstest;
 use safelisp::builtins::default_builtins;
 use safelisp::compiler::compile_executable_from_source;
 use safelisp::interpreter::{Interpreter, SLValue};
+#[cfg(feature = "wasm-tests")]
 use safelisp::wasm::{self, SLValue as WasmVal};
+#[cfg(feature = "wasm-tests")]
 use wasmtime::{Engine, Linker, Module, Store};
 
 const PRELUDE: &[(&str, &str)] = &[("std", "+"), ("std", "-"), ("std", "==")];
@@ -53,6 +55,7 @@ fn eval_interpreter(source: &str) -> Val {
 /// Run `source` through the WASM backend + wasmtime and return the result as
 /// a `Val`. Builtins are auto-registered from [`wasm::std_builtins`]. Panics
 /// on compile or runtime errors.
+#[cfg(feature = "wasm-tests")]
 fn eval_wasm(source: &str) -> Val {
   let builtins = wasm::std_builtins();
   let wasm = wasm::compile(source, &builtins, PRELUDE)
@@ -83,6 +86,7 @@ fn eval_wasm(source: &str) -> Val {
 }
 
 /// Register a single builtin with the linker, dispatching on arity.
+#[cfg(feature = "wasm-tests")]
 fn register_one(linker: &mut Linker<()>, b: &safelisp::wasm::Builtin) {
   let f = b.func.clone();
   match b.num_params {
@@ -226,5 +230,6 @@ fn register_one(linker: &mut Linker<()>, b: &safelisp::wasm::Builtin) {
 #[case::block_in_if_else("(fn main () ->Int (if false 0 (block (let a 1) 42)))", Val::Int(42))]
 fn both_backends_match_expected(#[case] source: &str, #[case] expected: Val) {
   assert_eq!(eval_interpreter(source), expected, "interpreter: {source}");
+  #[cfg(feature = "wasm-tests")]
   assert_eq!(eval_wasm(source), expected, "wasm: {source}");
 }

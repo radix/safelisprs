@@ -1,24 +1,30 @@
+[workspace]
+members = [".", "crates/sli", "crates/slc"]
+default-members = [".", "crates/sli", "crates/slc"]
+resolver = "2"
+
 [package]
 name = "safelisp"
 version = "0.1.0"
 edition = "2021"
 authors = ["Christopher Armstrong <radix@twistedmatrix.com>"]
 
+[features]
+default = []
+wasm = ["dep:wasm-encoder"]
+wasm-tests = ["wasm", "dep:wasmtime"]
+
 [dependencies]
-clap = {version = "3.1.15", features = ["derive"]}
 serde = "1.0"
 serde_derive = "1.0"
 unescape = "0.1"
-serde_yaml = "0.8"
-bincode = "1.0"
-anyhow = "1.0.56"
 gc-arena = "0.6"
-wasm-encoder = "0.252.0"
 blake3 = {version = "1", default-features = false}
 rand_chacha = {version = "0.9", default-features = false}
 rand_core = {version = "0.9", default-features = false}
+wasm-encoder = {version = "0.252.0", optional = true}
+wasmtime = {version = "46.0.1", default-features = false, features = ["cranelift", "runtime", "wat"], optional = true}
 
 [dev-dependencies]
 pretty_assertions = "1.2.1"
 rstest = "0.26.1"
-wasmtime = {version = "46.0.1", default-features = false, features = ["cranelift", "runtime", "wat"]}

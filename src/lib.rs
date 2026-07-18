@@ -12,4 +12,5 @@ pub mod interpreter;
 pub mod parser;
 pub mod prelude;
 pub mod typecheck;
+#[cfg(feature = "wasm")]
 pub mod wasm;

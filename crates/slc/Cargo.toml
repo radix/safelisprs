@@ -1,0 +1,12 @@
+[package]
+name = "slc"
+version = "0.1.0"
+edition = "2021"
+authors = ["Christopher Armstrong <radix@twistedmatrix.com>"]
+
+[dependencies]
+anyhow = "1.0.56"
+bincode = "1.0"
+clap = {version = "3.1.15", features = ["derive"]}
+safelisp = {path = "../.."}
+serde_yaml = "0.8"
