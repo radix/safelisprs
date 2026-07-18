@@ -13,11 +13,11 @@ pub struct Package {
   /// While the names here *can* be used for function lookup, they are only
   /// included for debugging purposes. In a complete "executable" package, all
   /// calls will be represented with index-based function offsets.
-  pub modules: LinkedModules,
-  pub main: Option<(u32, u32)>,
+  pub(crate) modules: LinkedModules,
+  pub(crate) main: Option<(u32, u32)>,
 }
 
-pub type LinkedCallable = Callable<(u32, u32), (u32, u32)>;
+pub(crate) type LinkedCallable = Callable<(u32, u32), (u32, u32)>;
 type CompiledCallable = Callable<(String, String), (String, String)>;
 
 /// Packages contain Callables, which can either be LinkedFunctions or
@@ -25,16 +25,16 @@ type CompiledCallable = Callable<(String, String), (String, String)>;
 /// the builtins when invoking a function. Builtin doesn't need a name because
 /// it's already in the Package::functions data.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum Callable<CallType, StructType> {
+pub(crate) enum Callable<CallType, StructType> {
   Function(Function<CallType, StructType>),
   Builtin,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Function<CallType, StructType> {
-  pub num_params: u16,
-  pub num_locals: u16,
-  pub instructions: Vec<Instruction<CallType, StructType>>,
+pub(crate) struct Function<CallType, StructType> {
+  pub(crate) num_params: u16,
+  pub(crate) num_locals: u16,
+  pub(crate) instructions: Vec<Instruction<CallType, StructType>>,
 }
 
 /// Instructions are parameterized by the representation of function calls.
@@ -44,7 +44,7 @@ pub struct Function<CallType, StructType> {
 /// TODO: This Instruction type is BIG. I'm guessing that reducing its size down
 /// to, say, 64 bits would lead to some wins?
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum Instruction<CallType, StructType> {
+pub(crate) enum Instruction<CallType, StructType> {
   /// loads local variable onto the stack
   LoadLocal(u16),
   /// assigns top of the stack to local variable.
@@ -95,35 +95,35 @@ pub enum Instruction<CallType, StructType> {
   JumpIfFalse(u32),
 }
 
-pub type LinkedFunction = Function<(u32, u32), (u32, u32)>;
+pub(crate) type LinkedFunction = Function<(u32, u32), (u32, u32)>;
 type CompiledFunction = Function<(String, String), (String, String)>;
 
 type LinkedInstruction = Instruction<(u32, u32), (u32, u32)>;
 type CompiledInstruction = Instruction<(String, String), (String, String)>;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TypeDef {
-  pub name: String,
-  pub constructors: Vec<ConstructorDef>,
+pub(crate) struct TypeDef {
+  pub(crate) name: String,
+  pub(crate) constructors: Vec<ConstructorDef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ConstructorDef {
-  pub name: String,
-  pub fields: Vec<String>,
+pub(crate) struct ConstructorDef {
+  pub(crate) name: String,
+  pub(crate) fields: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Module<CallType, StructType> {
-  pub name: String,
-  pub functions: Vec<(String, Callable<CallType, StructType>)>,
-  pub types: Vec<TypeDef>,
+pub(crate) struct Module<CallType, StructType> {
+  pub(crate) name: String,
+  pub(crate) functions: Vec<(String, Callable<CallType, StructType>)>,
+  pub(crate) types: Vec<TypeDef>,
 }
 
 type CompiledModule = Module<(String, String), (String, String)>;
 type CompiledModules = Vec<CompiledModule>;
-pub type LinkedModule = Module<(u32, u32), (u32, u32)>;
-pub type LinkedModules = Vec<LinkedModule>;
+pub(crate) type LinkedModule = Module<(u32, u32), (u32, u32)>;
+pub(crate) type LinkedModules = Vec<LinkedModule>;
 
 struct ModuleIndexEntry {
   module: u32,
@@ -153,11 +153,11 @@ impl Package {
     }
   }
 
-  pub fn get_module(&self, mod_index: u32) -> Option<&LinkedModule> {
+  pub(crate) fn get_module(&self, mod_index: u32) -> Option<&LinkedModule> {
     self.modules.get(mod_index as usize)
   }
 
-  pub fn get_function(&self, module: u32, function: u32) -> Option<&LinkedCallable> {
+  pub(crate) fn get_function(&self, module: u32, function: u32) -> Option<&LinkedCallable> {
     self
       .modules
       .get(module as usize)
@@ -165,20 +165,20 @@ impl Package {
       .map(|(_, f)| f)
   }
 
-  pub fn get_type(&self, module: u32, type_: u32) -> Option<&TypeDef> {
+  pub(crate) fn get_type(&self, module: u32, type_: u32) -> Option<&TypeDef> {
     self
       .modules
       .get(module as usize)
       .and_then(|m| m.types.get(type_ as usize))
   }
 
-  pub fn get_struct(&self, module: u32, struct_: u32) -> Option<&ConstructorDef> {
+  pub(crate) fn get_struct(&self, module: u32, struct_: u32) -> Option<&ConstructorDef> {
     self
       .get_type(module, struct_)
       .and_then(|type_| type_.constructors.first())
   }
 
-  pub fn get_enum(&self, module: u32, enum_: u32) -> Option<&TypeDef> {
+  pub(crate) fn get_enum(&self, module: u32, enum_: u32) -> Option<&TypeDef> {
     self.get_type(module, enum_)
   }
 }

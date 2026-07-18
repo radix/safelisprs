@@ -200,7 +200,8 @@ impl TypecheckInfo {
 }
 
 impl FieldAccessInfo {
-  pub fn receiver_type(&self) -> &str {
+  #[cfg(test)]
+  pub(crate) fn receiver_type(&self) -> &str {
     &self.receiver_type
   }
 

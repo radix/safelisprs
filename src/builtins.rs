@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use blake3::Hasher;
-use gc_arena::{Gc, Mutation, RefLock};
+use gc_arena::{Gc, RefLock};
 use rand_chacha::rand_core::{RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
@@ -17,6 +17,7 @@ pub enum Trait {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum TypeConst {
   Int,
   Float,
@@ -102,7 +103,7 @@ pub(crate) type HostFn = Arc<
   dyn for<'gc, 'call> Fn(&mut HostCtx<'gc, 'call>, &[Value<'gc>]) -> Result<Value<'gc>, String>,
 >;
 
-/// A builtin: metadata ([`BuiltinSpec`]) plus its handler ([`HostFn`]).
+/// A builtin: metadata ([`BuiltinSpec`]) plus its host handler.
 #[derive(Clone)]
 pub struct Builtin {
   spec: BuiltinSpec,
@@ -212,47 +213,6 @@ impl Builtin {
     }
   }
 
-  /// A binary builtin that needs the GC `Mutation` context (e.g. to allocate a
-  /// fresh `List`). `func` receives `(mc, left, right)`.
-  pub fn binary_alloc(
-    module: &'static str,
-    name: &'static str,
-    signature: BuiltinSignature,
-    func: impl for<'gc> Fn(&Mutation<'gc>, Value<'gc>, Value<'gc>) -> Result<SLVal<'gc>, String>
-      + 'static,
-  ) -> Self {
-    Builtin {
-      spec: BuiltinSpec {
-        module,
-        name,
-        num_params: Some(2),
-        signature,
-      },
-      func: Arc::new(move |ctx, args| {
-        let value = func(ctx.mc(), args[0], args[1])?;
-        Ok(ctx.alloc_heap(value))
-      }),
-    }
-  }
-
-  /// A ternary (three-arg) builtin.
-  pub fn ternary(
-    module: &'static str,
-    name: &'static str,
-    signature: BuiltinSignature,
-    func: impl for<'gc> Fn(Value<'gc>, Value<'gc>, Value<'gc>) -> Result<Value<'gc>, String> + 'static,
-  ) -> Self {
-    Builtin {
-      spec: BuiltinSpec {
-        module,
-        name,
-        num_params: Some(3),
-        signature,
-      },
-      func: Arc::new(move |_ctx, args| func(args[0], args[1], args[2])),
-    }
-  }
-
   /// A variadic builtin: it receives the whole argument slice and may be called
   /// with any number of args (including zero). `num_params` is `None`, so the
   /// interpreter uses the call-site arity (carried on `Instruction::Call` /
@@ -277,8 +237,7 @@ impl Builtin {
 
 /// A registry of builtins available to a program. The compiler reads the
 /// [`BuiltinSpec`]s (via [`Builtins::specs`]) to register `Callable::Builtin`
-/// slots; the interpreter looks up the handler (via [`Builtins::lookup`]) at
-/// runtime. Mirrors the WASM backend's `wasm::Builtins`.
+/// slots; the interpreter looks up the matching handler at runtime.
 #[derive(Clone, Default)]
 pub struct Builtins {
   entries: Vec<Builtin>,
@@ -295,6 +254,7 @@ impl Builtins {
     self
   }
 
+  /// Iterate over all registered builtins.
   pub fn iter(&self) -> impl Iterator<Item = &Builtin> {
     self.entries.iter()
   }
@@ -306,7 +266,7 @@ impl Builtins {
   }
 
   /// Look up a builtin by `(module, name)`.
-  pub fn lookup(&self, module: &str, name: &str) -> Option<&Builtin> {
+  pub(crate) fn lookup(&self, module: &str, name: &str) -> Option<&Builtin> {
     self
       .entries
       .iter()
@@ -869,7 +829,7 @@ pub fn default_builtins() -> Builtins {
 
 /// Derive a deterministic 64-bit seed from a parent seed and a name, using
 /// BLAKE3. The 64-bit result is the first 8 bytes of the BLAKE3 XOF output.
-pub fn rand_rng(parent_seed: i64, name: &str) -> i64 {
+pub(crate) fn rand_rng(parent_seed: i64, name: &str) -> i64 {
   // NEVER CHANGE THIS CODE
   let mut h = Hasher::new();
   h.update(&parent_seed.to_le_bytes());
@@ -883,7 +843,7 @@ pub fn rand_rng(parent_seed: i64, name: &str) -> i64 {
 /// `roll` is in `1..=sides` and `new_seed` is the advanced state, so callers
 /// thread it into the next `rand_roll` (or `rand::rng`) call. Pure and
 /// deterministic: same inputs always yield the same outputs.
-pub fn rand_roll(seed: i64, sides: i64) -> (i64, i64) {
+pub(crate) fn rand_roll(seed: i64, sides: i64) -> (i64, i64) {
   // NEVER CHANGE THIS CODE
   let mut chachaseed = [0u8; 32];
   chachaseed[..8].copy_from_slice(&seed.to_le_bytes());

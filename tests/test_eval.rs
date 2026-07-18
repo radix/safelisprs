@@ -7,9 +7,10 @@
 //! modules under `src/`.
 
 use rstest::rstest;
-use safelisp::builtins::default_builtins;
-use safelisp::compiler::compile_executable_from_source;
-use safelisp::interpreter::{Interpreter, SLValue};
+use safelisp::{
+  compile_executable_from_source, default_builtins, sig, Builtin, Builtins, Interpreter, SLValue,
+  TypeConst, Value,
+};
 #[cfg(feature = "wasm-tests")]
 use safelisp::wasm::{self, SLValue as WasmVal};
 #[cfg(feature = "wasm-tests")]
@@ -50,6 +51,31 @@ fn eval_interpreter(source: &str) -> Val {
     SLValue::Void => Val::Void,
     other => panic!("expected scalar from interpreter, got {:?}", other),
   }
+}
+
+#[test]
+fn custom_interpreter_builtins_are_public_api() {
+  let builtins = Builtins::new().with_builtin(Builtin::unary(
+    "main",
+    "add2",
+    sig(&[], vec![TypeConst::Int], None, TypeConst::Int),
+    |value| match value {
+      Value::Int(n) => Ok(Value::Int(n + 2)),
+      other => Err(format!("expected Int, got {}", other.type_name())),
+    },
+  ));
+  let package = compile_executable_from_source(
+    "(fn main () ->Int (add2 3))",
+    ("main", "main"),
+    &builtins.specs(),
+    &[],
+  )
+  .unwrap_or_else(|e| panic!("compile failed: {e}"));
+  let mut exec = Interpreter::with_builtins(package, builtins)
+    .call_main()
+    .unwrap_or_else(|e| panic!("call_main failed: {e}"));
+
+  assert_eq!(exec.run_until_done().unwrap(), SLValue::Int(5));
 }
 
 /// Run `source` through the WASM backend + wasmtime and return the result as

@@ -5,9 +5,7 @@ use std::path::PathBuf;
 use anyhow::{anyhow, Result};
 use clap::Parser;
 
-use safelisp::builtins::default_builtins;
-use safelisp::compiler::compile_executable_from_source;
-use safelisp::prelude::std_prelude_from_specs;
+use safelisp::{compile_executable_from_source, default_builtins, std_prelude_from_specs};
 
 #[derive(Parser)]
 #[clap(author, version, about, long_about = None)]

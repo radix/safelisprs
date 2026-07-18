@@ -87,30 +87,15 @@ pub struct Builtin {
   /// WASM side, so the actual WASM param count is `num_params * 2`).
   pub num_params: usize,
   /// The SafeLisp-level type checked at call sites.
-  pub signature: BuiltinSignature,
+  pub(crate) signature: BuiltinSignature,
   /// The host implementation.
   pub func: HostFn,
 }
 
 impl Builtin {
-  /// A nullary (zero-arg) host function.
-  pub fn nullary(
-    module: &str,
-    name: &str,
-    signature: BuiltinSignature,
-    func: impl Fn() -> SLValue + Send + Sync + 'static,
-  ) -> Self {
-    Builtin {
-      module: module.to_string(),
-      name: name.to_string(),
-      num_params: 0,
-      signature,
-      func: Arc::new(move |_| func()),
-    }
-  }
-
   /// A unary (one-arg) host function.
-  pub fn unary(
+  #[cfg(test)]
+  pub(crate) fn unary(
     module: &str,
     name: &str,
     signature: BuiltinSignature,
@@ -126,7 +111,7 @@ impl Builtin {
   }
 
   /// A binary (two-arg) host function.
-  pub fn binary(
+  pub(crate) fn binary(
     module: &str,
     name: &str,
     signature: BuiltinSignature,
@@ -141,21 +126,6 @@ impl Builtin {
     }
   }
 
-  /// A ternary (three-arg) host function.
-  pub fn ternary(
-    module: &str,
-    name: &str,
-    signature: BuiltinSignature,
-    func: impl Fn(SLValue, SLValue, SLValue) -> SLValue + Send + Sync + 'static,
-  ) -> Self {
-    Builtin {
-      module: module.to_string(),
-      name: name.to_string(),
-      num_params: 3,
-      signature,
-      func: Arc::new(move |args| func(args[0], args[1], args[2])),
-    }
-  }
 }
 
 /// A registry of host functions available to the compiled module.
@@ -166,12 +136,12 @@ pub struct Builtins {
 
 impl Builtins {
   /// Create an empty registry.
-  pub fn new() -> Self {
+  pub(crate) fn new() -> Self {
     Builtins::default()
   }
 
   /// Add a builtin to this registry (builder style).
-  pub fn with_builtin(mut self, builtin: Builtin) -> Self {
+  pub(crate) fn with_builtin(mut self, builtin: Builtin) -> Self {
     self.entries.push(builtin);
     self
   }

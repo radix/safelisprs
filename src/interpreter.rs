@@ -15,7 +15,7 @@ use crate::compiler::{Callable, Instruction, LinkedFunction as Function, Package
 /// cap. `Rc<Cell<_>>` is appropriate because gc-arena is single-threaded; if
 /// `Execution` ever needs to be `Send`, swap for `Arc<AtomicUsize>`.
 #[derive(Default)]
-pub struct MemoryTracker {
+pub(crate) struct MemoryTracker {
   external_bytes: Cell<usize>,
   limit: Cell<Option<usize>>,
   /// Accumulated *positive* external allocation debt waiting to be fed to
@@ -31,7 +31,7 @@ pub struct MemoryTracker {
 }
 
 impl MemoryTracker {
-  pub fn new() -> Self {
+  pub(crate) fn new() -> Self {
     Self::default()
   }
 
@@ -87,15 +87,15 @@ impl MemoryTracker {
     Ok(())
   }
 
-  pub fn external_bytes(&self) -> usize {
+  pub(crate) fn external_bytes(&self) -> usize {
     self.external_bytes.get()
   }
 
-  pub fn limit(&self) -> Option<usize> {
+  pub(crate) fn limit(&self) -> Option<usize> {
     self.limit.get()
   }
 
-  pub fn set_limit(&self, limit: Option<usize>) {
+  pub(crate) fn set_limit(&self, limit: Option<usize>) {
     self.limit.set(limit);
   }
 
@@ -117,7 +117,7 @@ impl MemoryTracker {
 /// box. Each `Execution` mints one `Rc<MemoryTracker>`; every value allocated
 /// in that execution receives a clone. The tracker stays alive until the last
 /// `Accounted` box is swept (which releases its `Rc`).
-pub type SharedTracker = Rc<MemoryTracker>;
+pub(crate) type SharedTracker = Rc<MemoryTracker>;
 
 /// A per-execution reservation for temporary Rust-heap memory.
 ///
@@ -127,9 +127,9 @@ pub type SharedTracker = Rc<MemoryTracker>;
 /// long as the corresponding allocation is live.
 ///
 /// Reservations deliberately do not add GC pacing debt. If the allocation is
-/// returned as an [`SLVal`], [`Builtin::call`](crate::builtins::Builtin::call)
-/// immediately wraps it in [`Accounted`] after the host handler returns; that
-/// permanent charge supplies the pacing debt.
+/// returned as an [`SLVal`], the builtin call path immediately wraps it in
+/// [`Accounted`] after the host handler returns; that permanent charge
+/// supplies the pacing debt.
 pub struct MemoryReservation {
   tracker: SharedTracker,
   bytes: usize,
@@ -237,7 +237,7 @@ pub(crate) fn external_bytes_of<'gc>(value: &SLVal<'gc>) -> usize {
 /// accounting. The `value: SLVal` is the actual payload; `charge` holds the
 /// byte count of the Rust-heap storage `value` directly owns (string bytes,
 /// list/partial `Vec` backings) and releases it to the per-execution
-/// [`MemoryTracker`] on `Drop`.
+/// the execution's memory tracker on `Drop`.
 ///
 /// `Accounted` is `!Clone` by design: every runtime value must be created via
 /// `ExecRoot::alloc_heap`, which charges the tracker. The `charge` field is
@@ -449,11 +449,6 @@ impl<'gc> ExecRoot<'gc> {
     Value::Heap(Gc::new(mc, Accounted::new(value, self.tracker.clone())))
   }
 
-  /// The per-execution shared memory tracker.
-  pub(crate) fn tracker(&self) -> SharedTracker {
-    self.tracker.clone()
-  }
-
   /// Reconstruct a runtime `Value` inside this execution's arena from an owned
   /// `SLValue`. Scalar values are imported inline; heap-shaped values are
   /// deep-copied into fresh GC boxes.
@@ -552,6 +547,7 @@ enum FrameFunc {
   /// `MemoryCharge` so the memory limit sees the `Inline` frame's heap
   /// overhead. (Without this, deep `Inline` recursion would evade the limit
   /// the same way cloned instruction vectors did before step 1.)
+  #[cfg(test)]
   Inline {
     function: Function,
     /// Held only for its `Drop` (which releases the instruction-vector charge
@@ -566,6 +562,7 @@ enum FrameFunc {
 impl FrameFunc {
   /// The byte footprint of an `Inline` function's `instructions: Vec<…>`:
   /// `capacity() * size_of::<Instruction>()`.
+  #[cfg(test)]
   fn instruction_bytes(f: &Function) -> usize {
     let elem_size = std::mem::size_of::<crate::compiler::Instruction<(u32, u32), (u32, u32)>>();
     f.instructions.capacity() * elem_size
@@ -573,6 +570,7 @@ impl FrameFunc {
 
   /// Construct an `Inline` `FrameFunc`, charging the function's instruction
   /// vector to `tracker`.
+  #[cfg(test)]
   fn inline(function: Function, tracker: SharedTracker) -> Self {
     let bytes = Self::instruction_bytes(&function);
     FrameFunc::Inline {
@@ -583,8 +581,8 @@ impl FrameFunc {
 }
 
 // `Function` (a.k.a. `LinkedFunction`) is `'static` and holds no `Gc` pointers,
-// so it gets a trivial, empty `Collect` impl. (Kept for callers that store
-// `Function` directly, e.g. `Execution::enter_function`'s signature.)
+// so it gets a trivial, empty `Collect` impl. The test-only inline bytecode
+// entry point stores `Function` directly in a frame.
 gc_arena::static_collect!(Function);
 
 /// The mutable contents of a `Cell`: a shared handle to any runtime value.
@@ -642,8 +640,8 @@ pub enum SLVal<'gc> {
 #[derive(Debug, PartialEq, Collect)]
 #[collect(no_drop)]
 pub struct Partial<'gc> {
-  function: (u32, u32),
-  args: Vec<Value<'gc>>,
+  pub function: (u32, u32),
+  pub args: Vec<Value<'gc>>,
 }
 
 #[derive(Debug, PartialEq, Collect)]
@@ -695,7 +693,7 @@ impl<'gc> Value<'gc> {
   /// A bounded-size description suitable for runtime type errors. Default
   /// builtins use this instead of debug-formatting guest-controlled values,
   /// which could itself allocate an unbounded diagnostic string.
-  pub(crate) fn type_name(&self) -> &'static str {
+  pub fn type_name(&self) -> &'static str {
     match self {
       Value::Int(_) => "Int",
       Value::Float(_) => "Float",
@@ -725,7 +723,7 @@ impl<'gc> Value<'gc> {
 
   /// Convert a runtime `Value` into an owned `SLValue`, deep-copying any `Gc`-held
   /// sub-values out of the arena.
-  fn to_value(self) -> SLValue {
+  pub fn to_value(self) -> SLValue {
     match self {
       Value::Int(i) => SLValue::Int(i),
       Value::Float(x) => SLValue::Float(x),
@@ -739,7 +737,7 @@ impl<'gc> Value<'gc> {
 }
 
 impl<'gc> SLVal<'gc> {
-  pub(crate) fn type_name(&self) -> &'static str {
+  pub fn type_name(&self) -> &'static str {
     match self {
       SLVal::String(_) => "String",
       SLVal::Partial(_) => "Partial",
@@ -749,7 +747,7 @@ impl<'gc> SLVal<'gc> {
     }
   }
 
-  fn to_value(&self) -> SLValue {
+  pub fn to_value(&self) -> SLValue {
     match self {
       SLVal::String(s) => SLValue::String(s.clone()),
       SLVal::Partial(p) => SLValue::Partial {
@@ -840,7 +838,7 @@ pub struct Execution {
   arena: Arena<Rootable![ExecRoot<'_>]>,
   package: Package,
   builtins: Builtins,
-  pub executed: u64,
+  executed: u64,
   /// Per-execution memory tracker, shared with every `Accounted` box in this
   /// arena. `Execution` owns the canonical `Rc`; cloned into each `Accounted`
   /// at allocation (see `ExecRoot::alloc_heap`).
@@ -848,7 +846,7 @@ pub struct Execution {
 }
 
 impl Execution {
-  pub fn new(package: Package, builtins: Builtins) -> Self {
+  pub(crate) fn new(package: Package, builtins: Builtins) -> Self {
     let tracker = Rc::new(MemoryTracker::new());
     let tracker_for_root = tracker.clone();
     let arena = Arena::new(move |_mc| ExecRoot {
@@ -870,8 +868,14 @@ impl Execution {
     self.arena.mutate(|_, root| root.is_done())
   }
 
+  /// The cumulative number of bytecodes executed by this execution.
+  pub fn executed(&self) -> u64 {
+    self.executed
+  }
+
   /// The number of items currently on the value stack.
-  pub fn stack_len(&self) -> usize {
+  #[cfg(test)]
+  pub(crate) fn stack_len(&self) -> usize {
     self.arena.mutate(|_, root| root.stack.len())
   }
 
@@ -889,13 +893,15 @@ impl Execution {
 
   /// The current number of live `Gc` allocations in this execution's arena.
   /// Useful for tests that want to observe garbage collection.
-  pub fn gc_count(&self) -> usize {
+  #[cfg(test)]
+  pub(crate) fn gc_count(&self) -> usize {
     self.arena.metrics().total_gc_count()
   }
 
   /// The total bytes currently allocated by live `Gc` pointers in this
   /// execution's arena (the gc-arena-reported portion of `memory_usage`).
-  pub fn gc_allocation_bytes(&self) -> usize {
+  #[cfg(test)]
+  pub(crate) fn gc_allocation_bytes(&self) -> usize {
     self.arena.metrics().total_gc_allocation()
   }
 
@@ -925,14 +931,15 @@ impl Execution {
   /// Force a full garbage-collection cycle, freeing all unreachable `Gc`
   /// pointers. Useful for tests that want to verify that collection reclaims
   /// garbage.
-  pub fn collect_all(&mut self) {
+  #[cfg(test)]
+  pub(crate) fn collect_all(&mut self) {
     self.arena.finish_cycle();
   }
 
   /// Run up to `n` bytecodes. Returns `Paused` if the budget exhausted before
   /// completion, or `Done(v)` if the program completed. Errors propagate via
   /// `Err`. The cumulative count of executed bytecodes is available on
-  /// `Execution::executed` after the call returns.
+  /// [`Execution::executed`] after the call returns.
   pub fn run(&mut self, n: u64) -> Result<Status, String> {
     let start = self.executed;
     let mut executed = self.executed;
@@ -961,7 +968,7 @@ impl Execution {
   /// execution completes. Returns `Paused` if the deadline expired before
   /// completion, or `Done(v)` if the program completed. Errors propagate via
   /// `Err`. The cumulative count of executed bytecodes is available on
-  /// `Execution::executed` after the call returns.
+  /// [`Execution::executed`] after the call returns.
   pub fn run_for_duration(&mut self, duration: Duration) -> Result<Status, String> {
     let deadline = Instant::now() + duration;
     let mut executed = self.executed;
@@ -990,7 +997,8 @@ impl Execution {
   /// stored inline in the frame (not looked up via a `Package`), so this is
   /// suitable for ad-hoc/test entry points that build bytecode directly. For
   /// production paths prefer `enter_function_at` (indexed lookup, no clone).
-  pub fn enter_function(
+  #[cfg(test)]
+  pub(crate) fn enter_function(
     &mut self,
     function: Function,
     pre_bound: Vec<SLValue>,
@@ -1007,7 +1015,7 @@ impl Execution {
   /// this execution's `Package`, with optional pre-bound values given as owned
   /// `SLValue`s. The frame stores the index (not a clone of the function's
   /// instructions), so deep recursion is cheap.
-  pub fn enter_function_at(
+  pub(crate) fn enter_function_at(
     &mut self,
     mod_idx: u32,
     func_idx: u32,
@@ -1250,6 +1258,7 @@ impl<'gc> ExecRoot<'gc> {
             }
           }
         }
+        #[cfg(test)]
         FrameFunc::Inline { function: f, .. } => {
           if ip >= f.instructions.len() {
             return Err("ran past end of function without Return".to_string());
@@ -1729,6 +1738,7 @@ impl<'gc> ExecRoot<'gc> {
   /// frame owns a clone of the `Function` and reads its instructions inline at
   /// `step` time. Shallow recursion only — each push clones the instruction
   /// vector.
+  #[cfg(test)]
   fn enter_inline_function(
     &mut self,
     _mc: &'gc Mutation<'gc>,
@@ -1755,11 +1765,10 @@ impl<'gc> ExecRoot<'gc> {
   }
 }
 
-/// The runtime context passed to a builtin handler ([`crate::builtins::HostFn`]).
-/// It carries the GC `Mutation` context, the `Package` / `Builtins` registries,
-/// and a short-lived mutable borrow of the execution's [`ExecRoot`] — enough
-/// for a builtin to allocate values, push results, and invoke SafeLisp
-/// callables.
+/// The runtime context passed to a builtin handler. It carries the GC
+/// `Mutation` context, the `Package` / `Builtins` registries, and a
+/// short-lived mutable borrow of the execution root — enough for a builtin to
+/// allocate values, push results, and invoke SafeLisp callables.
 ///
 /// # Lifetimes
 ///
@@ -1804,19 +1813,13 @@ impl<'gc, 'call> HostCtx<'gc, 'call> {
     self.root.push_value(value);
   }
 
-  /// The per-execution shared memory tracker.
-  pub fn tracker(&self) -> SharedTracker {
-    self.root.tracker()
-  }
-
   /// Reserve temporary Rust-heap memory against this execution's memory
   /// limit before allocating it.
   ///
-  /// The returned guard is tied to this execution's [`MemoryTracker`] and
-  /// releases automatically. Keep it alive until the corresponding temporary
-  /// allocation is dropped or returned from the host function. Returned
-  /// `SLVal` storage is immediately adopted by the normal [`Accounted`]
-  /// allocation chokepoint.
+  /// The returned guard is tied to this execution's memory tracker and releases
+  /// automatically. Keep it alive until the corresponding temporary allocation
+  /// is dropped or returned from the host function. Returned `SLVal` storage is
+  /// immediately adopted by the normal [`Accounted`] allocation chokepoint.
   pub fn reserve_memory(&self, bytes: usize) -> Result<MemoryReservation, String> {
     self.root.reserve_memory(self.mc, bytes)
   }
@@ -1832,15 +1835,6 @@ impl<'gc, 'call> HostCtx<'gc, 'call> {
     self.root.reconcile_reservation(self.mc, reservation, bytes)
   }
 
-  /// Check this execution's hard memory limit immediately.
-  ///
-  /// Builtins that perform repeated GC allocations inside one bytecode
-  /// instruction should call this during the loop rather than waiting for the
-  /// interpreter's post-instruction check.
-  pub fn check_memory_limit(&self) -> Result<(), String> {
-    self.root.check_memory_limit(self.mc)
-  }
-
   /// Synchronously invoke a SafeLisp callable (`FunctionRef` or `Partial`)
   /// with the given arguments, returning its result. This pushes a frame for
   /// the callable, drives a sub-loop until that frame returns, and pops the
@@ -1850,7 +1844,11 @@ impl<'gc, 'call> HostCtx<'gc, 'call> {
   /// The `callable` must be a `FunctionRef` or `Partial` value; anything else
   /// is a runtime error. The `args` are pushed left-to-right (so the first arg
   /// is the callable's first parameter).
-  pub fn call(&mut self, callable: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, String> {
+  pub fn call(
+    &mut self,
+    callable: Value<'gc>,
+    args: &[Value<'gc>],
+  ) -> Result<Value<'gc>, String> {
     let root: &mut ExecRoot<'gc> = self.root;
     // Remember the current frame depth so we know when the sub-call has
     // returned: we push a frame for the callable, run until the frame stack

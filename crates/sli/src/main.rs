@@ -5,11 +5,10 @@ use std::time::Duration;
 use anyhow::{anyhow, Result};
 use clap::Parser;
 
-use safelisp::builtins::default_builtins;
-use safelisp::compiler::compile_executable_from_source;
-use safelisp::compiler::Package;
-use safelisp::interpreter::{Interpreter, Status};
-use safelisp::prelude::std_prelude_from_specs;
+use safelisp::{
+  compile_executable_from_source, default_builtins, std_prelude_from_specs, Interpreter, Package,
+  Status,
+};
 
 #[derive(Parser)]
 #[clap(author, version, about, long_about = None)]
@@ -105,7 +104,8 @@ fn main() -> Result<()> {
         Status::Paused => {
           eprintln!(
             "instruction limit exceeded: {} instructions executed (limit {})",
-            exec.executed, limit
+            exec.executed(),
+            limit
           );
           std::process::exit(1);
         }
@@ -120,7 +120,8 @@ fn main() -> Result<()> {
         Status::Paused => {
           eprintln!(
             "time limit exceeded: {} instructions executed (limit {}ms)",
-            exec.executed, ms
+            exec.executed(),
+            ms
           );
           std::process::exit(1);
         }

@@ -1,7 +1,6 @@
 use std::process::Command;
 
-use safelisp::compiler::Package;
-use safelisp::interpreter::{Interpreter, SLValue};
+use safelisp::{Interpreter, Package, SLValue};
 
 #[test]
 fn slc_uses_std_prelude() {
