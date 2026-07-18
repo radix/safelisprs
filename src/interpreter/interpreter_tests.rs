@@ -24,6 +24,22 @@ fn test_module(name: &str, functions: Vec<(String, LinkedCallable)>) -> LinkedMo
   }
 }
 
+fn package_with_main_function(function: LinkedFunction) -> Package {
+  Package {
+    modules: vec![test_module(
+      "main",
+      vec![("main".to_string(), Callable::Function(function))],
+    )],
+    main: Some((0, 0)),
+  }
+}
+
+fn exec_with_function(function: LinkedFunction, pre_bound: Vec<SLValue>) -> Execution {
+  let mut exec = Execution::new(package_with_main_function(function), default_builtins());
+  exec.enter_function_at(0, 0, pre_bound).unwrap();
+  exec
+}
+
 /// Test for a simple "identity" function that returns its argument
 #[test]
 fn test_interpret_identity() {
@@ -450,14 +466,12 @@ fn function_definition_expression_returns_function() {
 
 #[test]
 fn step_advances_ip_and_leaves_value_on_stack() {
-  let pkg = Package::default();
   let code = compiler::Function {
     num_locals: 0,
     num_params: 0,
     instructions: vec![Instruction::PushInt(7), Instruction::Return],
   };
-  let mut exec = Execution::new(pkg, default_builtins());
-  exec.enter_function(code, vec![]).unwrap();
+  let mut exec = exec_with_function(code, vec![]);
   // After pushing the initial frame, there's one frame at ip 0.
   assert_eq!(exec.stack_len(), 0);
   exec.step().unwrap();
@@ -502,8 +516,7 @@ fn scalar_bytecode_pushes_do_not_allocate_gc_boxes() {
       num_params: 0,
       instructions,
     };
-    let mut exec = Execution::new(Package::default(), default_builtins());
-    exec.enter_function(code, vec![]).unwrap();
+    let mut exec = exec_with_function(code, vec![]);
     assert_eq!(exec.gc_count(), 0);
     assert_eq!(exec.run_until_done().unwrap(), expected);
     assert_eq!(exec.gc_count(), 0);
@@ -526,8 +539,7 @@ fn importing_scalar_slvalues_does_not_allocate_gc_boxes() {
       num_params: 0,
       instructions: vec![Instruction::LoadLocal(0), Instruction::Return],
     };
-    let mut exec = Execution::new(Package::default(), default_builtins());
-    exec.enter_function(code, vec![value.clone()]).unwrap();
+    let mut exec = exec_with_function(code, vec![value.clone()]);
     assert_eq!(exec.gc_count(), 0);
     assert_eq!(exec.run_until_done().unwrap(), value);
     assert_eq!(exec.gc_count(), 0);
@@ -536,14 +548,12 @@ fn importing_scalar_slvalues_does_not_allocate_gc_boxes() {
 
 #[test]
 fn run_until_done_pops_final_value() {
-  let pkg = Package::default();
   let code = compiler::Function {
     num_locals: 0,
     num_params: 0,
     instructions: vec![Instruction::PushInt(99), Instruction::Return],
   };
-  let mut exec = Execution::new(pkg, default_builtins());
-  exec.enter_function(code, vec![]).unwrap();
+  let mut exec = exec_with_function(code, vec![]);
   let result = exec.run_until_done().unwrap();
   assert_eq!(result, SLValue::Int(99));
   // The stack should be empty after run_until_done pops the final value.
@@ -552,14 +562,12 @@ fn run_until_done_pops_final_value() {
 
 #[test]
 fn running_past_end_without_return_errors() {
-  let pkg = Package::default();
   let code = compiler::Function {
     num_locals: 0,
     num_params: 0,
     instructions: vec![Instruction::PushInt(1)],
   };
-  let mut exec = Execution::new(pkg, default_builtins());
-  exec.enter_function(code, vec![]).unwrap();
+  let mut exec = exec_with_function(code, vec![]);
   exec.step().unwrap(); // PushInt
   let err = exec.step().unwrap_err();
   assert!(err.contains("ran past end"), "unexpected error: {}", err);
@@ -585,14 +593,12 @@ fn call_dynamic_on_non_callable_errors() {
 
 #[test]
 fn call_to_missing_module_errors() {
-  let pkg = Package::default();
   let code = compiler::Function {
     num_locals: 0,
     num_params: 0,
-    instructions: vec![Instruction::Call((0, 0), 0)],
+    instructions: vec![Instruction::Call((1, 0), 0)],
   };
-  let mut exec = Execution::new(pkg, default_builtins());
-  exec.enter_function(code, vec![]).unwrap();
+  let mut exec = exec_with_function(code, vec![]);
   let err = exec.step().unwrap_err();
   assert!(
     err.contains("Module not found"),
@@ -708,16 +714,11 @@ fn function_call_leaves_no_stack_garbage() {
   let pkg =
     compile_executable_from_source(source, ("main", "main"), &default_builtins().specs(), &[])
       .unwrap();
-  let (mod_idx, fn_idx) = pkg.main.unwrap();
-  let function = pkg.get_function(mod_idx, fn_idx).unwrap().clone();
-  if let Callable::Function(function) = function {
-    let mut exec = Execution::new(pkg, default_builtins());
-    exec.enter_function(function, vec![]).unwrap();
-    let result = exec.run_until_done().unwrap();
-    assert_eq!(result, SLValue::Int(2));
-    // run_until_done pops the final value, so the stack should be empty.
-    assert_eq!(exec.stack_len(), 0);
-  }
+  let mut exec = Interpreter::new(pkg).call_main().unwrap();
+  let result = exec.run_until_done().unwrap();
+  assert_eq!(result, SLValue::Int(2));
+  // run_until_done pops the final value, so the stack should be empty.
+  assert_eq!(exec.stack_len(), 0);
 }
 
 #[test]
@@ -909,7 +910,7 @@ fn collect_all_frees_unreachable_values() {
   let interp = Interpreter::new(pkg);
   let mut exec = interp.call_main().unwrap();
 
-  // `call_main` enters the function. Inline Void locals do not allocate.
+  // `call_main` enters the function. Void locals do not allocate.
   let baseline = exec.gc_count();
   assert_eq!(baseline, 0);
 
@@ -1967,16 +1968,11 @@ fn value_returning_callee_transfers_exactly_its_result() {
   let pkg =
     compile_executable_from_source(source, ("main", "main"), &default_builtins().specs(), &[])
       .unwrap();
-  let (mod_idx, fn_idx) = pkg.main.unwrap();
-  let function = pkg.get_function(mod_idx, fn_idx).cloned().unwrap();
-  if let Callable::Function(function) = function {
-    let mut exec = Execution::new(pkg, default_builtins());
-    exec.enter_function(function, vec![]).unwrap();
-    let result = exec.run_until_done().unwrap();
-    assert_eq!(result, SLValue::Int(30));
-    // run_until_done pops the final value; the stack should be empty.
-    assert_eq!(exec.stack_len(), 0);
-  }
+  let mut exec = Interpreter::new(pkg).call_main().unwrap();
+  let result = exec.run_until_done().unwrap();
+  assert_eq!(result, SLValue::Int(30));
+  // run_until_done pops the final value; the stack should be empty.
+  assert_eq!(exec.stack_len(), 0);
 }
 
 /// A Void-returning callee discards a non-Void body result and transfers the
@@ -2041,8 +2037,7 @@ fn return_with_empty_frame_segment_errors() {
       Instruction::Return,
     ],
   };
-  let mut exec = Execution::new(Package::default(), default_builtins());
-  exec.enter_function(code, vec![]).unwrap();
+  let mut exec = exec_with_function(code, vec![]);
   let err = exec.run_until_done().unwrap_err();
   assert!(
     err.contains("Return expects exactly one value"),
@@ -2055,7 +2050,6 @@ fn return_with_empty_frame_segment_errors() {
 /// stack-imbalance error rather than leaking extras into the caller.
 #[test]
 fn return_with_multiple_frame_values_errors() {
-  let pkg = Package::default();
   let code = compiler::Function {
     num_locals: 0,
     num_params: 0,
@@ -2065,8 +2059,7 @@ fn return_with_multiple_frame_values_errors() {
       Instruction::Return,
     ],
   };
-  let mut exec = Execution::new(pkg, default_builtins());
-  exec.enter_function(code, vec![]).unwrap();
+  let mut exec = exec_with_function(code, vec![]);
   let err = exec.run_until_done().unwrap_err();
   assert!(
     err.contains("Return expects exactly one value"),

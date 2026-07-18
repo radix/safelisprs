@@ -514,17 +514,13 @@ impl<'gc> ExecRoot<'gc> {
   }
 }
 
-/// A stack frame. The function is stored by `(module, function)` index
-/// (`FrameFunc::Indexed`) so a frame is cheap to push — no
-/// `instructions: Vec<…>` clone — and the `Function` is looked up via
-/// `package.get_function(...)` at `step` time. The `FrameFunc::Inline` variant
-/// holds an owned `Function` for ad-hoc entry points (e.g. tests that build a
-/// `Function` without registering it in a `Package`); it clones once on
-/// frame push, which is fine for shallow test recursion.
+/// A stack frame. The function is stored by `(module, function)` index so a
+/// frame is cheap to push — no `instructions: Vec<…>` clone — and the
+/// `Function` is looked up via `package.get_function(...)` at `step` time.
 #[derive(Collect)]
 #[collect(no_drop)]
 struct Frame<'gc> {
-  function: FrameFunc,
+  function: (u32, u32),
   locals: TrackedVec<Value<'gc>>,
   /// The index into the global `stack` at which this frame's segment begins.
   /// Everything at or above this index belongs to this frame or its callees.
@@ -532,58 +528,6 @@ struct Frame<'gc> {
   stack_base: usize,
   ip: usize,
 }
-
-#[derive(Collect)]
-#[collect(no_drop)]
-enum FrameFunc {
-  /// Look up the function by `(module, function)` index via the `Package` at
-  /// `step` time. The production path (call_main, call_fixed, call_dynamic).
-  /// No charge: the `Function` (including its `instructions: Vec<Instruction>`)
-  /// lives in the shared `Package`, not this execution's heap.
-  Indexed((u32, u32)),
-  /// An ad-hoc `Function` not registered in any `Package` (test entry points
-  /// that build bytecode directly). Owns its `instructions: Vec<Instruction>`,
-  /// whose backing array is charged to the per-execution tracker via the
-  /// `MemoryCharge` so the memory limit sees the `Inline` frame's heap
-  /// overhead. (Without this, deep `Inline` recursion would evade the limit
-  /// the same way cloned instruction vectors did before step 1.)
-  #[cfg(test)]
-  Inline {
-    function: Function,
-    /// Held only for its `Drop` (which releases the instruction-vector charge
-    /// to the tracker); the byte count is read via `FrameFunc::instruction_bytes`
-    /// only when constructing.
-    #[allow(dead_code)]
-    #[collect(require_static)]
-    charge: MemoryCharge,
-  },
-}
-
-impl FrameFunc {
-  /// The byte footprint of an `Inline` function's `instructions: Vec<…>`:
-  /// `capacity() * size_of::<Instruction>()`.
-  #[cfg(test)]
-  fn instruction_bytes(f: &Function) -> usize {
-    let elem_size = std::mem::size_of::<crate::compiler::Instruction<(u32, u32), (u32, u32)>>();
-    f.instructions.capacity() * elem_size
-  }
-
-  /// Construct an `Inline` `FrameFunc`, charging the function's instruction
-  /// vector to `tracker`.
-  #[cfg(test)]
-  fn inline(function: Function, tracker: SharedTracker) -> Self {
-    let bytes = Self::instruction_bytes(&function);
-    FrameFunc::Inline {
-      function,
-      charge: MemoryCharge::new(tracker, bytes),
-    }
-  }
-}
-
-// `Function` (a.k.a. `LinkedFunction`) is `'static` and holds no `Gc` pointers,
-// so it gets a trivial, empty `Collect` impl. The test-only inline bytecode
-// entry point stores `Function` directly in a frame.
-gc_arena::static_collect!(Function);
 
 /// The mutable contents of a `Cell`: a shared handle to any runtime value.
 /// Cells retain existing heap handles rather than cloning their `SLVal`
@@ -991,26 +935,6 @@ impl Execution {
     result
   }
 
-  /// Push a frame for a function, with optional pre-bound values given as owned
-  /// `SLValue`s (used by external/test entry points). The remaining params
-  /// (after the pre-bound ones) are popped from the stack. The function is
-  /// stored inline in the frame (not looked up via a `Package`), so this is
-  /// suitable for ad-hoc/test entry points that build bytecode directly. For
-  /// production paths prefer `enter_function_at` (indexed lookup, no clone).
-  #[cfg(test)]
-  pub(crate) fn enter_function(
-    &mut self,
-    function: Function,
-    pre_bound: Vec<SLValue>,
-  ) -> Result<(), String> {
-    let result = self.arena.mutate_root(|mc, root| {
-      let pre_bound_gc: Vec<Value<'_>> =
-        pre_bound.iter().map(|v| root.import_value(mc, v)).collect();
-      root.enter_inline_function(mc, function.clone(), pre_bound_gc)
-    });
-    result
-  }
-
   /// Push a frame for a function looked up by `(module, function)` index in
   /// this execution's `Package`, with optional pre-bound values given as owned
   /// `SLValue`s. The frame stores the index (not a clone of the function's
@@ -1231,39 +1155,28 @@ impl<'gc> ExecRoot<'gc> {
     // made them.
     self.check_memory_limit(mc)?;
 
-    // Resolve the current frame's instructions. `Indexed` looks up via the
-    // package (production path — no clone); `Inline` reads the owned
-    // `Function` directly (test path). Either way we advance `ip` after
-    // fetching the instruction.
+    // Resolve the current frame's instructions by looking up the indexed
+    // function in the package, then advance `ip` after fetching the
+    // instruction.
     let (ip, inst) = {
       let frame = self
         .frames
         .last()
         .ok_or_else(|| "step with no frames".to_string())?;
       let ip = frame.ip;
-      let inst = match &frame.function {
-        FrameFunc::Indexed((mod_idx, func_idx)) => {
-          match package.get_function(*mod_idx, *func_idx) {
-            Some(crate::compiler::Callable::Function(f)) => {
-              if ip >= f.instructions.len() {
-                return Err("ran past end of function without Return".to_string());
-              }
-              f.instructions[ip].clone()
-            }
-            _ => {
-              return Err(format!(
-                "Function not found while stepping: {}/{}",
-                mod_idx, func_idx
-              ))
-            }
-          }
-        }
-        #[cfg(test)]
-        FrameFunc::Inline { function: f, .. } => {
+      let (mod_idx, func_idx) = frame.function;
+      let inst = match package.get_function(mod_idx, func_idx) {
+        Some(crate::compiler::Callable::Function(f)) => {
           if ip >= f.instructions.len() {
             return Err("ran past end of function without Return".to_string());
           }
           f.instructions[ip].clone()
+        }
+        _ => {
+          return Err(format!(
+            "Function not found while stepping: {}/{}",
+            mod_idx, func_idx
+          ))
         }
       };
       (ip, inst)
@@ -1725,7 +1638,7 @@ impl<'gc> ExecRoot<'gc> {
     // to the caller; record the boundary so `Return` can restore it.
     let stack_base = self.stack.len();
     self.frames.push(Frame {
-      function: FrameFunc::Indexed((mod_idx, func_idx)),
+      function: (mod_idx, func_idx),
       locals,
       stack_base,
       ip: 0,
@@ -1733,36 +1646,6 @@ impl<'gc> ExecRoot<'gc> {
     Ok(())
   }
 
-  /// Push a new frame for an ad-hoc `Function` not registered in any
-  /// `Package` (used by test entry points that build bytecode directly). The
-  /// frame owns a clone of the `Function` and reads its instructions inline at
-  /// `step` time. Shallow recursion only — each push clones the instruction
-  /// vector.
-  #[cfg(test)]
-  fn enter_inline_function(
-    &mut self,
-    _mc: &'gc Mutation<'gc>,
-    function: Function,
-    pre_bound: Vec<Value<'gc>>,
-  ) -> Result<(), String> {
-    let start = pre_bound.len();
-    let mut locals = pre_bound;
-    for _ in locals.len()..usize::from(function.num_locals) {
-      locals.push(Value::Void);
-    }
-    for param_idx in (start..usize::from(function.num_params)).rev() {
-      locals[param_idx] = self.pop()?;
-    }
-    let locals = TrackedVec::from_vec(locals, self.tracker.clone());
-    let stack_base = self.stack.len();
-    self.frames.push(Frame {
-      function: FrameFunc::inline(function, self.tracker.clone()),
-      locals,
-      stack_base,
-      ip: 0,
-    });
-    Ok(())
-  }
 }
 
 /// The runtime context passed to a builtin handler. It carries the GC
