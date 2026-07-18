@@ -731,14 +731,29 @@ impl Interpreter {
 impl Interpreter {
   /// Set up an `Execution` ready to run `main`.
   pub fn call_main(&self) -> Result<Execution, String> {
+    self.call_main_with(vec![])
+  }
+
+  /// Set up an `Execution` ready to run `main` with arguments.
+  pub fn call_main_with(&self, args: Vec<SLValue>) -> Result<Execution, String> {
     if let Some((module, function)) = self.package.main {
       let callable = self
         .package
         .get_function(module, function)
         .ok_or_else(|| format!("Couldn't find module {} function {}", module, function))?;
-      if let Callable::Function(_) = callable {
+      if let Callable::Function(linked_function) = callable {
+        let expected = usize::from(linked_function.num_params);
+        if args.len() != expected {
+          return Err(format!(
+            "{}.{} expects {} arg(s) but was called with {}",
+            module,
+            function,
+            expected,
+            args.len()
+          ));
+        }
         let mut exec = Execution::new(self.package.clone(), self.builtins.clone());
-        exec.enter_function_at(module, function, vec![])?;
+        exec.enter_function_at(module, function, args)?;
         Ok(exec)
       } else {
         Err(format!(
@@ -751,12 +766,13 @@ impl Interpreter {
     }
   }
 
-  /// Set up an `Execution` ready to call `slval`. The `SLValue` is deep-copied
-  /// into the new execution's arena, so a value produced by one execution can
-  /// be fed into any other execution (or the same one).
-  pub fn call_slval(&self, slval: SLValue) -> Result<Execution, String> {
+  /// Set up an `Execution` ready to call `callable` with arguments. The
+  /// `SLValue`s are deep-copied into the new execution's arena, so values
+  /// produced by one execution can be fed into any other execution (or the
+  /// same one).
+  pub fn call_value(&self, callable: SLValue, args: Vec<SLValue>) -> Result<Execution, String> {
     let mut exec = Execution::new(self.package.clone(), self.builtins.clone());
-    exec.push_and_call_dynamic(slval)?;
+    exec.push_and_call_dynamic(callable, args)?;
     Ok(exec)
   }
 }
@@ -957,15 +973,21 @@ impl Execution {
     result
   }
 
-  /// Push a value onto the stack and invoke `call_dynamic` (used to set up an
-  /// execution from an external `SLValue`).
-  fn push_and_call_dynamic(&mut self, value: SLValue) -> Result<(), String> {
+  /// Push arguments and a callable onto the stack and invoke `call_dynamic`
+  /// (used to set up an execution from external `SLValue`s).
+  fn push_and_call_dynamic(&mut self, callable: SLValue, args: Vec<SLValue>) -> Result<(), String> {
+    let arity =
+      u16::try_from(args.len()).map_err(|_| format!("too many call arguments: {}", args.len()))?;
     let package = self.package.clone();
     let builtins = self.builtins.clone();
     let result = self.arena.mutate_root(|mc, root| {
-      let gc = root.import_value(mc, &value);
-      root.stack.push(gc);
-      root.call_dynamic(mc, &package, &builtins, 0)
+      for arg in &args {
+        let gc = root.import_value(mc, arg);
+        root.stack.push(gc);
+      }
+      let callable = root.import_value(mc, &callable);
+      root.stack.push(callable);
+      root.call_dynamic(mc, &package, &builtins, arity)
     });
     result
   }
@@ -1555,7 +1577,7 @@ impl<'gc> ExecRoot<'gc> {
   /// Prepare the callable that's on the top of stack to be called. This pushes
   /// a new frame for function callables. This is both the implementation of the
   /// `CallDynamic` instruction and the entry point used by
-  /// `Interpreter::call_slval`. `arity` is the number of args pushed at the
+  /// `Interpreter::call_value`. `arity` is the number of args pushed at the
   /// call site (carried on [`Instruction::CallDynamic`]); see [`Self::call_fixed`].
   fn call_dynamic(
     &mut self,
@@ -1645,7 +1667,6 @@ impl<'gc> ExecRoot<'gc> {
     });
     Ok(())
   }
-
 }
 
 /// The runtime context passed to a builtin handler. It carries the GC
@@ -1727,11 +1748,7 @@ impl<'gc, 'call> HostCtx<'gc, 'call> {
   /// The `callable` must be a `FunctionRef` or `Partial` value; anything else
   /// is a runtime error. The `args` are pushed left-to-right (so the first arg
   /// is the callable's first parameter).
-  pub fn call(
-    &mut self,
-    callable: Value<'gc>,
-    args: &[Value<'gc>],
-  ) -> Result<Value<'gc>, String> {
+  pub fn call(&mut self, callable: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, String> {
     let root: &mut ExecRoot<'gc> = self.root;
     // Remember the current frame depth so we know when the sub-call has
     // returned: we push a frame for the callable, run until the frame stack

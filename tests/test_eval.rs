@@ -7,12 +7,12 @@
 //! modules under `src/`.
 
 use rstest::rstest;
+#[cfg(feature = "wasm-tests")]
+use safelisp::wasm::{self, SLValue as WasmVal};
 use safelisp::{
   compile_executable_from_source, default_builtins, sig, Builtin, Builtins, Interpreter, SLValue,
   TypeConst, Value,
 };
-#[cfg(feature = "wasm-tests")]
-use safelisp::wasm::{self, SLValue as WasmVal};
 #[cfg(feature = "wasm-tests")]
 use wasmtime::{Engine, Linker, Module, Store};
 
@@ -76,6 +76,70 @@ fn custom_interpreter_builtins_are_public_api() {
     .unwrap_or_else(|e| panic!("call_main failed: {e}"));
 
   assert_eq!(exec.run_until_done().unwrap(), SLValue::Int(5));
+}
+
+#[test]
+fn call_main_with_args_is_public_api() {
+  let package = compile_executable_from_source(
+    "(fn main (a:Int b:Int) ->Int (+ a b))",
+    ("main", "main"),
+    &default_builtins().specs(),
+    PRELUDE,
+  )
+  .unwrap_or_else(|e| panic!("compile failed: {e}"));
+  let mut exec = Interpreter::new(package)
+    .call_main_with(vec![SLValue::Int(2), SLValue::Int(5)])
+    .unwrap_or_else(|e| panic!("call_main_with failed: {e}"));
+
+  assert_eq!(exec.run_until_done().unwrap(), SLValue::Int(7));
+}
+
+#[test]
+fn call_main_with_checks_arity() {
+  let package = compile_executable_from_source(
+    "(fn main (a:Int) ->Int a)",
+    ("main", "main"),
+    &default_builtins().specs(),
+    PRELUDE,
+  )
+  .unwrap_or_else(|e| panic!("compile failed: {e}"));
+  let err = match Interpreter::new(package).call_main_with(vec![]) {
+    Ok(_) => panic!("expected call_main_with to reject missing args"),
+    Err(err) => err,
+  };
+
+  assert!(
+    err.contains("expects 1 arg(s) but was called with 0"),
+    "unexpected error: {err}"
+  );
+}
+
+#[test]
+fn call_value_with_args_is_public_api() {
+  let package = compile_executable_from_source(
+    "
+      (fn main () ->(Fn (Int) -> Int)
+        (let base 10)
+        (fn add-base (x:Int) ->Int (+ base x))
+        add-base)
+    ",
+    ("main", "main"),
+    &default_builtins().specs(),
+    PRELUDE,
+  )
+  .unwrap_or_else(|e| panic!("compile failed: {e}"));
+  let interp = Interpreter::new(package);
+  let mut exec = interp
+    .call_main()
+    .unwrap_or_else(|e| panic!("call_main failed: {e}"));
+  let callable = exec
+    .run_until_done()
+    .unwrap_or_else(|e| panic!("run failed: {e}"));
+  let mut exec = interp
+    .call_value(callable, vec![SLValue::Int(7)])
+    .unwrap_or_else(|e| panic!("call_value failed: {e}"));
+
+  assert_eq!(exec.run_until_done().unwrap(), SLValue::Int(17));
 }
 
 /// Run `source` through the WASM backend + wasmtime and return the result as

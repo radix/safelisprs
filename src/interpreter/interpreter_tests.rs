@@ -270,7 +270,7 @@ fn closure_bytecode() {
   let interp = Interpreter::new(pkg);
   let mut exec = interp.call_main().unwrap();
   let result = exec.run_until_done().unwrap();
-  let mut exec2 = interp.call_slval(result).unwrap();
+  let mut exec2 = interp.call_value(result, vec![]).unwrap();
   let result2 = exec2.run_until_done().unwrap();
   assert_eq!(result2, SLValue::Int(42));
 }
@@ -583,11 +583,11 @@ fn step_with_no_frames_errors() {
 
 #[test]
 fn call_dynamic_on_non_callable_errors() {
-  let pkg = Package::default();
-  let mut exec = Execution::new(pkg, default_builtins());
-  let err = exec
-    .push_and_call_dynamic(SLValue::Int(3))
-    .expect_err("expected an error calling a non-callable");
+  let interp = Interpreter::new(Package::default());
+  let err = match interp.call_value(SLValue::Int(3), vec![]) {
+    Ok(_) => panic!("expected an error calling a non-callable"),
+    Err(err) => err,
+  };
   assert!(err.contains("non-callable"), "unexpected error: {}", err);
 }
 
