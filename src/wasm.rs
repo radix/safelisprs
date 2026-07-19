@@ -16,9 +16,13 @@ use crate::prelude::resolve_module_names;
 /// value on the WASM stack is a `(payload: i64, tag: i32)` pair — payload
 /// pushed first, tag last, so the receiver pops tag first.
 pub const TAG_INT: i32 = 0;
+/// Tag for a floating-point value in the WASM tagged-value representation.
 pub const TAG_FLOAT: i32 = 1;
+/// Tag for a boolean value in the WASM tagged-value representation.
 pub const TAG_BOOL: i32 = 2;
+/// Tag for the void value in the WASM tagged-value representation.
 pub const TAG_VOID: i32 = 3;
+/// Tag for a function reference in the WASM tagged-value representation.
 pub const TAG_FUNCTION_REF: i32 = 4;
 
 /// A SafeLisp value as seen on the Rust side (for host functions). The host
@@ -27,10 +31,15 @@ pub const TAG_FUNCTION_REF: i32 = 4;
 /// for clarity.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SLValue {
+  /// An integer value.
   Int(i64),
+  /// A floating-point value.
   Float(f64),
+  /// A boolean value.
   Bool(bool),
+  /// The void value.
   Void,
+  /// A function-table reference.
   FunctionRef(u32),
 }
 
@@ -125,7 +134,6 @@ impl Builtin {
       func: Arc::new(move |args| func(args[0], args[1])),
     }
   }
-
 }
 
 /// A registry of host functions available to the compiled module.

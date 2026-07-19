@@ -251,6 +251,7 @@ pub(crate) fn external_bytes_of<'gc>(value: &SLVal<'gc>) -> usize {
 #[derive(Collect)]
 #[collect(no_drop)]
 pub struct Accounted<'gc> {
+  /// The actual SafeLisp heap value being accounted.
   pub value: SLVal<'gc>,
   /// Held only for its `Drop` (which releases the charge to the tracker); the
   /// byte count is read via `MemoryCharge::bytes()` only on `TrackedVec`.
@@ -298,12 +299,19 @@ impl<'gc> Accounted<'gc> {
 #[derive(Debug, Copy, Clone, PartialEq, Collect)]
 #[collect(no_drop)]
 pub enum Value<'gc> {
+  /// The SafeLisp void value.
   Void,
+  /// A boolean value stored inline.
   Bool(bool),
+  /// An integer value stored inline.
   Int(i64),
+  /// A floating-point value stored inline.
   Float(f64),
+  /// A reference to a package function identified by `(module, function)`.
   FunctionRef(u32, u32),
+  /// A mutable cell allocated in the execution arena.
   Cell(Gc<'gc, RefLock<CellContents<'gc>>>),
+  /// A heap-backed value allocated with accounting metadata.
   Heap(Gc<'gc, Accounted<'gc>>),
 }
 
@@ -562,6 +570,7 @@ struct HostFrame {
 #[derive(Collect)]
 #[collect(no_drop)]
 pub struct CellContents<'gc> {
+  /// The value currently stored in the cell.
   pub value: Value<'gc>,
 }
 
@@ -596,32 +605,47 @@ impl<'gc> CellContents<'gc> {
 #[derive(Debug, PartialEq, Collect)]
 #[collect(no_drop)]
 pub enum SLVal<'gc> {
+  /// A heap-backed string.
   String(String),
+  /// A partially applied function and its captured arguments.
   Partial(Partial<'gc>),
+  /// A heap-backed list.
   List(Vec<Value<'gc>>),
+  /// A user-defined struct instance.
   Struct(StructInstance<'gc>),
+  /// A user-defined enum instance.
   Enum(EnumInstance<'gc>),
 }
 
+/// A partially applied SafeLisp function.
 #[derive(Debug, PartialEq, Collect)]
 #[collect(no_drop)]
 pub struct Partial<'gc> {
+  /// The referenced function as `(module, function)`.
   pub function: (u32, u32),
+  /// Arguments captured by the partial application.
   pub args: Vec<Value<'gc>>,
 }
 
+/// A user-defined struct value.
 #[derive(Debug, PartialEq, Collect)]
 #[collect(no_drop)]
 pub struct StructInstance<'gc> {
+  /// The referenced struct definition as `(module, type)`.
   pub struct_: (u32, u32),
+  /// Field values in definition order.
   pub fields: Vec<Value<'gc>>,
 }
 
+/// A user-defined enum value.
 #[derive(Debug, PartialEq, Collect)]
 #[collect(no_drop)]
 pub struct EnumInstance<'gc> {
+  /// The referenced enum definition as `(module, type)`.
   pub enum_: (u32, u32),
+  /// The zero-based variant index within the enum definition.
   pub variant: u16,
+  /// Variant field values in definition order.
   pub fields: Vec<Value<'gc>>,
 }
 
@@ -632,25 +656,43 @@ pub struct EnumInstance<'gc> {
 /// owned values and re-boxed into fresh `Gc` pointers in the destination arena.
 #[derive(Debug, PartialEq, Clone)]
 pub enum SLValue {
+  /// An integer value.
   Int(i64),
+  /// A floating-point value.
   Float(f64),
+  /// A string value.
   String(String),
+  /// A boolean value.
   Bool(bool),
+  /// The void value.
   Void,
+  /// A reference to a package function identified by `(module, function)`.
   FunctionRef(u32, u32),
+  /// A partially applied function and its captured arguments.
   Partial {
+    /// The referenced function as `(module, function)`.
     function: (u32, u32),
+    /// Captured argument values.
     args: Vec<SLValue>,
   },
+  /// A mutable cell value represented by its current contents.
   Cell(Box<SLValue>),
+  /// A list of values.
   List(Vec<SLValue>),
+  /// A user-defined struct instance.
   Struct {
+    /// The referenced struct definition as `(module, type)`.
     struct_: (u32, u32),
+    /// Field values in definition order.
     fields: Vec<SLValue>,
   },
+  /// A user-defined enum instance.
   Enum {
+    /// The referenced enum definition as `(module, type)`.
     enum_: (u32, u32),
+    /// The zero-based variant index within the enum definition.
     variant: u16,
+    /// Variant field values in definition order.
     fields: Vec<SLValue>,
   },
 }
@@ -703,6 +745,7 @@ impl<'gc> Value<'gc> {
 }
 
 impl<'gc> SLVal<'gc> {
+  /// A bounded-size description of this heap value's SafeLisp type.
   pub fn type_name(&self) -> &'static str {
     match self {
       SLVal::String(_) => "String",
@@ -713,6 +756,7 @@ impl<'gc> SLVal<'gc> {
     }
   }
 
+  /// Convert this in-arena heap value into an owned, arena-agnostic value.
   pub fn to_value(&self) -> SLValue {
     match self {
       SLVal::String(s) => SLValue::String(s.clone()),
@@ -734,12 +778,14 @@ impl<'gc> SLVal<'gc> {
   }
 }
 
+/// A compiled SafeLisp package paired with the builtin registry used to run it.
 pub struct Interpreter {
   package: Package,
   builtins: Builtins,
 }
 
 impl Interpreter {
+  /// Construct an interpreter with an explicit builtin registry.
   pub fn with_builtins(package: Package, builtins: Builtins) -> Self {
     Interpreter { package, builtins }
   }
@@ -799,6 +845,7 @@ impl Interpreter {
   }
 }
 
+/// The result of running an execution for a bounded amount of work.
 #[derive(Debug, PartialEq)]
 pub enum Status {
   /// Execution paused after exhausting the budget for this `run` call.
@@ -812,7 +859,9 @@ pub enum Status {
 
 /// Indicator for whether a resumable builtin function has completed or not.
 pub enum HostPoll<'gc> {
+  /// The host builtin is still waiting and should be polled again later.
   Pending,
+  /// The host builtin completed with the given runtime value.
   Ready(Value<'gc>),
 }
 
@@ -1863,6 +1912,7 @@ impl<'gc, 'call> HostCtx<'gc, 'call> {
     self.root.push_value(value);
   }
 
+  /// Pop a value from the execution's value stack.
   pub fn pop(&mut self) -> Result<Value<'gc>, String> {
     self.root.pop()
   }

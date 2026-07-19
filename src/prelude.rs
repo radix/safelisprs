@@ -6,6 +6,8 @@ use crate::parser::{
   ResolvedName, AST,
 };
 
+/// Build a prelude import list for every builtin exported from the `std`
+/// module.
 pub fn std_prelude_from_specs(specs: &[BuiltinSpec]) -> Vec<(&str, &str)> {
   specs
     .iter()

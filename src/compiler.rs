@@ -712,6 +712,8 @@ impl<'module, 'types> FunctionCompiler<'module, 'types> {
   }
 }
 
+/// Compile SafeLisp source into an executable [`Package`] with the named main
+/// function.
 pub fn compile_executable_from_source(
   module_source: &str,
   main: (&str, &str),

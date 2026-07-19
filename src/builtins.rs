@@ -7,44 +7,66 @@ use rand_chacha::ChaCha8Rng;
 
 use crate::interpreter::{CellContents, HostCtx, HostPoll, MemoryReservation, SLVal, Value};
 
+/// A type-class-style bound that a generic builtin type variable can require.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum Trait {
+  /// Values support addition through the `+` builtin.
   Add,
+  /// Values support subtraction through the `-` builtin.
   Sub,
+  /// Values support equality comparison.
   Eq,
+  /// Values support concatenation.
   Concat,
+  /// Values support indexed slicing.
   Slice,
 }
 
+/// A compile-time SafeLisp type used in builtin signatures.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TypeConst {
+  /// The integer type.
   Int,
+  /// The floating-point type.
   Float,
+  /// The string type.
   String,
+  /// The boolean type.
   Bool,
+  /// The void type.
   Void,
+  /// A mutable cell containing a value of the given type.
   Cell(Box<TypeConst>),
+  /// A list containing values of the given type.
   List(Box<TypeConst>),
+  /// A callable type with fixed parameters and a return type.
   Fn {
+    /// Parameter types accepted by the callable.
     params: Vec<TypeConst>,
+    /// Return type produced by the callable.
     ret: Box<TypeConst>,
   },
+  /// A generic type variable by name.
   Var(String),
 }
 
 impl TypeConst {
+  /// Construct a type variable with the given name.
   pub fn var(name: impl Into<String>) -> Self {
     Self::Var(name.into())
   }
 
+  /// Construct a cell type containing `item`.
   pub fn cell(item: TypeConst) -> Self {
     Self::Cell(Box::new(item))
   }
 
+  /// Construct a list type containing `item`.
   pub fn list(item: TypeConst) -> Self {
     Self::List(Box::new(item))
   }
 
+  /// Construct a function type from parameter and return types.
   pub fn function(params: Vec<TypeConst>, ret: TypeConst) -> Self {
     Self::Fn {
       params,
@@ -53,11 +75,16 @@ impl TypeConst {
   }
 }
 
+/// The type signature of a builtin function.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuiltinSignature {
+  /// Generic type variables and their required trait bounds.
   pub type_vars: Vec<(String, Vec<Trait>)>,
+  /// Fixed positional parameter types.
   pub params: Vec<TypeConst>,
+  /// Variadic rest parameter type, if the builtin accepts extra arguments.
   pub rest: Option<TypeConst>,
+  /// Return type of the builtin.
   pub ret: TypeConst,
 }
 
@@ -65,12 +92,17 @@ pub struct BuiltinSignature {
 /// how many arguments it takes. `num_params` is `None` for variadic builtins.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuiltinSpec {
+  /// Module name containing the builtin.
   pub module: &'static str,
+  /// Function name exported by the builtin.
   pub name: &'static str,
+  /// Fixed argument count, or `None` for a variadic builtin.
   pub num_params: Option<u16>,
+  /// Compile-time type signature for the builtin.
   pub signature: BuiltinSignature,
 }
 
+/// Construct a [`BuiltinSignature`] from borrowed type-variable metadata.
 pub fn sig(
   type_vars: &[(&str, &[Trait])],
   params: Vec<TypeConst>,
@@ -129,6 +161,7 @@ pub struct Builtin {
 }
 
 impl Builtin {
+  /// Return this builtin's compile-time metadata.
   pub fn spec(&self) -> &BuiltinSpec {
     &self.spec
   }
@@ -318,6 +351,7 @@ pub struct Builtins {
 }
 
 impl Builtins {
+  /// Create an empty builtin registry.
   pub fn new() -> Self {
     Self::default()
   }

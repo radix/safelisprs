@@ -1,3 +1,10 @@
+//! SafeLisp parser, compiler, and interpreter APIs.
+//!
+//! The crate exposes the pieces needed to compile SafeLisp source into an
+//! executable [`Package`], run it with [`Interpreter`], and extend the runtime
+//! with host-provided [`Builtin`] functions.
+#![deny(missing_docs)]
+
 #[macro_use]
 extern crate serde_derive;
 
@@ -13,6 +20,7 @@ mod parser;
 mod prelude;
 mod typecheck;
 #[cfg(feature = "wasm")]
+/// WebAssembly compilation support for SafeLisp programs.
 pub mod wasm;
 
 pub use builtins::{
