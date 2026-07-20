@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::builtins::BuiltinSpec;
+use crate::builtins::{CustomTypeSpec, Library};
 use crate::closure::transform_closures_in_module;
 use crate::parser::{self, ASTKind, BindingId, Identifier, MatchPattern, ResolvedName, AST};
 use crate::prelude::resolve_module_names;
@@ -22,7 +22,7 @@ type CompiledCallable = Callable<(String, String), (String, String)>;
 
 /// Packages contain Callables, which can either be LinkedFunctions or
 /// Builtins. This is so the interpreter can know whether it should fall back to
-/// the builtins when invoking a function. Builtin doesn't need a name because
+/// the library when invoking a function. Builtin doesn't need a name because
 /// it's already in the Package::functions data.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) enum Callable<CallType, StructType> {
@@ -137,9 +137,10 @@ impl Package {
   fn from_modules_with_main(
     compiled_modules: CompiledModules,
     path: (&str, &str),
-    specs: &[BuiltinSpec],
+    library: &Library,
   ) -> Result<Self, String> {
-    let compiled_modules = inject_builtin_specs(compiled_modules, specs)?;
+    let compiled_modules = inject_builtin_specs(compiled_modules, library)?;
+    let compiled_modules = inject_library_types(compiled_modules, library)?;
     let index = index_modules(compiled_modules.iter());
     let linked_modules = link(&index, compiled_modules)?;
     let main = find_function(&index, path.0, path.1);
@@ -163,6 +164,22 @@ impl Package {
       .get(module as usize)
       .and_then(|m| m.functions.get(function as usize))
       .map(|(_, f)| f)
+  }
+
+  pub(crate) fn find_type(&self, module_name: &str, type_name: &str) -> Option<(u32, u32)> {
+    self
+      .modules
+      .iter()
+      .enumerate()
+      .find(|(_, module)| module.name == module_name)
+      .and_then(|(module_index, module)| {
+        module
+          .types
+          .iter()
+          .enumerate()
+          .find(|(_, type_)| type_.name == type_name)
+          .map(|(type_index, _)| (module_index as u32, type_index as u32))
+      })
   }
 
   fn get_type(&self, module: u32, type_: u32) -> Option<&TypeDef> {
@@ -717,31 +734,74 @@ impl<'module, 'types> FunctionCompiler<'module, 'types> {
 pub fn compile_executable_from_source(
   module_source: &str,
   main: (&str, &str),
-  specs: &[BuiltinSpec],
-  prelude: &[(&str, &str)],
+  library: &Library,
 ) -> Result<Package, String> {
   Package::from_modules_with_main(
-    compile_modules_from_source(module_source, specs, prelude)?,
+    compile_modules_from_source(module_source, library)?,
     main,
-    specs,
+    library,
   )
 }
 
 fn compile_modules_from_source(
   module_source: &str,
-  specs: &[BuiltinSpec],
-  prelude: &[(&str, &str)],
+  library: &Library,
 ) -> Result<CompiledModules, String> {
   let asts = parser::read_multiple(module_source)?;
-  let module_symbols = specs
-    .iter()
-    .filter(|spec| spec.module == "main")
-    .map(|spec| spec.name)
+  let module_symbols = library
+    .builtins()
+    .filter(|builtin| builtin.spec().module == "main")
+    .map(|builtin| builtin.spec().name)
     .collect::<Vec<_>>();
-  let asts = resolve_module_names("main", &asts, prelude, &module_symbols)?;
+  let asts = resolve_module_names("main", &asts, library.prelude(), &module_symbols)?;
   let checked =
-    crate::typecheck::typecheck(asts, specs).map_err(|error| error.render(module_source))?;
+    crate::typecheck::typecheck(asts, library).map_err(|error| error.render(module_source))?;
   Ok(vec![compile_resolved_module("main", &checked)?])
+}
+
+fn type_def_from_custom(type_: &CustomTypeSpec) -> TypeDef {
+  TypeDef {
+    name: type_.name.to_string(),
+    constructors: vec![ConstructorDef {
+      name: type_.name.to_string(),
+      fields: type_
+        .fields
+        .iter()
+        .map(|field| field.name.to_string())
+        .collect(),
+    }],
+  }
+}
+
+fn inject_library_types(
+  mut modules: CompiledModules,
+  library: &Library,
+) -> Result<CompiledModules, String> {
+  for type_ in library.types() {
+    let module = modules
+      .iter_mut()
+      .find(|module| module.name == type_.module)
+      .map(|module| &mut module.types);
+    let module = match module {
+      Some(types) => types,
+      None => {
+        modules.push(CompiledModule {
+          name: type_.module.to_string(),
+          functions: vec![],
+          types: vec![],
+        });
+        &mut modules.last_mut().unwrap().types
+      }
+    };
+    if module.iter().any(|existing| existing.name == type_.name) {
+      return Err(format!(
+        "Library type {}.{} collides with an existing type",
+        type_.module, type_.name
+      ));
+    }
+    module.push(type_def_from_custom(type_));
+  }
+  Ok(modules)
 }
 
 /// Inject a `Callable::Builtin` entry for each `BuiltinSpec` into the named
@@ -750,9 +810,10 @@ fn compile_modules_from_source(
 /// [`index_modules`] so the slots are resolvable by `Call` instructions.
 fn inject_builtin_specs(
   mut modules: CompiledModules,
-  specs: &[BuiltinSpec],
+  library: &Library,
 ) -> Result<CompiledModules, String> {
-  for spec in specs {
+  for builtin in library.builtins() {
+    let spec = builtin.spec();
     let module = modules
       .iter_mut()
       .find(|module| module.name == spec.module)

@@ -10,12 +10,13 @@ use rstest::rstest;
 #[cfg(feature = "wasm-tests")]
 use safelisp::wasm::{self, SLValue as WasmVal};
 use safelisp::{
-  compile_executable_from_source, default_builtins, sig, Builtin, Builtins, Interpreter, SLValue,
-  TypeConst, Value,
+  compile_executable_from_source, sig, Builtin, CustomTypeSpec, Interpreter, Library, SLVal,
+  SLValue, TypeConst, Value,
 };
 #[cfg(feature = "wasm-tests")]
 use wasmtime::{Engine, Linker, Module, Store};
 
+#[cfg(feature = "wasm-tests")]
 const PRELUDE: &[(&str, &str)] = &[("std", "+"), ("std", "-"), ("std", "==")];
 
 /// A value that both backends can produce, for cross-backend comparison.
@@ -30,13 +31,8 @@ enum Val {
 /// Run `source` through the SLC compiler + interpreter and return the result
 /// as a `Val`. Panics on compile or runtime errors.
 fn eval_interpreter(source: &str) -> Val {
-  let pkg = compile_executable_from_source(
-    source,
-    ("main", "main"),
-    &default_builtins().specs(),
-    PRELUDE,
-  )
-  .unwrap_or_else(|e| panic!("interpreter compile failed: {e}"));
+  let pkg = compile_executable_from_source(source, ("main", "main"), &Library::default())
+    .unwrap_or_else(|e| panic!("interpreter compile failed: {e}"));
   let interp = Interpreter::new(pkg);
   let mut exec = interp
     .call_main()
@@ -55,7 +51,7 @@ fn eval_interpreter(source: &str) -> Val {
 
 #[test]
 fn custom_interpreter_builtins_are_public_api() {
-  let builtins = Builtins::new().with_builtin(Builtin::unary(
+  let builtins = Library::new().with_builtin(Builtin::unary(
     "main",
     "add2",
     sig(&[], vec![TypeConst::Int], None, TypeConst::Int),
@@ -64,14 +60,10 @@ fn custom_interpreter_builtins_are_public_api() {
       other => Err(format!("expected Int, got {}", other.type_name())),
     },
   ));
-  let package = compile_executable_from_source(
-    "(fn main () ->Int (add2 3))",
-    ("main", "main"),
-    &builtins.specs(),
-    &[],
-  )
-  .unwrap_or_else(|e| panic!("compile failed: {e}"));
-  let mut exec = Interpreter::with_builtins(package, builtins)
+  let package =
+    compile_executable_from_source("(fn main () ->Int (add2 3))", ("main", "main"), &builtins)
+      .unwrap_or_else(|e| panic!("compile failed: {e}"));
+  let mut exec = Interpreter::with_library(package, builtins)
     .call_main()
     .unwrap_or_else(|e| panic!("call_main failed: {e}"));
 
@@ -79,12 +71,64 @@ fn custom_interpreter_builtins_are_public_api() {
 }
 
 #[test]
+fn libraries_can_be_composed_with_custom_types() {
+  let types = Library::new().with_type(CustomTypeSpec::struct_(
+    "box",
+    "Box",
+    vec![("value", TypeConst::Int)],
+  ));
+  let funcs = Library::new()
+    .with_builtin(Builtin::contextual_value(
+      "box",
+      "box",
+      Some(1),
+      sig(
+        &[],
+        vec![TypeConst::Int],
+        None,
+        TypeConst::named("box", "Box"),
+      ),
+      |ctx, args| ctx.alloc_struct("box", "Box", vec![args[0]]),
+    ))
+    .with_builtin(Builtin::unary(
+      "box",
+      "unbox",
+      sig(
+        &[],
+        vec![TypeConst::named("box", "Box")],
+        None,
+        TypeConst::Int,
+      ),
+      |value| match value {
+        Value::Heap(heap) => match &heap.value {
+          SLVal::Struct(instance) => Ok(instance.fields[0]),
+          other => Err(format!("expected Box, got {}", other.type_name())),
+        },
+        other => Err(format!("expected Box, got {}", other.type_name())),
+      },
+    ))
+    .with_prelude("box", "box")
+    .with_prelude("box", "unbox");
+  let library = types.merge(funcs);
+  let package = compile_executable_from_source(
+    "(fn main () ->Int (unbox (box 40)))",
+    ("main", "main"),
+    &library,
+  )
+  .unwrap_or_else(|e| panic!("compile failed: {e}"));
+  let mut exec = Interpreter::with_library(package, library)
+    .call_main()
+    .unwrap_or_else(|e| panic!("call_main failed: {e}"));
+
+  assert_eq!(exec.run_until_done().unwrap(), SLValue::Int(40));
+}
+
+#[test]
 fn call_main_with_args_is_public_api() {
   let package = compile_executable_from_source(
     "(fn main (a:Int b:Int) ->Int (+ a b))",
     ("main", "main"),
-    &default_builtins().specs(),
-    PRELUDE,
+    &Library::default(),
   )
   .unwrap_or_else(|e| panic!("compile failed: {e}"));
   let mut exec = Interpreter::new(package)
@@ -99,8 +143,7 @@ fn call_main_with_checks_arity() {
   let package = compile_executable_from_source(
     "(fn main (a:Int) ->Int a)",
     ("main", "main"),
-    &default_builtins().specs(),
-    PRELUDE,
+    &Library::default(),
   )
   .unwrap_or_else(|e| panic!("compile failed: {e}"));
   let err = match Interpreter::new(package).call_main_with(vec![]) {
@@ -124,8 +167,7 @@ fn call_value_with_args_is_public_api() {
         add-base)
     ",
     ("main", "main"),
-    &default_builtins().specs(),
-    PRELUDE,
+    &Library::default(),
   )
   .unwrap_or_else(|e| panic!("compile failed: {e}"));
   let interp = Interpreter::new(package);

@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use gc_arena::{collect::Collect, Arena, Gc, Mutation, RefLock, Rootable};
 
-use crate::builtins::{default_builtins, Builtins};
+use crate::builtins::Library;
 use crate::compiler::{Callable, Instruction, LinkedFunction as Function, Package};
 
 /// Per-execution memory accounting. Shared between the `Execution` (which owns
@@ -781,18 +781,18 @@ impl<'gc> SLVal<'gc> {
 /// A compiled SafeLisp package paired with the builtin registry used to run it.
 pub struct Interpreter {
   package: Package,
-  builtins: Builtins,
+  library: Library,
 }
 
 impl Interpreter {
-  /// Construct an interpreter with an explicit builtin registry.
-  pub fn with_builtins(package: Package, builtins: Builtins) -> Self {
-    Interpreter { package, builtins }
+  /// Construct an interpreter with an explicit host library.
+  pub fn with_library(package: Package, library: Library) -> Self {
+    Interpreter { package, library }
   }
 
-  /// Construct an interpreter that will run with [`default_builtins`].
+  /// Construct an interpreter that will run with [`Library::default`].
   pub fn new(package: Package) -> Self {
-    Interpreter::with_builtins(package, default_builtins())
+    Interpreter::with_library(package, Library::default())
   }
 }
 
@@ -820,7 +820,7 @@ impl Interpreter {
             args.len()
           ));
         }
-        let mut exec = Execution::new(self.package.clone(), self.builtins.clone());
+        let mut exec = Execution::new(self.package.clone(), self.library.clone());
         exec.enter_function_at(module, function, args)?;
         Ok(exec)
       } else {
@@ -839,7 +839,7 @@ impl Interpreter {
   /// produced by one execution can be fed into any other execution (or the
   /// same one).
   pub fn call_value(&self, callable: SLValue, args: Vec<SLValue>) -> Result<Execution, String> {
-    let mut exec = Execution::new(self.package.clone(), self.builtins.clone());
+    let mut exec = Execution::new(self.package.clone(), self.library.clone());
     exec.push_and_call_dynamic(callable, args)?;
     Ok(exec)
   }
@@ -874,7 +874,7 @@ pub enum HostPoll<'gc> {
 pub struct Execution {
   arena: Arena<Rootable![ExecRoot<'_>]>,
   package: Package,
-  builtins: Builtins,
+  library: Library,
   executed: u64,
   /// Per-execution memory tracker, shared with every `Accounted` box in this
   /// arena. `Execution` owns the canonical `Rc`; cloned into each `Accounted`
@@ -883,7 +883,7 @@ pub struct Execution {
 }
 
 impl Execution {
-  fn new(package: Package, builtins: Builtins) -> Self {
+  fn new(package: Package, library: Library) -> Self {
     let tracker = Rc::new(MemoryTracker::new());
     let tracker_for_root = tracker.clone();
     let arena = Arena::new(move |_mc| ExecRoot {
@@ -894,7 +894,7 @@ impl Execution {
     Execution {
       arena,
       package,
-      builtins,
+      library,
       executed: 0,
       tracker,
     }
@@ -982,7 +982,7 @@ impl Execution {
     let mut executed = self.executed;
     let outcome = self
       .arena
-      .mutate_root(|mc, root| root.run(mc, &self.package, &self.builtins, start, n, &mut executed));
+      .mutate_root(|mc, root| root.run(mc, &self.package, &self.library, start, n, &mut executed));
     self.executed = executed;
     // Run a bit of incremental collection, paced by allocation debt.
     self.arena.collect_debt();
@@ -993,9 +993,9 @@ impl Execution {
   /// final value, or errors on a runtime error.
   pub fn run_until_done(&mut self) -> Result<SLValue, String> {
     let mut executed = self.executed;
-    let result = self.arena.mutate_root(|mc, root| {
-      root.run_until_done(mc, &self.package, &self.builtins, &mut executed)
-    });
+    let result = self
+      .arena
+      .mutate_root(|mc, root| root.run_until_done(mc, &self.package, &self.library, &mut executed));
     self.executed = executed;
     self.arena.collect_debt();
     result
@@ -1010,7 +1010,7 @@ impl Execution {
     let deadline = Instant::now() + duration;
     let mut executed = self.executed;
     let outcome = self.arena.mutate_root(|mc, root| {
-      root.run_for_duration(mc, &self.package, &self.builtins, deadline, &mut executed)
+      root.run_for_duration(mc, &self.package, &self.library, deadline, &mut executed)
     });
     self.executed = executed;
     self.arena.collect_debt();
@@ -1022,7 +1022,7 @@ impl Execution {
     let mut executed = self.executed;
     let result = self
       .arena
-      .mutate_root(|mc, root| root.step(mc, &self.package, &self.builtins, &mut executed));
+      .mutate_root(|mc, root| root.step(mc, &self.package, &self.library, &mut executed));
     self.executed = executed;
     self.arena.collect_debt();
     result
@@ -1056,7 +1056,7 @@ impl Execution {
     let arity =
       u16::try_from(args.len()).map_err(|_| format!("too many call arguments: {}", args.len()))?;
     let package = self.package.clone();
-    let builtins = self.builtins.clone();
+    let library = self.library.clone();
     let result = self.arena.mutate_root(|mc, root| {
       for arg in &args {
         let gc = root.import_value(mc, arg);
@@ -1064,7 +1064,7 @@ impl Execution {
       }
       let callable = root.import_value(mc, &callable);
       root.stack.push(callable);
-      root.call_dynamic(mc, &package, &builtins, arity)
+      root.call_dynamic(mc, &package, &library, arity)
     });
     result
   }
@@ -1221,13 +1221,13 @@ impl<'gc> ExecRoot<'gc> {
     &mut self,
     mc: &'gc Mutation<'gc>,
     package: &Package,
-    builtins: &Builtins,
+    library: &Library,
     start: u64,
     n: u64,
     executed: &mut u64,
   ) -> Result<Status, String> {
     while !self.is_done() && *executed - start < n {
-      self.step(mc, package, builtins, executed)?;
+      self.step(mc, package, library, executed)?;
     }
     if self.is_done() {
       let top = self.pop()?;
@@ -1243,11 +1243,11 @@ impl<'gc> ExecRoot<'gc> {
     &mut self,
     mc: &'gc Mutation<'gc>,
     package: &Package,
-    builtins: &Builtins,
+    library: &Library,
     executed: &mut u64,
   ) -> Result<SLValue, String> {
     while !self.is_done() {
-      self.step(mc, package, builtins, executed)?;
+      self.step(mc, package, library, executed)?;
     }
     let top = self.pop()?;
     Ok(top.to_value())
@@ -1260,12 +1260,12 @@ impl<'gc> ExecRoot<'gc> {
     &mut self,
     mc: &'gc Mutation<'gc>,
     package: &Package,
-    builtins: &Builtins,
+    library: &Library,
     deadline: Instant,
     executed: &mut u64,
   ) -> Result<Status, String> {
     while !self.is_done() && Instant::now() < deadline {
-      self.step(mc, package, builtins, executed)?;
+      self.step(mc, package, library, executed)?;
     }
     if self.is_done() {
       let top = self.pop()?;
@@ -1280,7 +1280,7 @@ impl<'gc> ExecRoot<'gc> {
     &mut self,
     mc: &'gc Mutation<'gc>,
     package: &Package,
-    builtins: &Builtins,
+    library: &Library,
     executed: &mut u64,
   ) -> Result<(), String> {
     *executed = executed.saturating_add(1);
@@ -1313,8 +1313,8 @@ impl<'gc> ExecRoot<'gc> {
           module.name, func_name
         ));
       }
-      let builtin = builtins
-        .lookup(&module.name, func_name)
+      let builtin = library
+        .lookup_builtin(&module.name, func_name)
         .ok_or_else(|| format!("No builtin {}::{}", module.name, func_name))?;
       let pending_result = {
         let awaiting_call = match self.frames.last() {
@@ -1338,7 +1338,7 @@ impl<'gc> ExecRoot<'gc> {
           root: self,
           mc,
           package,
-          builtins,
+          library,
         };
         builtin.resume(&mut ctx, pending_result)?
       };
@@ -1597,10 +1597,10 @@ impl<'gc> ExecRoot<'gc> {
         self.stack.push(function_frame.locals[usize::from(i)]);
       }
       Instruction::Call((mod_index, func_index), arity) => {
-        self.call_fixed(mc, package, builtins, mod_index, func_index, arity)?;
+        self.call_fixed(mc, package, library, mod_index, func_index, arity)?;
       }
       Instruction::CallDynamic(arity) => {
-        self.call_dynamic(mc, package, builtins, arity)?;
+        self.call_dynamic(mc, package, library, arity)?;
       }
       Instruction::MakeFunctionRef((mod_index, func_index)) => {
         self.stack.push(Value::FunctionRef(mod_index, func_index));
@@ -1699,7 +1699,7 @@ impl<'gc> ExecRoot<'gc> {
     &mut self,
     mc: &'gc Mutation<'gc>,
     package: &Package,
-    builtins: &Builtins,
+    library: &Library,
     mod_index: u32,
     func_index: u32,
     arity: u16,
@@ -1722,8 +1722,8 @@ impl<'gc> ExecRoot<'gc> {
         self.enter_function(mc, mod_index, func_index, func, vec![])?;
       }
       Callable::Builtin => {
-        let builtin = builtins
-          .lookup(&module.name, func_name)
+        let builtin = library
+          .lookup_builtin(&module.name, func_name)
           .ok_or_else(|| format!("No builtin {}::{}", module.name, func_name))?;
         // For fixed-arity builtins, enforce the declared arity at the call site.
         if let Some(expected) = builtin.spec().num_params {
@@ -1762,7 +1762,7 @@ impl<'gc> ExecRoot<'gc> {
           root: self,
           mc,
           package,
-          builtins,
+          library,
         };
         builtin.call(&mut ctx, (mod_index, func_index), &args)?;
       }
@@ -1779,13 +1779,13 @@ impl<'gc> ExecRoot<'gc> {
     &mut self,
     mc: &'gc Mutation<'gc>,
     package: &Package,
-    builtins: &Builtins,
+    library: &Library,
     arity: u16,
   ) -> Result<(), String> {
     let callable = self.pop()?;
     match callable {
       Value::FunctionRef(mod_index, func_index) => {
-        self.call_fixed(mc, package, builtins, mod_index, func_index, arity)
+        self.call_fixed(mc, package, library, mod_index, func_index, arity)
       }
       Value::Heap(heap) => match &heap.value {
         SLVal::Partial(Partial {
@@ -1865,7 +1865,7 @@ impl<'gc> ExecRoot<'gc> {
 }
 
 /// The runtime context passed to a builtin handler. It carries the GC
-/// `Mutation` context, the `Package` / `Builtins` registries, and a
+/// `Mutation` context, the `Package` / [`Library`] registries, and a
 /// short-lived mutable borrow of the execution root — enough for a builtin to
 /// allocate values, push results, and invoke SafeLisp callables.
 ///
@@ -1892,7 +1892,7 @@ pub struct HostCtx<'gc, 'call> {
   root: &'call mut ExecRoot<'gc>,
   mc: &'gc Mutation<'gc>,
   package: &'call Package,
-  builtins: &'call Builtins,
+  library: &'call Library,
 }
 
 impl<'gc, 'call> HostCtx<'gc, 'call> {
@@ -1905,6 +1905,38 @@ impl<'gc, 'call> HostCtx<'gc, 'call> {
   /// tracker for the payload's direct Rust-heap storage.
   pub fn alloc_heap(&mut self, value: SLVal<'gc>) -> Value<'gc> {
     self.root.alloc_heap(self.mc, value)
+  }
+
+  /// Resolve a struct type by module/name in the currently executing package.
+  pub fn struct_type(&self, module: &str, name: &str) -> Result<(u32, u32), String> {
+    self
+      .package
+      .find_type(module, name)
+      .ok_or_else(|| format!("Struct not found: {module}::{name}"))
+  }
+
+  /// Allocate a struct instance for a type declared in the current package.
+  pub fn alloc_struct(
+    &mut self,
+    module: &str,
+    name: &str,
+    fields: Vec<Value<'gc>>,
+  ) -> Result<Value<'gc>, String> {
+    let struct_ = self.struct_type(module, name)?;
+    let def = self
+      .package
+      .get_struct(struct_.0, struct_.1)
+      .ok_or_else(|| format!("Struct not found: {module}::{name}"))?;
+    if fields.len() != def.fields.len() {
+      return Err(format!(
+        "{}::{} expects {} field(s) but got {}",
+        module,
+        name,
+        def.fields.len(),
+        fields.len()
+      ));
+    }
+    Ok(self.alloc_heap(SLVal::Struct(StructInstance { struct_, fields })))
   }
 
   /// Push a value onto the execution's value stack.
@@ -1966,7 +1998,7 @@ impl<'gc, 'call> HostCtx<'gc, 'call> {
     self.root.stack.push(callable);
     self
       .root
-      .call_dynamic(self.mc, self.package, self.builtins, arity)
+      .call_dynamic(self.mc, self.package, self.library, arity)
   }
 }
 

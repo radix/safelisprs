@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use anyhow::{anyhow, Result};
 use clap::Parser;
 
-use safelisp::{compile_executable_from_source, default_builtins, std_prelude_from_specs};
+use safelisp::{compile_executable_from_source, Library};
 
 #[derive(Parser)]
 #[clap(author, version, about, long_about = None)]
@@ -41,10 +41,9 @@ fn main() -> Result<()> {
     input_data
   };
 
-  let specs = default_builtins().specs();
-  let prelude = std_prelude_from_specs(&specs);
+  let library = Library::default();
   let main_func = args.main_function;
-  let package = compile_executable_from_source(&input_data, ("main", &main_func), &specs, &prelude)
+  let package = compile_executable_from_source(&input_data, ("main", &main_func), &library)
     .map_err(|e| anyhow!("{}", e))?;
 
   let output = match format.as_str() {

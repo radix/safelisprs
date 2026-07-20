@@ -1,20 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::builtins::BuiltinSpec;
 use crate::parser::{
   try_map_ast_children, ASTKind, BindingId, Function, Identifier, MatchArm, MatchPattern,
   ResolvedName, AST,
 };
-
-/// Build a prelude import list for every builtin exported from the `std`
-/// module.
-pub fn std_prelude_from_specs(specs: &[BuiltinSpec]) -> Vec<(&str, &str)> {
-  specs
-    .iter()
-    .filter(|spec| spec.module == "std")
-    .map(|spec| (spec.module, spec.name))
-    .collect()
-}
 
 /// Resolve all lexical names to binding IDs and qualify module/prelude symbols.
 pub fn resolve_module_names(

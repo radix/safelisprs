@@ -5,10 +5,7 @@ use std::time::Duration;
 use anyhow::{anyhow, Result};
 use clap::Parser;
 
-use safelisp::{
-  compile_executable_from_source, default_builtins, std_prelude_from_specs, Interpreter, Package,
-  Status,
-};
+use safelisp::{compile_executable_from_source, Interpreter, Library, Package, Status};
 
 #[derive(Parser)]
 #[clap(author, version, about, long_about = None)]
@@ -58,9 +55,8 @@ fn main() -> Result<()> {
 
   let package = match (&args.code, &args.input_file) {
     (Some(source), None) => {
-      let specs = default_builtins().specs();
-      let prelude = std_prelude_from_specs(&specs);
-      compile_executable_from_source(source, ("main", "main"), &specs, &prelude)
+      let library = Library::default();
+      compile_executable_from_source(source, ("main", "main"), &library)
         .map_err(|e| anyhow!("{}", e))?
     }
     (None, Some(input_file)) => {

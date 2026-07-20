@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::rc::Rc;
 
-use crate::builtins::{BuiltinSignature, BuiltinSpec, Trait, TypeConst};
+use crate::builtins::{BuiltinSignature, CustomTypeSpec, Library, Trait, TypeConst};
 use crate::parser::{
   source_position, ASTKind, AstId, BindingId, Enum as EnumAst, EnumVariant, Function, Identifier,
   MatchArm, MatchPattern, ResolvedName, Span, Struct as StructAst, TypeAst, AST,
@@ -216,20 +216,17 @@ impl MatchInfo {
   }
 }
 
-pub fn typecheck(asts: Vec<AST>, builtins: &[BuiltinSpec]) -> Result<CheckedModule, TypeError> {
-  typecheck_named(
-    asts,
-    builtins
-      .iter()
-      .map(|builtin| (builtin.module, builtin.name, &builtin.signature)),
-  )
+pub fn typecheck(asts: Vec<AST>, library: &Library) -> Result<CheckedModule, TypeError> {
+  let type_info = Checker::new(library)?.check(&asts)?;
+  Ok(CheckedModule { asts, type_info })
 }
 
+#[cfg(feature = "wasm")]
 pub fn typecheck_named<'a>(
   asts: Vec<AST>,
   builtins: impl IntoIterator<Item = (&'a str, &'a str, &'a BuiltinSignature)>,
 ) -> Result<CheckedModule, TypeError> {
-  let type_info = Checker::new(builtins).check(&asts)?;
+  let type_info = Checker::new_from_builtins(builtins)?.check(&asts)?;
   Ok(CheckedModule { asts, type_info })
 }
 
@@ -243,22 +240,65 @@ struct Checker {
 }
 
 impl Checker {
-  fn new<'a>(builtins: impl IntoIterator<Item = (&'a str, &'a str, &'a BuiltinSignature)>) -> Self {
-    let mut checker = Self {
+  fn new(library: &Library) -> Result<Self, TypeError> {
+    let mut checker = Self::empty();
+    for type_ in library.types() {
+      checker.insert_custom_type(type_)?;
+    }
+    for builtin in library.builtins() {
+      let scheme = checker.scheme_from_builtin(&builtin.spec().signature)?;
+      checker.schemes.insert(
+        (
+          builtin.spec().module.to_string(),
+          builtin.spec().name.to_string(),
+        ),
+        scheme,
+      );
+    }
+    Ok(checker)
+  }
+
+  #[cfg(feature = "wasm")]
+  fn new_from_builtins<'a>(
+    builtins: impl IntoIterator<Item = (&'a str, &'a str, &'a BuiltinSignature)>,
+  ) -> Result<Self, TypeError> {
+    let mut checker = Self::empty();
+    for (module, name, signature) in builtins {
+      let scheme = checker.scheme_from_builtin(signature)?;
+      checker
+        .schemes
+        .insert((module.to_string(), name.to_string()), scheme);
+    }
+    Ok(checker)
+  }
+
+  fn empty() -> Self {
+    Self {
       schemes: HashMap::new(),
       types: HashMap::new(),
       field_accesses: HashMap::new(),
       matches: HashMap::new(),
       next_var: 0,
       inference_vars: Vec::new(),
-    };
-    for (module, name, signature) in builtins {
-      let scheme = checker.scheme_from_builtin(signature);
-      checker
-        .schemes
-        .insert((module.to_string(), name.to_string()), scheme);
     }
-    checker
+  }
+
+  fn insert_custom_type(&mut self, type_: &CustomTypeSpec) -> Result<(), TypeError> {
+    if self.types.contains_key(type_.name) {
+      return Err(TypeError::new(format!("duplicate type `{}`", type_.name)));
+    }
+    self.types.insert(
+      type_.name.to_string(),
+      UserType::Struct(StructAst {
+        name: type_.name.to_string(),
+        fields: type_
+          .fields
+          .iter()
+          .map(|field| (field.name.to_string(), type_ast_from_const(&field.ty)))
+          .collect(),
+      }),
+    );
+    Ok(())
   }
 
   fn check(mut self, asts: &[AST]) -> Result<TypecheckInfo, TypeError> {
@@ -979,7 +1019,7 @@ impl Checker {
     ))
   }
 
-  fn scheme_from_builtin(&mut self, signature: &BuiltinSignature) -> FnScheme {
+  fn scheme_from_builtin(&mut self, signature: &BuiltinSignature) -> Result<FnScheme, TypeError> {
     let mut vars = HashMap::new();
     let mut quantified = Vec::new();
     for (name, bounds) in &signature.type_vars {
@@ -990,16 +1030,20 @@ impl Checker {
       vars.insert(name.clone(), var.clone());
       quantified.push(var);
     }
-    FnScheme {
+    Ok(FnScheme {
       params: signature
         .params
         .iter()
-        .map(|ty| type_from_const(ty, &vars))
-        .collect(),
-      rest: signature.rest.as_ref().map(|ty| type_from_const(ty, &vars)),
-      ret: type_from_const(&signature.ret, &vars),
+        .map(|ty| type_from_const(ty, &vars, &self.types))
+        .collect::<Result<Vec<_>, _>>()?,
+      rest: signature
+        .rest
+        .as_ref()
+        .map(|ty| type_from_const(ty, &vars, &self.types))
+        .transpose()?,
+      ret: type_from_const(&signature.ret, &vars, &self.types)?,
       quantified,
-    }
+    })
   }
 
   fn instantiate(&mut self, scheme: &FnScheme, origin: Option<String>) -> FnScheme {
@@ -1500,23 +1544,55 @@ fn ensure_bounds_available(
   Ok(())
 }
 
-fn type_from_const(ty: &TypeConst, vars: &HashMap<String, TvRef>) -> Type {
+fn type_ast_from_const(ty: &TypeConst) -> TypeAst {
   match ty {
-    TypeConst::Int => Type::Int,
-    TypeConst::Float => Type::Float,
-    TypeConst::String => Type::String,
-    TypeConst::Bool => Type::Bool,
-    TypeConst::Void => Type::Void,
-    TypeConst::Cell(item) => Type::Cell(Box::new(type_from_const(item, vars))),
-    TypeConst::List(item) => Type::List(Box::new(type_from_const(item, vars))),
-    TypeConst::Fn { params, ret } => Type::fixed_fn(
+    TypeConst::Int => TypeAst::Named("Int".to_string()),
+    TypeConst::Float => TypeAst::Named("Float".to_string()),
+    TypeConst::String => TypeAst::Named("String".to_string()),
+    TypeConst::Bool => TypeAst::Named("Bool".to_string()),
+    TypeConst::Void => TypeAst::Named("Void".to_string()),
+    TypeConst::Cell(item) => TypeAst::Apply("Cell".to_string(), vec![type_ast_from_const(item)]),
+    TypeConst::List(item) => TypeAst::Apply("List".to_string(), vec![type_ast_from_const(item)]),
+    TypeConst::Fn { params, ret } => TypeAst::Fn(
+      params.iter().map(type_ast_from_const).collect(),
+      None,
+      Box::new(type_ast_from_const(ret)),
+    ),
+    TypeConst::Named { name, .. } => TypeAst::Named((*name).to_string()),
+    TypeConst::Var(name) => TypeAst::Named(name.clone()),
+  }
+}
+
+fn type_from_const(
+  ty: &TypeConst,
+  vars: &HashMap<String, TvRef>,
+  types: &HashMap<String, UserType>,
+) -> Result<Type, TypeError> {
+  match ty {
+    TypeConst::Int => Ok(Type::Int),
+    TypeConst::Float => Ok(Type::Float),
+    TypeConst::String => Ok(Type::String),
+    TypeConst::Bool => Ok(Type::Bool),
+    TypeConst::Void => Ok(Type::Void),
+    TypeConst::Cell(item) => Ok(Type::Cell(Box::new(type_from_const(item, vars, types)?))),
+    TypeConst::List(item) => Ok(Type::List(Box::new(type_from_const(item, vars, types)?))),
+    TypeConst::Fn { params, ret } => Ok(Type::fixed_fn(
       params
         .iter()
-        .map(|param| type_from_const(param, vars))
-        .collect(),
-      type_from_const(ret, vars),
-    ),
-    TypeConst::Var(name) => Type::Var(vars[name].clone()),
+        .map(|param| type_from_const(param, vars, types))
+        .collect::<Result<Vec<_>, _>>()?,
+      type_from_const(ret, vars, types)?,
+    )),
+    TypeConst::Named { name, .. } => match types.get(*name) {
+      Some(UserType::Struct(_)) => Ok(Type::Struct((*name).to_string())),
+      Some(UserType::Enum(_)) => Ok(Type::Enum((*name).to_string())),
+      None => Err(TypeError::new(format!("unknown type `{name}`"))),
+    },
+    TypeConst::Var(name) => vars
+      .get(name)
+      .cloned()
+      .map(Type::Var)
+      .ok_or_else(|| TypeError::new(format!("unknown type variable `{name}`"))),
   }
 }
 

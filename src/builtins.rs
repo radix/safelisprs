@@ -46,6 +46,13 @@ pub enum TypeConst {
     /// Return type produced by the callable.
     ret: Box<TypeConst>,
   },
+  /// A user-defined or library-defined named type.
+  Named {
+    /// Module containing the type declaration.
+    module: &'static str,
+    /// Type name.
+    name: &'static str,
+  },
   /// A generic type variable by name.
   Var(String),
 }
@@ -72,6 +79,11 @@ impl TypeConst {
       params,
       ret: Box::new(ret),
     }
+  }
+
+  /// Construct a named type reference.
+  pub fn named(module: &'static str, name: &'static str) -> Self {
+    Self::Named { module, name }
   }
 }
 
@@ -102,6 +114,44 @@ pub struct BuiltinSpec {
   pub signature: BuiltinSignature,
 }
 
+/// A field declared by a library-owned struct type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustomFieldSpec {
+  /// Field name.
+  pub name: &'static str,
+  /// Field type.
+  pub ty: TypeConst,
+}
+
+/// A custom SafeLisp type supplied by a host library.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustomTypeSpec {
+  /// Module name containing the type.
+  pub module: &'static str,
+  /// Type name.
+  pub name: &'static str,
+  /// Struct fields, in declaration order.
+  pub fields: Vec<CustomFieldSpec>,
+}
+
+impl CustomTypeSpec {
+  /// Construct a library-owned struct type.
+  pub fn struct_(
+    module: &'static str,
+    name: &'static str,
+    fields: Vec<(&'static str, TypeConst)>,
+  ) -> Self {
+    Self {
+      module,
+      name,
+      fields: fields
+        .into_iter()
+        .map(|(name, ty)| CustomFieldSpec { name, ty })
+        .collect(),
+    }
+  }
+}
+
 /// Construct a [`BuiltinSignature`] from borrowed type-variable metadata.
 pub fn sig(
   type_vars: &[(&str, &[Trait])],
@@ -121,7 +171,7 @@ pub fn sig(
 }
 
 /// A builtin's runtime handler. Takes a [`HostCtx`] (which bundles the
-/// `&mut ExecRoot`, the GC `Mutation` context, and the `Package`/`Builtins`
+/// `&mut ExecRoot`, the GC `Mutation` context, and the `Package`/`Library`
 /// registries) and the evaluated arguments.
 ///
 /// The `for<'gc, 'call>` higher-ranked bound lets one `'static` handler serve
@@ -342,43 +392,113 @@ impl Builtin {
   }
 }
 
-/// A registry of builtins available to a program. The compiler reads the
-/// [`BuiltinSpec`]s (via [`Builtins::specs`]) to register `Callable::Builtin`
-/// slots; the interpreter looks up the matching handler at runtime.
 #[derive(Clone, Default)]
-pub struct Builtins {
+struct Builtins {
   entries: Vec<Builtin>,
 }
 
 impl Builtins {
-  /// Create an empty builtin registry.
-  pub fn new() -> Self {
+  fn new() -> Self {
     Self::default()
   }
 
-  /// Register a builtin (builder style).
-  pub fn with_builtin(mut self, builtin: Builtin) -> Self {
+  fn with_builtin(mut self, builtin: Builtin) -> Self {
     self.entries.push(builtin);
     self
   }
 
-  /// Iterate over all registered builtins.
-  pub fn iter(&self) -> impl Iterator<Item = &Builtin> {
+  fn iter(&self) -> impl Iterator<Item = &Builtin> {
     self.entries.iter()
   }
 
-  /// The specs of all registered builtins, for the compiler to inject as
-  /// `Callable::Builtin` slots.
-  pub fn specs(&self) -> Vec<BuiltinSpec> {
-    self.entries.iter().map(|b| b.spec.clone()).collect()
-  }
-
-  /// Look up a builtin by `(module, name)`.
-  pub(crate) fn lookup(&self, module: &str, name: &str) -> Option<&Builtin> {
+  fn lookup(&self, module: &str, name: &str) -> Option<&Builtin> {
     self
       .entries
       .iter()
       .find(|b| b.spec.module == module && b.spec.name == name)
+  }
+}
+
+/// A complete host library: custom SafeLisp type declarations plus the builtin
+/// functions whose signatures and runtime behavior may depend on them.
+#[derive(Clone)]
+pub struct Library {
+  builtins: Builtins,
+  types: Vec<CustomTypeSpec>,
+  prelude: Vec<(&'static str, &'static str)>,
+}
+
+impl Library {
+  /// Create an empty library.
+  pub fn new() -> Self {
+    Self {
+      builtins: Builtins::new(),
+      types: Vec::new(),
+      prelude: Vec::new(),
+    }
+  }
+
+  /// Register a builtin (builder style).
+  pub fn with_builtin(mut self, builtin: Builtin) -> Self {
+    self.builtins = self.builtins.with_builtin(builtin);
+    self
+  }
+
+  /// Register a custom type (builder style).
+  pub fn with_type(mut self, type_: CustomTypeSpec) -> Self {
+    self.types.push(type_);
+    self
+  }
+
+  /// Add one builtin function to the default lexical prelude.
+  pub fn with_prelude(mut self, module: &'static str, name: &'static str) -> Self {
+    if !self.prelude.contains(&(module, name)) {
+      self.prelude.push((module, name));
+    }
+    self
+  }
+
+  /// Add every builtin in `module` to the default lexical prelude.
+  pub fn with_promoted_prelude(mut self, module: &str) -> Self {
+    let promoted = self
+      .builtins()
+      .filter(|builtin| builtin.spec().module == module)
+      .map(|builtin| (builtin.spec().module, builtin.spec().name))
+      .collect::<Vec<_>>();
+    for entry in promoted {
+      if !self.prelude.contains(&entry) {
+        self.prelude.push(entry);
+      }
+    }
+    self
+  }
+
+  /// Merge another library into this one, preserving declaration order.
+  pub fn merge(mut self, other: Library) -> Self {
+    self.builtins.entries.extend(other.builtins.entries);
+    self.types.extend(other.types);
+    self.prelude.extend(other.prelude);
+    self
+  }
+
+  /// Iterate over all registered builtins.
+  pub fn builtins(&self) -> impl Iterator<Item = &Builtin> {
+    self.builtins.iter()
+  }
+
+  /// Iterate over all registered custom types.
+  pub fn types(&self) -> impl Iterator<Item = &CustomTypeSpec> {
+    self.types.iter()
+  }
+
+  /// The functions imported into lexical scope by default for this library.
+  pub fn prelude(&self) -> &[(&'static str, &'static str)] {
+    &self.prelude
+  }
+
+  /// Look up a builtin by `(module, name)`.
+  pub(crate) fn lookup_builtin(&self, module: &str, name: &str) -> Option<&Builtin> {
+    self.builtins.lookup(module, name)
   }
 }
 
@@ -543,489 +663,522 @@ fn map_resume<'gc, 'call>(
   }
 }
 
-/// The default builtin registry.
-pub fn default_builtins() -> Builtins {
-  Builtins::new()
-    .with_builtin(Builtin::binary(
-      "std",
-      "+",
-      sig(
-        &[("A", &[Trait::Add])],
-        vec![TypeConst::var("A"), TypeConst::var("A")],
-        None,
-        TypeConst::var("A"),
-      ),
-      |a, b| match (a, b) {
-        (Value::Int(x), Value::Int(y)) => Ok(Value::Int(x + y)),
-        (Value::Float(x), Value::Float(y)) => Ok(Value::Float(x + y)),
+fn rng_state_cell<'gc, 'call>(
+  ctx: &HostCtx<'gc, 'call>,
+  rng: Value<'gc>,
+) -> Result<Gc<'gc, RefLock<CellContents<'gc>>>, String> {
+  let rng_type = ctx.struct_type("rand", "Rng")?;
+  match rng {
+    Value::Heap(heap) => match &heap.value {
+      SLVal::Struct(instance) if instance.struct_ == rng_type => match instance.fields.as_slice() {
+        [Value::Cell(cell)] => Ok(*cell),
+        [other] => Err(format!(
+          "rand::roll!: expected Rng state to be a Cell, got {}",
+          other.type_name()
+        )),
         _ => Err(format!(
-          "Couldn't add {} and {}",
-          a.type_name(),
-          b.type_name()
+          "rand::roll!: expected Rng to have 1 field, got {}",
+          instance.fields.len()
         )),
       },
-    ))
-    .with_builtin(Builtin::binary(
-      "std",
-      "-",
-      sig(
-        &[("A", &[Trait::Sub])],
-        vec![TypeConst::var("A"), TypeConst::var("A")],
-        None,
-        TypeConst::var("A"),
-      ),
-      |a, b| {
-        match (a, b) {
-          // `a` is the left operand, `b` is the right operand: left - right.
-          (Value::Int(x), Value::Int(y)) => Ok(Value::Int(x - y)),
-          (Value::Float(x), Value::Float(y)) => Ok(Value::Float(x - y)),
+      SLVal::Struct(_) => Err("rand::roll!: expected Rng, got Struct".to_string()),
+      _ => Err(format!(
+        "rand::roll!: expected Rng, got {}",
+        rng.type_name()
+      )),
+    },
+    other => Err(format!(
+      "rand::roll!: expected Rng, got {}",
+      other.type_name()
+    )),
+  }
+}
+
+impl Default for Library {
+  fn default() -> Self {
+    Library::new()
+      .with_type(CustomTypeSpec::struct_(
+        "rand",
+        "Rng",
+        vec![("state", TypeConst::cell(TypeConst::Int))],
+      ))
+      .with_builtin(Builtin::binary(
+        "std",
+        "+",
+        sig(
+          &[("A", &[Trait::Add])],
+          vec![TypeConst::var("A"), TypeConst::var("A")],
+          None,
+          TypeConst::var("A"),
+        ),
+        |a, b| match (a, b) {
+          (Value::Int(x), Value::Int(y)) => Ok(Value::Int(x + y)),
+          (Value::Float(x), Value::Float(y)) => Ok(Value::Float(x + y)),
           _ => Err(format!(
-            "Couldn't sub {} and {}",
+            "Couldn't add {} and {}",
             a.type_name(),
             b.type_name()
           )),
-        }
-      },
-    ))
-    .with_builtin(Builtin::binary(
-      "std",
-      "==",
-      sig(
-        &[("A", &[Trait::Eq])],
-        vec![TypeConst::var("A"), TypeConst::var("A")],
-        None,
-        TypeConst::Bool,
-      ),
-      |a, b| Ok(Value::Bool(a == b)),
-    ))
-    .with_builtin(Builtin::contextual(
-      "std",
-      "concat",
-      Some(2),
-      sig(
-        &[("A", &[Trait::Concat])],
-        vec![TypeConst::var("A"), TypeConst::var("A")],
-        None,
-        TypeConst::var("A"),
-      ),
-      |ctx, args| {
-        let (a, b) = (args[0], args[1]);
-        match (&a, &b) {
-          (Value::Heap(a), Value::Heap(b)) => match (&a.value, &b.value) {
-            (SLVal::String(x), SLVal::String(y)) => {
-              let len = x
-                .len()
-                .checked_add(y.len())
-                .ok_or_else(|| "concat: string length overflow".to_string())?;
-              let (mut combined, _reservation) = reserved_string(ctx, len, "concat")?;
-              combined.push_str(x);
-              combined.push_str(y);
-              Ok(SLVal::String(combined))
-            }
-            (SLVal::List(x), SLVal::List(y)) => {
-              let len = x
-                .len()
-                .checked_add(y.len())
-                .ok_or_else(|| "concat: list length overflow".to_string())?;
-              let (mut combined, _reservation) = reserved_vec(ctx, len, "concat")?;
-              combined.extend(x.iter().copied());
-              combined.extend(y.iter().copied());
-              Ok(SLVal::List(combined))
-            }
-            _ => Err(format!(
-              "Couldn't concat {} and {}",
-              a.value.type_name(),
-              b.value.type_name()
-            )),
-          },
-          _ => Err(format!(
-            "Couldn't concat {} and {}",
-            a.type_name(),
-            b.type_name()
-          )),
-        }
-      },
-    ))
-    .with_builtin(Builtin::contextual(
-      "std",
-      "list",
-      None,
-      sig(
-        &[("A", &[])],
-        vec![],
-        Some(TypeConst::var("A")),
-        TypeConst::list(TypeConst::var("A")),
-      ),
-      |ctx, args| {
-        let (mut items, _reservation) = reserved_vec(ctx, args.len(), "list")?;
-        items.extend_from_slice(args);
-        Ok(SLVal::List(items))
-      },
-    ))
-    .with_builtin(Builtin::contextual_value(
-      "std",
-      "cell",
-      Some(1),
-      sig(
-        &[("A", &[])],
-        vec![TypeConst::var("A")],
-        None,
-        TypeConst::cell(TypeConst::var("A")),
-      ),
-      |ctx, args| {
-        let contents = CellContents::new(args[0]);
-        Ok(Value::Cell(Gc::new(ctx.mc(), RefLock::new(contents))))
-      },
-    ))
-    .with_builtin(Builtin::contextual_value(
-      "std",
-      "get",
-      Some(1),
-      sig(
-        &[("A", &[])],
-        vec![TypeConst::cell(TypeConst::var("A"))],
-        None,
-        TypeConst::var("A"),
-      ),
-      |_ctx, args| match args[0] {
-        Value::Cell(cell) => Ok(cell.borrow().value),
-        other => Err(format!(
-          "std::get: expected a Cell, got {}",
-          other.type_name()
-        )),
-      },
-    ))
-    .with_builtin(Builtin::contextual_value(
-      "std",
-      "set!",
-      Some(2),
-      sig(
-        &[("A", &[])],
-        vec![TypeConst::cell(TypeConst::var("A")), TypeConst::var("A")],
-        None,
-        TypeConst::Void,
-      ),
-      |ctx, args| match args[0] {
-        Value::Cell(cell) => {
-          Gc::write(ctx.mc(), cell).unlock().borrow_mut().set(args[1]);
-          Ok(Value::Void)
-        }
-        other => Err(format!(
-          "std::set!: expected a Cell, got {}",
-          other.type_name()
-        )),
-      },
-    ))
-    .with_builtin(Builtin::unary(
-      "std",
-      "len",
-      sig(
-        &[("A", &[])],
-        vec![TypeConst::list(TypeConst::var("A"))],
-        None,
-        TypeConst::Int,
-      ),
-      |a| match a {
-        Value::Heap(heap) => match &heap.value {
-          SLVal::List(items) => Ok(Value::Int(items.len() as i64)),
-          _ => Err(format!("len: expected a List, got {}", a.type_name())),
         },
-        _ => Err(format!("len: expected a List, got {}", a.type_name())),
-      },
-    ))
-    .with_builtin(Builtin::contextual_value(
-      "std",
-      "idx",
-      Some(2),
-      sig(
-        &[("A", &[])],
-        vec![TypeConst::list(TypeConst::var("A")), TypeConst::Int],
-        None,
-        TypeConst::var("A"),
-      ),
-      |_ctx, args| {
-        let (a, b) = (args[0], args[1]);
-        match (&a, &b) {
-          (Value::Heap(a), Value::Int(i)) => match &a.value {
-            SLVal::List(items) => {
-              let len = items.len() as i64;
-              let idx = if *i < 0 { *i + len } else { *i };
-              if idx < 0 || idx >= len {
-                Err(format!(
-                  "idx: index {} out of range for list of length {}",
-                  i, len
-                ))
-              } else {
-                Ok(items[idx as usize])
-              }
-            }
+      ))
+      .with_builtin(Builtin::binary(
+        "std",
+        "-",
+        sig(
+          &[("A", &[Trait::Sub])],
+          vec![TypeConst::var("A"), TypeConst::var("A")],
+          None,
+          TypeConst::var("A"),
+        ),
+        |a, b| {
+          match (a, b) {
+            // `a` is the left operand, `b` is the right operand: left - right.
+            (Value::Int(x), Value::Int(y)) => Ok(Value::Int(x - y)),
+            (Value::Float(x), Value::Float(y)) => Ok(Value::Float(x - y)),
             _ => Err(format!(
-              "idx: expected (List, Int), got ({}, {})",
-              a.value.type_name(),
+              "Couldn't sub {} and {}",
+              a.type_name(),
               b.type_name()
             )),
-          },
-          _ => Err(format!(
-            "idx: expected (List, Int), got ({}, {})",
-            a.type_name(),
-            b.type_name()
-          )),
-        }
-      },
-    ))
-    .with_builtin(Builtin::contextual(
-      "std",
-      "push",
-      Some(2),
-      sig(
-        &[("A", &[])],
-        vec![TypeConst::list(TypeConst::var("A")), TypeConst::var("A")],
-        None,
-        TypeConst::list(TypeConst::var("A")),
-      ),
-      |ctx, args| {
-        let (a, b) = (args[0], args[1]);
-        match &a {
-          Value::Heap(heap) => match &heap.value {
-            SLVal::List(items) => {
-              let len = items
-                .len()
-                .checked_add(1)
-                .ok_or_else(|| "push: list length overflow".to_string())?;
-              let (mut new, _reservation) = reserved_vec(ctx, len, "push")?;
-              new.extend(items.iter().copied());
-              new.push(b);
-              Ok(SLVal::List(new))
-            }
-            _ => Err(format!("push: expected a List, got {}", a.type_name())),
-          },
-          _ => Err(format!("push: expected a List, got {}", a.type_name())),
-        }
-      },
-    ))
-    // (std::range start stop) -> List<Int>
-    //   Like Python's `list(range(start, stop))`: half-open, `[start, stop)`.
-    //   `start >= stop` yields the empty list.
-    .with_builtin(Builtin::contextual(
-      "std",
-      "range",
-      Some(2),
-      sig(
-        &[],
-        vec![TypeConst::Int, TypeConst::Int],
-        None,
-        TypeConst::list(TypeConst::Int),
-      ),
-      |ctx, args| {
-        let (a, b) = (args[0], args[1]);
-        match (a, b) {
-          (Value::Int(start), Value::Int(stop)) => {
-            if stop <= start {
-              Ok(SLVal::List(vec![]))
-            } else {
-              let len = usize::try_from(i128::from(stop) - i128::from(start))
-                .map_err(|_| "range: result is too large for this platform".to_string())?;
-              let (mut values, _reservation) = reserved_vec(ctx, len, "range")?;
-              for i in start..stop {
-                values.push(Value::Int(i));
-              }
-              Ok(SLVal::List(values))
-            }
           }
-          _ => Err(format!(
-            "range: expected (Int, Int), got ({}, {})",
-            a.type_name(),
-            b.type_name()
-          )),
-        }
-      },
-    ))
-    // (std::map list fn) -> List
-    //   Applies `fn` (a callable value: FunctionRef or Partial) to each element
-    //   of `list` and collects the results into a new list. Implemented as a
-    //   builtin with [`HostCtx`] access so callback execution is scheduled
-    //   through the ordinary resumable interpreter loop.
-    .with_builtin(Builtin::resumable(
-      "std",
-      "map",
-      Some(2),
-      sig(
-        &[("A", &[]), ("B", &[])],
-        vec![
+        },
+      ))
+      .with_builtin(Builtin::binary(
+        "std",
+        "==",
+        sig(
+          &[("A", &[Trait::Eq])],
+          vec![TypeConst::var("A"), TypeConst::var("A")],
+          None,
+          TypeConst::Bool,
+        ),
+        |a, b| Ok(Value::Bool(a == b)),
+      ))
+      .with_builtin(Builtin::contextual(
+        "std",
+        "concat",
+        Some(2),
+        sig(
+          &[("A", &[Trait::Concat])],
+          vec![TypeConst::var("A"), TypeConst::var("A")],
+          None,
+          TypeConst::var("A"),
+        ),
+        |ctx, args| {
+          let (a, b) = (args[0], args[1]);
+          match (&a, &b) {
+            (Value::Heap(a), Value::Heap(b)) => match (&a.value, &b.value) {
+              (SLVal::String(x), SLVal::String(y)) => {
+                let len = x
+                  .len()
+                  .checked_add(y.len())
+                  .ok_or_else(|| "concat: string length overflow".to_string())?;
+                let (mut combined, _reservation) = reserved_string(ctx, len, "concat")?;
+                combined.push_str(x);
+                combined.push_str(y);
+                Ok(SLVal::String(combined))
+              }
+              (SLVal::List(x), SLVal::List(y)) => {
+                let len = x
+                  .len()
+                  .checked_add(y.len())
+                  .ok_or_else(|| "concat: list length overflow".to_string())?;
+                let (mut combined, _reservation) = reserved_vec(ctx, len, "concat")?;
+                combined.extend(x.iter().copied());
+                combined.extend(y.iter().copied());
+                Ok(SLVal::List(combined))
+              }
+              _ => Err(format!(
+                "Couldn't concat {} and {}",
+                a.value.type_name(),
+                b.value.type_name()
+              )),
+            },
+            _ => Err(format!(
+              "Couldn't concat {} and {}",
+              a.type_name(),
+              b.type_name()
+            )),
+          }
+        },
+      ))
+      .with_builtin(Builtin::contextual(
+        "std",
+        "list",
+        None,
+        sig(
+          &[("A", &[])],
+          vec![],
+          Some(TypeConst::var("A")),
           TypeConst::list(TypeConst::var("A")),
-          TypeConst::function(vec![TypeConst::var("A")], TypeConst::var("B")),
-        ],
-        None,
-        TypeConst::list(TypeConst::var("B")),
-      ),
-      map_start,
-      map_resume,
-    ))
-    .with_builtin(Builtin::contextual(
-      "std",
-      "slice",
-      Some(3),
-      sig(
-        &[("A", &[Trait::Slice])],
-        vec![TypeConst::var("A"), TypeConst::Int, TypeConst::Int],
-        None,
-        TypeConst::var("A"),
-      ),
-      |ctx, args| {
-        let (a, b, c) = (args[0], args[1], args[2]);
-        match (&a, &b, &c) {
-          (Value::Heap(heap), Value::Int(start), Value::Int(stop)) => match &heap.value {
-            SLVal::List(items) => {
-              let len = items.len() as i64;
-              let s = norm_index(*start, len);
-              let e = norm_index(*stop, len);
-              let s = s.clamp(0, len);
-              let e = e.clamp(0, len);
-              if s >= e {
+        ),
+        |ctx, args| {
+          let (mut items, _reservation) = reserved_vec(ctx, args.len(), "list")?;
+          items.extend_from_slice(args);
+          Ok(SLVal::List(items))
+        },
+      ))
+      .with_builtin(Builtin::contextual_value(
+        "std",
+        "cell",
+        Some(1),
+        sig(
+          &[("A", &[])],
+          vec![TypeConst::var("A")],
+          None,
+          TypeConst::cell(TypeConst::var("A")),
+        ),
+        |ctx, args| {
+          let contents = CellContents::new(args[0]);
+          Ok(Value::Cell(Gc::new(ctx.mc(), RefLock::new(contents))))
+        },
+      ))
+      .with_builtin(Builtin::contextual_value(
+        "std",
+        "get",
+        Some(1),
+        sig(
+          &[("A", &[])],
+          vec![TypeConst::cell(TypeConst::var("A"))],
+          None,
+          TypeConst::var("A"),
+        ),
+        |_ctx, args| match args[0] {
+          Value::Cell(cell) => Ok(cell.borrow().value),
+          other => Err(format!(
+            "std::get: expected a Cell, got {}",
+            other.type_name()
+          )),
+        },
+      ))
+      .with_builtin(Builtin::contextual_value(
+        "std",
+        "set!",
+        Some(2),
+        sig(
+          &[("A", &[])],
+          vec![TypeConst::cell(TypeConst::var("A")), TypeConst::var("A")],
+          None,
+          TypeConst::Void,
+        ),
+        |ctx, args| match args[0] {
+          Value::Cell(cell) => {
+            Gc::write(ctx.mc(), cell).unlock().borrow_mut().set(args[1]);
+            Ok(Value::Void)
+          }
+          other => Err(format!(
+            "std::set!: expected a Cell, got {}",
+            other.type_name()
+          )),
+        },
+      ))
+      .with_builtin(Builtin::unary(
+        "std",
+        "len",
+        sig(
+          &[("A", &[])],
+          vec![TypeConst::list(TypeConst::var("A"))],
+          None,
+          TypeConst::Int,
+        ),
+        |a| match a {
+          Value::Heap(heap) => match &heap.value {
+            SLVal::List(items) => Ok(Value::Int(items.len() as i64)),
+            _ => Err(format!("len: expected a List, got {}", a.type_name())),
+          },
+          _ => Err(format!("len: expected a List, got {}", a.type_name())),
+        },
+      ))
+      .with_builtin(Builtin::contextual_value(
+        "std",
+        "idx",
+        Some(2),
+        sig(
+          &[("A", &[])],
+          vec![TypeConst::list(TypeConst::var("A")), TypeConst::Int],
+          None,
+          TypeConst::var("A"),
+        ),
+        |_ctx, args| {
+          let (a, b) = (args[0], args[1]);
+          match (&a, &b) {
+            (Value::Heap(a), Value::Int(i)) => match &a.value {
+              SLVal::List(items) => {
+                let len = items.len() as i64;
+                let idx = if *i < 0 { *i + len } else { *i };
+                if idx < 0 || idx >= len {
+                  Err(format!(
+                    "idx: index {} out of range for list of length {}",
+                    i, len
+                  ))
+                } else {
+                  Ok(items[idx as usize])
+                }
+              }
+              _ => Err(format!(
+                "idx: expected (List, Int), got ({}, {})",
+                a.value.type_name(),
+                b.type_name()
+              )),
+            },
+            _ => Err(format!(
+              "idx: expected (List, Int), got ({}, {})",
+              a.type_name(),
+              b.type_name()
+            )),
+          }
+        },
+      ))
+      .with_builtin(Builtin::contextual(
+        "std",
+        "push",
+        Some(2),
+        sig(
+          &[("A", &[])],
+          vec![TypeConst::list(TypeConst::var("A")), TypeConst::var("A")],
+          None,
+          TypeConst::list(TypeConst::var("A")),
+        ),
+        |ctx, args| {
+          let (a, b) = (args[0], args[1]);
+          match &a {
+            Value::Heap(heap) => match &heap.value {
+              SLVal::List(items) => {
+                let len = items
+                  .len()
+                  .checked_add(1)
+                  .ok_or_else(|| "push: list length overflow".to_string())?;
+                let (mut new, _reservation) = reserved_vec(ctx, len, "push")?;
+                new.extend(items.iter().copied());
+                new.push(b);
+                Ok(SLVal::List(new))
+              }
+              _ => Err(format!("push: expected a List, got {}", a.type_name())),
+            },
+            _ => Err(format!("push: expected a List, got {}", a.type_name())),
+          }
+        },
+      ))
+      // (std::range start stop) -> List<Int>
+      //   Like Python's `list(range(start, stop))`: half-open, `[start, stop)`.
+      //   `start >= stop` yields the empty list.
+      .with_builtin(Builtin::contextual(
+        "std",
+        "range",
+        Some(2),
+        sig(
+          &[],
+          vec![TypeConst::Int, TypeConst::Int],
+          None,
+          TypeConst::list(TypeConst::Int),
+        ),
+        |ctx, args| {
+          let (a, b) = (args[0], args[1]);
+          match (a, b) {
+            (Value::Int(start), Value::Int(stop)) => {
+              if stop <= start {
                 Ok(SLVal::List(vec![]))
               } else {
-                let slice = &items[s as usize..e as usize];
-                let (mut result, _reservation) = reserved_vec(ctx, slice.len(), "slice")?;
-                result.extend(slice.iter().copied());
-                Ok(SLVal::List(result))
+                let len = usize::try_from(i128::from(stop) - i128::from(start))
+                  .map_err(|_| "range: result is too large for this platform".to_string())?;
+                let (mut values, _reservation) = reserved_vec(ctx, len, "range")?;
+                for i in start..stop {
+                  values.push(Value::Int(i));
+                }
+                Ok(SLVal::List(values))
               }
             }
-            SLVal::String(s) => {
-              let len = s.chars().count() as i64;
-              let st = norm_index(*start, len).clamp(0, len) as usize;
-              let en = norm_index(*stop, len).clamp(0, len) as usize;
-              if st >= en {
-                Ok(SLVal::String(String::new()))
-              } else {
-                let start_byte = char_boundary(s, st);
-                let end_byte = char_boundary(s, en);
-                let source = &s[start_byte..end_byte];
-                let (mut result, _reservation) = reserved_string(ctx, source.len(), "slice")?;
-                result.push_str(source);
-                Ok(SLVal::String(result))
+            _ => Err(format!(
+              "range: expected (Int, Int), got ({}, {})",
+              a.type_name(),
+              b.type_name()
+            )),
+          }
+        },
+      ))
+      // (std::map list fn) -> List
+      //   Applies `fn` (a callable value: FunctionRef or Partial) to each element
+      //   of `list` and collects the results into a new list. Implemented as a
+      //   builtin with [`HostCtx`] access so callback execution is scheduled
+      //   through the ordinary resumable interpreter loop.
+      .with_builtin(Builtin::resumable(
+        "std",
+        "map",
+        Some(2),
+        sig(
+          &[("A", &[]), ("B", &[])],
+          vec![
+            TypeConst::list(TypeConst::var("A")),
+            TypeConst::function(vec![TypeConst::var("A")], TypeConst::var("B")),
+          ],
+          None,
+          TypeConst::list(TypeConst::var("B")),
+        ),
+        map_start,
+        map_resume,
+      ))
+      .with_builtin(Builtin::contextual(
+        "std",
+        "slice",
+        Some(3),
+        sig(
+          &[("A", &[Trait::Slice])],
+          vec![TypeConst::var("A"), TypeConst::Int, TypeConst::Int],
+          None,
+          TypeConst::var("A"),
+        ),
+        |ctx, args| {
+          let (a, b, c) = (args[0], args[1], args[2]);
+          match (&a, &b, &c) {
+            (Value::Heap(heap), Value::Int(start), Value::Int(stop)) => match &heap.value {
+              SLVal::List(items) => {
+                let len = items.len() as i64;
+                let s = norm_index(*start, len);
+                let e = norm_index(*stop, len);
+                let s = s.clamp(0, len);
+                let e = e.clamp(0, len);
+                if s >= e {
+                  Ok(SLVal::List(vec![]))
+                } else {
+                  let slice = &items[s as usize..e as usize];
+                  let (mut result, _reservation) = reserved_vec(ctx, slice.len(), "slice")?;
+                  result.extend(slice.iter().copied());
+                  Ok(SLVal::List(result))
+                }
               }
-            }
+              SLVal::String(s) => {
+                let len = s.chars().count() as i64;
+                let st = norm_index(*start, len).clamp(0, len) as usize;
+                let en = norm_index(*stop, len).clamp(0, len) as usize;
+                if st >= en {
+                  Ok(SLVal::String(String::new()))
+                } else {
+                  let start_byte = char_boundary(s, st);
+                  let end_byte = char_boundary(s, en);
+                  let source = &s[start_byte..end_byte];
+                  let (mut result, _reservation) = reserved_string(ctx, source.len(), "slice")?;
+                  result.push_str(source);
+                  Ok(SLVal::String(result))
+                }
+              }
+              _ => Err(format!(
+                "slice: expected (List, Int, Int) or (String, Int, Int), got ({}, {}, {})",
+                a.type_name(),
+                b.type_name(),
+                c.type_name()
+              )),
+            },
             _ => Err(format!(
               "slice: expected (List, Int, Int) or (String, Int, Int), got ({}, {}, {})",
               a.type_name(),
               b.type_name(),
               c.type_name()
             )),
-          },
-          _ => Err(format!(
-            "slice: expected (List, Int, Int) or (String, Int, Int), got ({}, {}, {})",
-            a.type_name(),
-            b.type_name(),
-            c.type_name()
-          )),
-        }
-      },
-    ))
-    // ── rand module ────────────────────────────────────────────────────────
-    // (rand::rng seed "name") -> Cell(Int)
-    //   Deterministically derives a new 64-bit seed from `seed` (Int) and
-    //   `name` (String) using BLAKE3, and wraps it in a Cell so that
-    //   `rand::roll!` can mutate it in place. Same inputs always produce the
-    //   same Cell contents; differing `name` or `seed` produces differing
-    //   output.
-    .with_builtin(Builtin::contextual_value(
-      "rand",
-      "rng",
-      Some(2),
-      sig(
-        &[],
-        vec![TypeConst::Int, TypeConst::String],
-        None,
-        TypeConst::cell(TypeConst::Int),
-      ),
-      |ctx, args| {
-        let (seed, name) = (args[0], args[1]);
-        let parent = match seed {
-          Value::Int(i) => i,
-          other => {
-            return Err(format!(
-              "rand::rng: expected Int seed, got {}",
-              other.type_name()
-            ))
           }
-        };
-        let ns = match &name {
-          Value::Heap(heap) => match &heap.value {
-            SLVal::String(s) => s.as_str(),
-            _ => {
+        },
+      ))
+      // ── rand module ────────────────────────────────────────────────────────
+      // (rand::rng seed "name") -> Rng
+      //   Deterministically derives a new 64-bit seed from `seed` (Int) and
+      //   `name` (String) using BLAKE3, and wraps it in a Cell so that
+      //   `rand::roll!` can mutate it in place. Same inputs always produce the
+      //   same Cell contents; differing `name` or `seed` produces differing
+      //   output.
+      .with_builtin(Builtin::contextual_value(
+        "rand",
+        "rng",
+        Some(2),
+        sig(
+          &[],
+          vec![TypeConst::Int, TypeConst::String],
+          None,
+          TypeConst::named("rand", "Rng"),
+        ),
+        |ctx, args| {
+          let (seed, name) = (args[0], args[1]);
+          let parent = match seed {
+            Value::Int(i) => i,
+            other => {
               return Err(format!(
-                "rand::rng: expected String name, got {}",
-                name.type_name()
+                "rand::rng: expected Int seed, got {}",
+                other.type_name()
               ))
             }
-          },
-          other => {
-            return Err(format!(
-              "rand::rng: expected String name, got {}",
-              other.type_name()
-            ))
+          };
+          let ns = match &name {
+            Value::Heap(heap) => match &heap.value {
+              SLVal::String(s) => s.as_str(),
+              _ => {
+                return Err(format!(
+                  "rand::rng: expected String name, got {}",
+                  name.type_name()
+                ))
+              }
+            },
+            other => {
+              return Err(format!(
+                "rand::rng: expected String name, got {}",
+                other.type_name()
+              ))
+            }
+          };
+          let state = Value::Int(rand_rng(parent, ns));
+          let contents = CellContents::new(state);
+          let cell = Value::Cell(Gc::new(ctx.mc(), RefLock::new(contents)));
+          let (mut fields, _reservation) = reserved_vec(ctx, 1, "rand::rng")?;
+          fields.push(cell);
+          ctx.alloc_struct("rand", "Rng", fields)
+        },
+      ))
+      // (rand::roll! rng sides) -> Int
+      //   Mutates the `rng` in place, advancing it to the next seed,
+      //   and returns the roll (in `1..=sides`). The Cell is both the RNG state
+      //   and (after the call) the advanced state, so callers don't need to
+      //   thread a new seed through.
+      .with_builtin(Builtin::contextual_value(
+        "rand",
+        "roll!",
+        Some(2),
+        sig(
+          &[],
+          vec![TypeConst::named("rand", "Rng"), TypeConst::Int],
+          None,
+          TypeConst::Int,
+        ),
+        |ctx, args| {
+          let (rng, sides) = (args[0], args[1]);
+          let cell = rng_state_cell(ctx, rng)?;
+          let n = match sides {
+            Value::Int(i) => i,
+            other => {
+              return Err(format!(
+                "rand::roll!: expected Int sides, got {}",
+                other.type_name()
+              ))
+            }
+          };
+          if n <= 0 {
+            return Err(format!("rand::roll!: sides must be positive, got {}", n));
           }
-        };
-        let state = Value::Int(rand_rng(parent, ns));
-        let contents = CellContents::new(state);
-        Ok(Value::Cell(Gc::new(ctx.mc(), RefLock::new(contents))))
-      },
-    ))
-    // (rand::roll! rng sides) -> Int
-    //   Mutates the `rng` in place, advancing it to the next seed,
-    //   and returns the roll (in `1..=sides`). The Cell is both the RNG state
-    //   and (after the call) the advanced state, so callers don't need to
-    //   thread a new seed through.
-    .with_builtin(Builtin::contextual_value(
-      "rand",
-      "roll!",
-      Some(2),
-      sig(
-        &[],
-        vec![TypeConst::cell(TypeConst::Int), TypeConst::Int],
-        None,
-        TypeConst::Int,
-      ),
-      |ctx, args| {
-        let (rng, sides) = (args[0], args[1]);
-        let cell = match rng {
-          Value::Cell(c) => c,
-          other => {
-            return Err(format!(
-              "rand::roll!: expected Cell rng, got {}",
-              other.type_name()
-            ))
-          }
-        };
-        let n = match sides {
-          Value::Int(i) => i,
-          other => {
-            return Err(format!(
-              "rand::roll!: expected Int sides, got {}",
-              other.type_name()
-            ))
-          }
-        };
-        if n <= 0 {
-          return Err(format!("rand::roll!: sides must be positive, got {}", n));
-        }
-        let s = match cell.borrow().value {
-          Value::Int(i) => i,
-          other => {
-            return Err(format!(
-              "rand::roll!: expected Cell to hold an Int, got {}",
-              other.type_name()
-            ))
-          }
-        };
-        let (roll, next) = rand_roll(s, n);
-        Gc::write(ctx.mc(), cell)
-          .unlock()
-          .borrow_mut()
-          .set(Value::Int(next));
-        Ok(Value::Int(roll))
-      },
-    ))
+          let s = match cell.borrow().value {
+            Value::Int(i) => i,
+            other => {
+              return Err(format!(
+                "rand::roll!: expected Cell to hold an Int, got {}",
+                other.type_name()
+              ))
+            }
+          };
+          let (roll, next) = rand_roll(s, n);
+          Gc::write(ctx.mc(), cell)
+            .unlock()
+            .borrow_mut()
+            .set(Value::Int(next));
+          Ok(Value::Int(roll))
+        },
+      ))
+      .with_promoted_prelude("std")
+  }
 }
 
 /// Derive a deterministic 64-bit seed from a parent seed and a name, using

@@ -18,10 +18,9 @@ fn signatures_own_their_type_declarations() {
   assert_eq!(signature.params[0], TypeConst::var("Element"));
 }
 
-/// Helper: evaluate `main` with [`default_builtins`] and return the result.
+/// Helper: evaluate `main` with [`Library::default`] and return the result.
 fn eval_builtin_main(source: &str) -> Result<SLValue, String> {
-  let pkg =
-    compile_executable_from_source(source, ("main", "main"), &default_builtins().specs(), &[])?;
+  let pkg = compile_executable_from_source(source, ("main", "main"), &Library::default())?;
   let interp = Interpreter::new(pkg);
   let mut exec = interp.call_main().unwrap();
   exec.run_until_done()
@@ -32,9 +31,7 @@ fn eval_builtin_main(source: &str) -> Result<SLValue, String> {
 /// large operands without a limit, then install a limit immediately before
 /// the builtin's temporary allocation.
 fn before_final_call(source: &str) -> Execution {
-  let pkg =
-    compile_executable_from_source(source, ("main", "main"), &default_builtins().specs(), &[])
-      .unwrap();
+  let pkg = compile_executable_from_source(source, ("main", "main"), &Library::default()).unwrap();
   let (module, function) = pkg.main.unwrap();
   let instruction_count = match pkg.get_function(module, function).unwrap() {
     crate::compiler::Callable::Function(function) => function.instructions.len(),
@@ -193,8 +190,8 @@ fn string_slicing_uses_character_indices() {
   );
 }
 
-/// End-to-end: the surface `(rand::rng seed "name")` returns a `Cell(Int)`
-/// whose contents match [`rand_rng`] directly.
+/// End-to-end: the surface `(rand::rng seed "name")` returns an `Rng`
+/// wrapping a `Cell(Int)` whose contents match [`rand_rng`] directly.
 #[rstest]
 #[case::alpha(0, "alpha", -1438303955140652998)]
 #[case::beta(1, "beta", 6165243067257761546)]
@@ -207,22 +204,22 @@ fn string_slicing_uses_character_indices() {
 #[case::big(123_456_789, "big", -7499502896394584729)]
 #[case::huge(-8_589_934_592, "huge", 5640261956235639084)]
 fn rand_rng_surface(#[case] seed: i64, #[case] name: &str, #[case] expected: i64) {
-  let source = format!(
-    "(fn main () ->(Cell Int) (rand::rng {} \"{}\"))",
-    seed, name
-  );
+  let source = format!("(fn main () ->Rng (rand::rng {} \"{}\"))", seed, name);
   let result = eval_builtin_main(&source).unwrap();
   match result {
-    SLValue::Cell(inner) => {
-      assert_eq!(
-        *inner,
-        SLValue::Int(expected),
-        "rand::rng {} {:?}",
-        seed,
-        name
-      )
-    }
-    other => panic!("expected Cell from rand::rng, got {:?}", other),
+    SLValue::Struct { fields, .. } => match fields.as_slice() {
+      [SLValue::Cell(inner)] => {
+        assert_eq!(
+          **inner,
+          SLValue::Int(expected),
+          "rand::rng {} {:?}",
+          seed,
+          name
+        )
+      }
+      other => panic!("expected Rng state cell, got {:?}", other),
+    },
+    other => panic!("expected Rng from rand::rng, got {:?}", other),
   }
 }
 
@@ -371,11 +368,11 @@ fn rand_roll_rejects_non_positive_sides() {
   assert!(err.contains("sides must be positive"), "got: {}", err);
 }
 
-/// `rand::roll!` rejects a non-Cell rng.
+/// `rand::roll!` rejects a non-Rng value.
 #[test]
-fn rand_roll_rejects_non_cell_rng() {
+fn rand_roll_rejects_non_rng() {
   let err = eval_builtin_main("(fn main () ->Int (rand::roll! \"not-a-cell\" 6))").unwrap_err();
-  assert!(err.contains("expected `(Cell Int)`"), "got: {}", err);
+  assert!(err.contains("expected `Rng`"), "got: {}", err);
 }
 
 /// `rand::rng` rejects non-Int seeds.

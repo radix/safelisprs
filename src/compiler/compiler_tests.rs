@@ -145,14 +145,13 @@ fn compile_unbound_variable_still_errors() {
 
 #[test]
 fn linked_struct_bytecode_uses_indices() {
-  let builtins = crate::builtins::default_builtins();
+  let builtins = crate::builtins::Library::default();
   let source = "
       (struct Foo x:Int y:Int)
       (fn main () ->Int
         (let foo (new Foo y:2 x:3))
         foo.x)";
-  let package =
-    compile_executable_from_source(source, ("main", "main"), &builtins.specs(), &[]).unwrap();
+  let package = compile_executable_from_source(source, ("main", "main"), &builtins).unwrap();
   let Callable::Function(main) = package.get_function(0, 0).unwrap() else {
     panic!("expected main function");
   };
@@ -184,15 +183,14 @@ fn linked_struct_bytecode_uses_indices() {
 
 #[test]
 fn linked_enum_bytecode_uses_indices() {
-  let builtins = crate::builtins::default_builtins();
+  let builtins = crate::builtins::Library::default();
   let source = "
       (enum Foo
         (Var1)
         (Var2 x:Int y:Int))
       (fn main () ->Foo
         (new Foo::Var2 y:2 x:3))";
-  let package =
-    compile_executable_from_source(source, ("main", "main"), &builtins.specs(), &[]).unwrap();
+  let package = compile_executable_from_source(source, ("main", "main"), &builtins).unwrap();
   let Callable::Function(main) = package.get_function(0, 0).unwrap() else {
     panic!("expected main function");
   };
@@ -225,7 +223,7 @@ fn linked_enum_bytecode_uses_indices() {
 
 #[test]
 fn enum_match_lowers_to_variant_tests_and_field_loads() {
-  let builtins = crate::builtins::default_builtins();
+  let builtins = crate::builtins::Library::default();
   let source = "
       (enum Foo
         (Var1)
@@ -234,8 +232,7 @@ fn enum_match_lowers_to_variant_tests_and_field_loads() {
         (match (new Foo::Var2 x:3 y:7)
           (Var1) => 1
           (Var2 y x) => (std::- y x)))";
-  let package =
-    compile_executable_from_source(source, ("main", "main"), &builtins.specs(), &[]).unwrap();
+  let package = compile_executable_from_source(source, ("main", "main"), &builtins).unwrap();
   let Callable::Function(main) = package.get_function(0, 0).unwrap() else {
     panic!("expected main function");
   };
@@ -272,15 +269,14 @@ fn enum_match_lowers_to_variant_tests_and_field_loads() {
 
 #[test]
 fn chained_field_access_emits_multiple_field_indices() {
-  let builtins = crate::builtins::default_builtins();
+  let builtins = crate::builtins::Library::default();
   let source = "
       (struct Point x:Int y:Int)
       (struct Box origin:Point size:Int)
       (fn main () ->Int
         (let b (new Box size:10 origin:(new Point x:4 y:5)))
         (std::+ b.origin.x b.origin.y))";
-  let package =
-    compile_executable_from_source(source, ("main", "main"), &builtins.specs(), &[]).unwrap();
+  let package = compile_executable_from_source(source, ("main", "main"), &builtins).unwrap();
   let Callable::Function(main) = package.get_function(0, 0).unwrap() else {
     panic!("expected main function");
   };
@@ -309,15 +305,14 @@ fn chained_field_access_emits_multiple_field_indices() {
 
 #[test]
 fn field_access_after_function_return_uses_return_annotation() {
-  let builtins = crate::builtins::default_builtins();
+  let builtins = crate::builtins::Library::default();
   let source = "
       (struct Foo x:Int)
       (fn make () ->Foo (new Foo x:9))
       (fn main () ->Int
         (let foo (make))
         foo.x)";
-  let package =
-    compile_executable_from_source(source, ("main", "main"), &builtins.specs(), &[]).unwrap();
+  let package = compile_executable_from_source(source, ("main", "main"), &builtins).unwrap();
   let Callable::Function(main) = package.get_function(0, 1).unwrap() else {
     panic!("expected main function");
   };
@@ -329,15 +324,14 @@ fn field_access_after_function_return_uses_return_annotation() {
 
 #[test]
 fn let_annotation_preserves_struct_type_after_generic_call() {
-  let builtins = crate::builtins::default_builtins();
+  let builtins = crate::builtins::Library::default();
   let source = "
       (struct Foo x:Int)
       (fn id (x:A) ->A x)
       (fn main () ->Int
         (let foo:Foo (id (new Foo x:9)))
         foo.x)";
-  let package =
-    compile_executable_from_source(source, ("main", "main"), &builtins.specs(), &[]).unwrap();
+  let package = compile_executable_from_source(source, ("main", "main"), &builtins).unwrap();
   let Callable::Function(main) = package.get_function(0, 1).unwrap() else {
     panic!("expected main function");
   };
@@ -349,15 +343,14 @@ fn let_annotation_preserves_struct_type_after_generic_call() {
 
 #[test]
 fn inferred_generic_return_preserves_struct_type_for_field_access() {
-  let builtins = crate::builtins::default_builtins();
+  let builtins = crate::builtins::Library::default();
   let source = "
       (struct Foo x:Int)
       (fn id (x:A) ->A x)
       (fn main () ->Int
         (let foo (id (new Foo x:9)))
         foo.x)";
-  let package =
-    compile_executable_from_source(source, ("main", "main"), &builtins.specs(), &[]).unwrap();
+  let package = compile_executable_from_source(source, ("main", "main"), &builtins).unwrap();
   let Callable::Function(main) = package.get_function(0, 1).unwrap() else {
     panic!("expected main function");
   };
@@ -369,15 +362,14 @@ fn inferred_generic_return_preserves_struct_type_for_field_access() {
 
 #[test]
 fn closure_capture_preserves_struct_type_for_field_access() {
-  let builtins = crate::builtins::default_builtins();
+  let builtins = crate::builtins::Library::default();
   let source = "
       (struct Foo x:Int)
       (fn main () ->Int
         (let foo (new Foo x:9))
         (fn get () ->Int foo.x)
         (get))";
-  let package =
-    compile_executable_from_source(source, ("main", "main"), &builtins.specs(), &[]).unwrap();
+  let package = compile_executable_from_source(source, ("main", "main"), &builtins).unwrap();
   assert!(package.modules[0].functions.iter().any(|(_, callable)| {
     let Callable::Function(function) = callable else {
       return false;
@@ -391,10 +383,9 @@ fn closure_capture_preserves_struct_type_for_field_access() {
 
 #[test]
 fn source_compilation_rejects_type_errors_before_codegen() {
-  let builtins = crate::builtins::default_builtins();
+  let builtins = crate::builtins::Library::default();
   let source = "(fn main () ->Int\n  (std::+ 1\n    \"not-an-int\"))";
-  let error =
-    compile_executable_from_source(source, ("main", "main"), &builtins.specs(), &[]).unwrap_err();
+  let error = compile_executable_from_source(source, ("main", "main"), &builtins).unwrap_err();
   assert!(error.starts_with("line 3, column 5: TypeError:"), "{error}");
   assert!(
     error.contains("type `String` does not satisfy trait `Add`")

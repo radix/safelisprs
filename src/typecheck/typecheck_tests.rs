@@ -1,12 +1,12 @@
 use super::*;
-use crate::builtins::default_builtins;
+use crate::builtins::Library;
 use crate::parser::read_multiple;
 use crate::prelude::resolve_module_names;
 
 fn check(source: &str) -> Result<(), TypeError> {
   let asts = read_multiple(source).unwrap();
   let asts = resolve_module_names("main", &asts, &[], &[]).unwrap();
-  typecheck(asts, &default_builtins().specs()).map(|_| ())
+  typecheck(asts, &Library::default()).map(|_| ())
 }
 
 #[test]
@@ -51,7 +51,7 @@ fn records_receiver_types_for_field_accesses() {
       b.origin.x)";
   let asts = read_multiple(source).unwrap();
   let asts = resolve_module_names("main", &asts, &[], &[]).unwrap();
-  let checked = typecheck(asts, &default_builtins().specs()).unwrap();
+  let checked = typecheck(asts, &Library::default()).unwrap();
   let asts = checked.asts();
   let info = checked.type_info();
 
@@ -201,7 +201,7 @@ fn missing_bound_is_rejected() {
 
 #[test]
 fn occurs_check_rejects_infinite_type() {
-  let mut checker = Checker::new(std::iter::empty());
+  let mut checker = Checker::empty();
   let variable = checker.fresh(Some("test".to_string()), Vec::new());
   let error = checker
     .unify(variable.clone(), Type::List(Box::new(variable)))
@@ -258,7 +258,7 @@ fn declared_trait_bound_allows_polymorphic_builtin_use() {
 
 #[test]
 fn unbound_variable_bounds_are_merged() {
-  let mut checker = Checker::new(std::iter::empty());
+  let mut checker = Checker::empty();
   let add = checker.fresh(Some("add".to_string()), vec![Trait::Add]);
   let sub = checker.fresh(Some("sub".to_string()), vec![Trait::Sub]);
   checker.unify(add.clone(), sub).unwrap();
