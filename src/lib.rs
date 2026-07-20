@@ -19,6 +19,7 @@ mod interpreter;
 mod parser;
 mod prelude;
 mod typecheck;
+mod types;
 #[cfg(feature = "wasm")]
 /// WebAssembly compilation support for SafeLisp programs.
 pub mod wasm;

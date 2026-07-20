@@ -8,43 +8,9 @@ use crate::parser::{
   source_position, ASTKind, AstId, BindingId, Enum as EnumAst, EnumVariant, Function, Identifier,
   MatchArm, MatchPattern, ResolvedName, Span, Struct as StructAst, TypeAst, TypeNameAst, AST,
 };
+use crate::types::QualifiedTypeName;
 
 pub type TvRef = Rc<RefCell<TypeVar>>;
-
-const SOURCE_MODULE: &str = "main";
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct TypeName {
-  module: String,
-  name: String,
-}
-
-impl TypeName {
-  fn new(module: impl Into<String>, name: impl Into<String>) -> Self {
-    Self {
-      module: module.into(),
-      name: name.into(),
-    }
-  }
-
-  fn source(name: impl Into<String>) -> Self {
-    Self::new(SOURCE_MODULE, name)
-  }
-
-  fn display(&self) -> String {
-    if self.module == SOURCE_MODULE {
-      self.name.clone()
-    } else {
-      format!("{}::{}", self.module, self.name)
-    }
-  }
-}
-
-impl fmt::Display for TypeName {
-  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    write!(f, "{}", self.display())
-  }
-}
 
 #[derive(Clone)]
 pub enum Type {
@@ -53,8 +19,8 @@ pub enum Type {
   String,
   Bool,
   Void,
-  Struct(TypeName),
-  Enum(TypeName),
+  Struct(QualifiedTypeName),
+  Enum(QualifiedTypeName),
   Cell(Box<Type>),
   List(Box<Type>),
   Fn {
@@ -196,7 +162,7 @@ pub struct TypecheckInfo {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FieldAccessInfo {
-  receiver_type: TypeName,
+  receiver_type: QualifiedTypeName,
   field_index: u16,
 }
 
@@ -267,7 +233,7 @@ pub fn typecheck_named<'a>(
 
 struct Checker {
   schemes: HashMap<(String, String), FnScheme>,
-  types: HashMap<TypeName, UserType>,
+  types: HashMap<QualifiedTypeName, UserType>,
   field_accesses: HashMap<AstId, FieldAccessInfo>,
   matches: HashMap<AstId, MatchInfo>,
   next_var: usize,
@@ -319,7 +285,7 @@ impl Checker {
   }
 
   fn insert_custom_type(&mut self, type_: &CustomTypeSpec) -> Result<(), TypeError> {
-    let name = TypeName::new(type_.module, type_.name);
+    let name = QualifiedTypeName::new(type_.module, type_.name);
     if self.types.contains_key(&name) {
       return Err(TypeError::new(format!("duplicate type `{name}`")));
     }
@@ -344,7 +310,7 @@ impl Checker {
         ASTKind::DefineEnum(enum_) => (&enum_.name, UserType::Enum(enum_.clone())),
         _ => continue,
       };
-      let type_name = TypeName::source(name.clone());
+      let type_name = QualifiedTypeName::source(name.clone());
       if self.types.contains_key(&type_name) {
         return Err(TypeError::new(format!("duplicate type `{type_name}`")).at(ast.span.clone()));
       }
@@ -452,14 +418,14 @@ impl Checker {
     Ok(())
   }
 
-  fn struct_def(&self, name: &TypeName) -> Result<StructAst, TypeError> {
+  fn struct_def(&self, name: &QualifiedTypeName) -> Result<StructAst, TypeError> {
     match self.types.get(name) {
       Some(UserType::Struct(struct_)) => Ok(struct_.clone()),
       _ => Err(TypeError::new(format!("unknown struct `{name}`"))),
     }
   }
 
-  fn enum_def(&self, name: &TypeName) -> Result<EnumAst, TypeError> {
+  fn enum_def(&self, name: &QualifiedTypeName) -> Result<EnumAst, TypeError> {
     match self.types.get(name) {
       Some(UserType::Enum(enum_)) => Ok(enum_.clone()),
       _ => Err(TypeError::new(format!("unknown enum `{name}`"))),
@@ -672,7 +638,7 @@ impl Checker {
     name: &str,
     fields: &[(String, AST)],
   ) -> Result<Type, TypeError> {
-    let type_name = TypeName::source(name);
+    let type_name = QualifiedTypeName::source(name);
     let struct_ = self.struct_def(&type_name)?;
     let mut provided = HashSet::new();
     for (field, expr) in fields {
@@ -712,7 +678,7 @@ impl Checker {
     variant: &str,
     fields: &[(String, AST)],
   ) -> Result<Type, TypeError> {
-    let type_name = TypeName::source(name);
+    let type_name = QualifiedTypeName::source(name);
     let enum_ = self.enum_def(&type_name)?;
     let variant = enum_
       .variants
@@ -1452,7 +1418,7 @@ fn types_equivalent(left: &Type, right: &Type) -> bool {
 fn resolve_type(
   ast: &TypeAst,
   vars: &TypeVars,
-  types: &HashMap<TypeName, UserType>,
+  types: &HashMap<QualifiedTypeName, UserType>,
 ) -> Result<Type, TypeError> {
   match ast {
     TypeAst::Named(name) => {
@@ -1485,7 +1451,7 @@ fn resolve_type(
           .cloned()
           .map(Type::Var)
           .ok_or_else(|| TypeError::new(format!("unknown type `{name}`"))),
-        TypeNameAst::Qualified { .. } => Err(TypeError::new(format!("unknown type `{name}`"))),
+        TypeNameAst::Qualified(_) => Err(TypeError::new(format!("unknown type `{name}`"))),
       }
     }
     TypeAst::Apply(name, args) => match (name.as_str(), args.as_slice()) {
@@ -1514,7 +1480,7 @@ fn resolve_type(
 fn collect_type_vars(
   ast: &TypeAst,
   names: &mut HashSet<String>,
-  types: &HashMap<TypeName, UserType>,
+  types: &HashMap<QualifiedTypeName, UserType>,
 ) -> Result<(), TypeError> {
   match ast {
     TypeAst::Named(type_name) => match type_name {
@@ -1536,7 +1502,7 @@ fn collect_type_vars(
           return Err(TypeError::new(format!("unknown type `{name}`")));
         }
       },
-      TypeNameAst::Qualified { .. } => {
+      TypeNameAst::Qualified(_) => {
         if resolve_user_type(type_name, types)?.is_none() {
           return Err(TypeError::new(format!("unknown type `{type_name}`")));
         }
@@ -1569,11 +1535,11 @@ fn collect_type_vars(
 
 fn resolve_user_type<'a>(
   name: &TypeNameAst,
-  types: &'a HashMap<TypeName, UserType>,
-) -> Result<Option<(TypeName, &'a UserType)>, TypeError> {
+  types: &'a HashMap<QualifiedTypeName, UserType>,
+) -> Result<Option<(QualifiedTypeName, &'a UserType)>, TypeError> {
   match name {
-    TypeNameAst::Qualified { module, name } => {
-      let type_name = TypeName::new(module.clone(), name.clone());
+    TypeNameAst::Qualified(type_name) => {
+      let type_name = type_name.clone();
       Ok(
         types
           .get(&type_name)
@@ -1669,7 +1635,7 @@ fn type_ast_from_const(ty: &TypeConst) -> TypeAst {
 fn type_from_const(
   ty: &TypeConst,
   vars: &HashMap<String, TvRef>,
-  types: &HashMap<TypeName, UserType>,
+  types: &HashMap<QualifiedTypeName, UserType>,
 ) -> Result<Type, TypeError> {
   match ty {
     TypeConst::Int => Ok(Type::Int),
@@ -1687,7 +1653,7 @@ fn type_from_const(
       type_from_const(ret, vars, types)?,
     )),
     TypeConst::Named { module, name } => {
-      let type_name = TypeName::new(*module, *name);
+      let type_name = QualifiedTypeName::new(*module, *name);
       match types.get(&type_name) {
         Some(UserType::Struct(_)) => Ok(Type::Struct(type_name)),
         Some(UserType::Enum(_)) => Ok(Type::Enum(type_name)),

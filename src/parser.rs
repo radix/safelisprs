@@ -2,6 +2,8 @@ use std::fmt;
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::types::QualifiedTypeName;
+
 pub type Span = Range<usize>;
 
 /// Stable identity for one AST node across compiler passes.
@@ -411,7 +413,7 @@ impl Function {
     match &self.return_type {
       None => true,
       Some(TypeAst::Named(TypeNameAst::Bare(name))) => name == "Void",
-      Some(TypeAst::Named(TypeNameAst::Qualified { .. })) => false,
+      Some(TypeAst::Named(TypeNameAst::Qualified(_))) => false,
       Some(TypeAst::Apply(_, _) | TypeAst::Fn(_, _, _)) => false,
     }
   }
@@ -453,7 +455,7 @@ pub enum MatchPattern {
 #[derive(Debug, PartialEq, Clone)]
 pub enum TypeNameAst {
   Bare(String),
-  Qualified { module: String, name: String },
+  Qualified(QualifiedTypeName),
 }
 
 impl TypeNameAst {
@@ -462,10 +464,7 @@ impl TypeNameAst {
   }
 
   pub fn qualified(module: impl Into<String>, name: impl Into<String>) -> Self {
-    Self::Qualified {
-      module: module.into(),
-      name: name.into(),
-    }
+    Self::Qualified(QualifiedTypeName::new(module, name))
   }
 }
 
@@ -485,7 +484,7 @@ impl fmt::Display for TypeNameAst {
   fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
     match self {
       Self::Bare(name) => name.fmt(formatter),
-      Self::Qualified { module, name } => write!(formatter, "{module}::{name}"),
+      Self::Qualified(name) => name.fmt(formatter),
     }
   }
 }
