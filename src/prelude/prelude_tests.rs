@@ -30,7 +30,7 @@ fn rewrites_bare_fixed_call_to_qualified_call() {
     AST::DefineFn(Function {
       name: "main".into(),
       params: vec![],
-      return_type: Some(crate::parser::TypeAst::Named("Int".to_string())),
+      return_type: Some(crate::parser::TypeAst::Named("Int".into())),
       bounds: vec![],
       code: vec![AST::CallFixed(
         Identifier::Qualified("std".to_string(), "+".to_string()),
@@ -84,7 +84,7 @@ fn same_module_function_shadows_prelude() {
     AST::DefineFn(Function {
       name: "main".into(),
       params: vec![],
-      return_type: Some(crate::parser::TypeAst::Named("Int".to_string())),
+      return_type: Some(crate::parser::TypeAst::Named("Int".into())),
       bounds: vec![],
       code: vec![AST::CallFixed(
         Identifier::Qualified("main".to_string(), "+".to_string()),
@@ -101,7 +101,7 @@ fn binding_in_only_one_if_branch_does_not_shadow_after_if() {
     AST::DefineFn(Function {
       name: "main".into(),
       params: vec![],
-      return_type: Some(crate::parser::TypeAst::Named("Int".to_string())),
+      return_type: Some(crate::parser::TypeAst::Named("Int".into())),
       bounds: vec![],
       code: vec![
         AST::synthetic(ASTKind::If(

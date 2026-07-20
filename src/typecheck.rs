@@ -6,7 +6,7 @@ use std::rc::Rc;
 use crate::builtins::{BuiltinSignature, CustomTypeSpec, Library, Trait, TypeConst};
 use crate::parser::{
   source_position, ASTKind, AstId, BindingId, Enum as EnumAst, EnumVariant, Function, Identifier,
-  MatchArm, MatchPattern, ResolvedName, Span, Struct as StructAst, TypeAst, AST,
+  MatchArm, MatchPattern, ResolvedName, Span, Struct as StructAst, TypeAst, TypeNameAst, AST,
 };
 
 pub type TvRef = Rc<RefCell<TypeVar>>;
@@ -29,14 +29,6 @@ impl TypeName {
 
   fn source(name: impl Into<String>) -> Self {
     Self::new(SOURCE_MODULE, name)
-  }
-
-  fn parse_qualified(name: &str) -> Option<Self> {
-    let (module, name) = name.split_once("::")?;
-    if module.is_empty() || name.is_empty() || name.contains("::") {
-      return None;
-    }
-    Some(Self::new(module, name))
   }
 
   fn display(&self) -> String {
@@ -1463,29 +1455,39 @@ fn resolve_type(
   types: &HashMap<TypeName, UserType>,
 ) -> Result<Type, TypeError> {
   match ast {
-    TypeAst::Named(name) => match name.as_str() {
-      "Int" => Ok(Type::Int),
-      "Float" => Ok(Type::Float),
-      "String" => Ok(Type::String),
-      "Bool" => Ok(Type::Bool),
-      "Void" => Ok(Type::Void),
-      "List" | "Cell" | "Fn" => Err(TypeError::new(format!(
-        "type constructor `{name}` requires arguments"
-      ))),
-      _ => {
-        if let Some((type_name, user_type)) = resolve_user_type(name, types)? {
-          return match user_type {
-            UserType::Struct(_) => Ok(Type::Struct(type_name)),
-            UserType::Enum(_) => Ok(Type::Enum(type_name)),
-          };
+    TypeAst::Named(name) => {
+      if let TypeNameAst::Bare(name) = name {
+        match name.as_str() {
+          "Int" => return Ok(Type::Int),
+          "Float" => return Ok(Type::Float),
+          "String" => return Ok(Type::String),
+          "Bool" => return Ok(Type::Bool),
+          "Void" => return Ok(Type::Void),
+          "List" | "Cell" | "Fn" => {
+            return Err(TypeError::new(format!(
+              "type constructor `{name}` requires arguments"
+            )))
+          }
+          _ => {}
         }
-        vars
+      }
+
+      if let Some((type_name, user_type)) = resolve_user_type(name, types)? {
+        return match user_type {
+          UserType::Struct(_) => Ok(Type::Struct(type_name)),
+          UserType::Enum(_) => Ok(Type::Enum(type_name)),
+        };
+      }
+
+      match name {
+        TypeNameAst::Bare(name) => vars
           .get(name)
           .cloned()
           .map(Type::Var)
-          .ok_or_else(|| TypeError::new(format!("unknown type `{name}`")))
+          .ok_or_else(|| TypeError::new(format!("unknown type `{name}`"))),
+        TypeNameAst::Qualified { .. } => Err(TypeError::new(format!("unknown type `{name}`"))),
       }
-    },
+    }
     TypeAst::Apply(name, args) => match (name.as_str(), args.as_slice()) {
       ("List", [item]) => Ok(Type::List(Box::new(resolve_type(item, vars, types)?))),
       ("Cell", [item]) => Ok(Type::Cell(Box::new(resolve_type(item, vars, types)?))),
@@ -1515,18 +1517,30 @@ fn collect_type_vars(
   types: &HashMap<TypeName, UserType>,
 ) -> Result<(), TypeError> {
   match ast {
-    TypeAst::Named(name) => match name.as_str() {
-      "Int" | "Float" | "String" | "Bool" | "Void" => {}
-      "List" | "Cell" | "Fn" => {
-        return Err(TypeError::new(format!(
-          "type constructor `{name}` requires arguments"
-        )))
+    TypeAst::Named(type_name) => match type_name {
+      TypeNameAst::Bare(name) => match name.as_str() {
+        "Int" | "Float" | "String" | "Bool" | "Void" => {}
+        "List" | "Cell" | "Fn" => {
+          return Err(TypeError::new(format!(
+            "type constructor `{name}` requires arguments"
+          )))
+        }
+        _ => {
+          if resolve_user_type(type_name, types)?.is_some() {
+            return Ok(());
+          }
+          if name.chars().next().is_some_and(char::is_uppercase) {
+            names.insert(name.clone());
+            return Ok(());
+          }
+          return Err(TypeError::new(format!("unknown type `{name}`")));
+        }
+      },
+      TypeNameAst::Qualified { .. } => {
+        if resolve_user_type(type_name, types)?.is_none() {
+          return Err(TypeError::new(format!("unknown type `{type_name}`")));
+        }
       }
-      _ if resolve_user_type(name, types)?.is_some() => {}
-      _ if name.chars().next().is_some_and(char::is_uppercase) => {
-        names.insert(name.clone());
-      }
-      _ => return Err(TypeError::new(format!("unknown type `{name}`"))),
     },
     TypeAst::Apply(name, args) => {
       if !matches!(name.as_str(), "List" | "Cell") {
@@ -1554,38 +1568,39 @@ fn collect_type_vars(
 }
 
 fn resolve_user_type<'a>(
-  name: &str,
+  name: &TypeNameAst,
   types: &'a HashMap<TypeName, UserType>,
 ) -> Result<Option<(TypeName, &'a UserType)>, TypeError> {
-  if name.contains("::") {
-    let Some(type_name) = TypeName::parse_qualified(name) else {
-      return Err(TypeError::new(format!("unknown type `{name}`")));
-    };
-    return Ok(
-      types
-        .get(&type_name)
-        .map(|user_type| (type_name, user_type)),
-    );
-  }
-
-  let mut matches = types
-    .iter()
-    .filter(|(type_name, _)| type_name.name == name)
-    .map(|(type_name, user_type)| (type_name.clone(), user_type))
-    .collect::<Vec<_>>();
-  match matches.len() {
-    0 => Ok(None),
-    1 => Ok(matches.pop()),
-    _ => {
-      let mut labels = matches
+  match name {
+    TypeNameAst::Qualified { module, name } => {
+      let type_name = TypeName::new(module.clone(), name.clone());
+      Ok(
+        types
+          .get(&type_name)
+          .map(|user_type| (type_name, user_type)),
+      )
+    }
+    TypeNameAst::Bare(name) => {
+      let mut matches = types
         .iter()
-        .map(|(type_name, _)| type_name.display())
+        .filter(|(type_name, _)| type_name.name == *name)
+        .map(|(type_name, user_type)| (type_name.clone(), user_type))
         .collect::<Vec<_>>();
-      labels.sort();
-      Err(TypeError::new(format!(
-        "ambiguous type `{name}`: {}",
-        labels.join(", ")
-      )))
+      match matches.len() {
+        0 => Ok(None),
+        1 => Ok(matches.pop()),
+        _ => {
+          let mut labels = matches
+            .iter()
+            .map(|(type_name, _)| type_name.display())
+            .collect::<Vec<_>>();
+          labels.sort();
+          Err(TypeError::new(format!(
+            "ambiguous type `{name}`: {}",
+            labels.join(", ")
+          )))
+        }
+      }
     }
   }
 }
@@ -1634,11 +1649,11 @@ fn ensure_bounds_available(
 
 fn type_ast_from_const(ty: &TypeConst) -> TypeAst {
   match ty {
-    TypeConst::Int => TypeAst::Named("Int".to_string()),
-    TypeConst::Float => TypeAst::Named("Float".to_string()),
-    TypeConst::String => TypeAst::Named("String".to_string()),
-    TypeConst::Bool => TypeAst::Named("Bool".to_string()),
-    TypeConst::Void => TypeAst::Named("Void".to_string()),
+    TypeConst::Int => TypeAst::Named(TypeNameAst::bare("Int")),
+    TypeConst::Float => TypeAst::Named(TypeNameAst::bare("Float")),
+    TypeConst::String => TypeAst::Named(TypeNameAst::bare("String")),
+    TypeConst::Bool => TypeAst::Named(TypeNameAst::bare("Bool")),
+    TypeConst::Void => TypeAst::Named(TypeNameAst::bare("Void")),
     TypeConst::Cell(item) => TypeAst::Apply("Cell".to_string(), vec![type_ast_from_const(item)]),
     TypeConst::List(item) => TypeAst::Apply("List".to_string(), vec![type_ast_from_const(item)]),
     TypeConst::Fn { params, ret } => TypeAst::Fn(
@@ -1646,8 +1661,8 @@ fn type_ast_from_const(ty: &TypeConst) -> TypeAst {
       None,
       Box::new(type_ast_from_const(ret)),
     ),
-    TypeConst::Named { module, name } => TypeAst::Named(format!("{module}::{name}")),
-    TypeConst::Var(name) => TypeAst::Named(name.clone()),
+    TypeConst::Named { module, name } => TypeAst::Named(TypeNameAst::qualified(*module, *name)),
+    TypeConst::Var(name) => TypeAst::Named(TypeNameAst::bare(name.clone())),
   }
 }
 

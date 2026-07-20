@@ -98,7 +98,7 @@ fn captured_outer_parameters_are_plain_values() -> Result<(), String> {
     }),
     AST::DefineFn(Function {
       name: "outer".into(),
-      params: vec![("par".into(), Some(TypeAst::Named("Int".to_string())))],
+      params: vec![("par".into(), Some(TypeAst::Named("Int".into())))],
       return_type: None,
       bounds: vec![],
       code: vec![

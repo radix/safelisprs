@@ -410,7 +410,8 @@ impl Function {
   pub fn returns_void(&self) -> bool {
     match &self.return_type {
       None => true,
-      Some(TypeAst::Named(name)) => name == "Void",
+      Some(TypeAst::Named(TypeNameAst::Bare(name))) => name == "Void",
+      Some(TypeAst::Named(TypeNameAst::Qualified { .. })) => false,
       Some(TypeAst::Apply(_, _) | TypeAst::Fn(_, _, _)) => false,
     }
   }
@@ -450,8 +451,48 @@ pub enum MatchPattern {
 }
 
 #[derive(Debug, PartialEq, Clone)]
+pub enum TypeNameAst {
+  Bare(String),
+  Qualified { module: String, name: String },
+}
+
+impl TypeNameAst {
+  pub fn bare(name: impl Into<String>) -> Self {
+    Self::Bare(name.into())
+  }
+
+  pub fn qualified(module: impl Into<String>, name: impl Into<String>) -> Self {
+    Self::Qualified {
+      module: module.into(),
+      name: name.into(),
+    }
+  }
+}
+
+impl From<&str> for TypeNameAst {
+  fn from(name: &str) -> Self {
+    Self::bare(name)
+  }
+}
+
+impl From<String> for TypeNameAst {
+  fn from(name: String) -> Self {
+    Self::bare(name)
+  }
+}
+
+impl fmt::Display for TypeNameAst {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    match self {
+      Self::Bare(name) => name.fmt(formatter),
+      Self::Qualified { module, name } => write!(formatter, "{module}::{name}"),
+    }
+  }
+}
+
+#[derive(Debug, PartialEq, Clone)]
 pub enum TypeAst {
-  Named(String),
+  Named(TypeNameAst),
   Apply(String, Vec<TypeAst>),
   Fn(Vec<TypeAst>, Option<Box<TypeAst>>, Box<TypeAst>),
 }
@@ -1221,9 +1262,9 @@ impl Parser {
         if let Some(((module, name), _)) =
           self.parse_qualified_identifier(name.clone(), token.span)?
         {
-          Ok(TypeAst::Named(format!("{module}::{name}")))
+          Ok(TypeAst::Named(TypeNameAst::qualified(module, name)))
         } else {
-          Ok(TypeAst::Named(name))
+          Ok(TypeAst::Named(TypeNameAst::bare(name)))
         }
       }
       TokenKind::LParen => {

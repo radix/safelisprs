@@ -96,17 +96,17 @@ fn parses_mandatory_parameter_and_return_types_without_whitespace() {
   assert_eq!(
     function.params,
     vec![
-      ("a".into(), Some(TypeAst::Named("A".to_string()))),
+      ("a".into(), Some(TypeAst::Named("A".into()))),
       (
         "xs".into(),
         Some(TypeAst::Apply(
           "List".to_string(),
-          vec![TypeAst::Named("Int".to_string())]
+          vec![TypeAst::Named("Int".into())]
         ))
       )
     ]
   );
-  assert_eq!(function.return_type, Some(TypeAst::Named("A".to_string())));
+  assert_eq!(function.return_type, Some(TypeAst::Named("A".into())));
   assert_eq!(
     function.bounds,
     vec![Bound {
@@ -124,11 +124,11 @@ fn parses_qualified_type_names() {
   };
   assert_eq!(
     function.params[0].1,
-    Some(TypeAst::Named("left::Box".to_string()))
+    Some(TypeAst::Named(TypeNameAst::qualified("left", "Box")))
   );
   assert_eq!(
     function.return_type,
-    Some(TypeAst::Named("right::Box".to_string()))
+    Some(TypeAst::Named(TypeNameAst::qualified("right", "Box")))
   );
 }
 
@@ -145,9 +145,9 @@ fn parses_function_types_and_annotated_lets() {
   assert_eq!(
     function.params[0].1,
     Some(TypeAst::Fn(
-      vec![TypeAst::Named("Int".to_string())],
+      vec![TypeAst::Named("Int".into())],
       None,
-      Box::new(TypeAst::Named("Int".to_string()))
+      Box::new(TypeAst::Named("Int".into()))
     ))
   );
   assert!(matches!(function.code[0].kind, ASTKind::Let(_, Some(_), _)));
@@ -163,10 +163,10 @@ fn parses_variadic_function_type() {
     function.params[0].1,
     Some(TypeAst::Fn(
       vec![],
-      Some(Box::new(TypeAst::Named("Int".to_string()))),
+      Some(Box::new(TypeAst::Named("Int".into()))),
       Box::new(TypeAst::Apply(
         "List".to_string(),
-        vec![TypeAst::Named("Int".to_string())]
+        vec![TypeAst::Named("Int".into())]
       ))
     ))
   );
@@ -193,10 +193,10 @@ fn parses_enum_definitions_and_construction() {
   assert_eq!(
     enum_.variants[2].fields,
     vec![
-      ("y".to_string(), TypeAst::Named("String".to_string())),
+      ("y".to_string(), TypeAst::Named("String".into())),
       (
         "z".to_string(),
-        TypeAst::Apply("Cell".to_string(), vec![TypeAst::Named("Int".to_string())])
+        TypeAst::Apply("Cell".to_string(), vec![TypeAst::Named("Int".into())])
       )
     ]
   );

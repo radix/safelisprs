@@ -1,7 +1,7 @@
 use super::*;
 
 fn returns(name: &str) -> Option<parser::TypeAst> {
-  Some(parser::TypeAst::Named(name.to_string()))
+  Some(parser::TypeAst::Named(name.into()))
 }
 
 fn compile_test_function(f: &parser::Function) -> Result<(String, CompiledCallable), String> {
