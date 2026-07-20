@@ -124,6 +124,103 @@ fn libraries_can_be_composed_with_custom_types() {
 }
 
 #[test]
+fn custom_types_are_distinct_across_modules() {
+  let library = Library::new()
+    .with_type(CustomTypeSpec::struct_(
+      "left",
+      "Box",
+      vec![("value", TypeConst::Int)],
+    ))
+    .with_type(CustomTypeSpec::struct_(
+      "right",
+      "Box",
+      vec![("value", TypeConst::String)],
+    ))
+    .with_builtin(Builtin::contextual_value(
+      "right",
+      "box",
+      Some(1),
+      sig(
+        &[],
+        vec![TypeConst::String],
+        None,
+        TypeConst::named("right", "Box"),
+      ),
+      |ctx, args| ctx.alloc_struct("right", "Box", vec![args[0]]),
+    ))
+    .with_builtin(Builtin::unary(
+      "left",
+      "unbox",
+      sig(
+        &[],
+        vec![TypeConst::named("left", "Box")],
+        None,
+        TypeConst::Int,
+      ),
+      |value| match value {
+        Value::Heap(heap) => match &heap.value {
+          SLVal::Struct(instance) => Ok(instance.fields[0]),
+          other => Err(format!("expected Box, got {}", other.type_name())),
+        },
+        other => Err(format!("expected Box, got {}", other.type_name())),
+      },
+    ));
+
+  let err = compile_executable_from_source(
+    "(fn main () ->Int (left::unbox (right::box \"nope\")))",
+    ("main", "main"),
+    &library,
+  )
+  .unwrap_err();
+
+  assert!(
+    err.contains("expected `left::Box`, got `right::Box`"),
+    "{err}"
+  );
+}
+
+#[test]
+fn bare_custom_type_annotations_must_be_unambiguous() {
+  let types = Library::new()
+    .with_type(CustomTypeSpec::struct_(
+      "left",
+      "Box",
+      vec![("value", TypeConst::Int)],
+    ))
+    .with_type(CustomTypeSpec::struct_(
+      "right",
+      "Box",
+      vec![("value", TypeConst::Int)],
+    ));
+
+  let err =
+    compile_executable_from_source("(fn main () ->Box 1)", ("main", "main"), &types).unwrap_err();
+
+  assert!(err.contains("ambiguous type `Box`"), "{err}");
+  assert!(err.contains("left::Box"), "{err}");
+  assert!(err.contains("right::Box"), "{err}");
+
+  let library = types.with_builtin(Builtin::contextual_value(
+    "left",
+    "box",
+    Some(1),
+    sig(
+      &[],
+      vec![TypeConst::Int],
+      None,
+      TypeConst::named("left", "Box"),
+    ),
+    |ctx, args| ctx.alloc_struct("left", "Box", vec![args[0]]),
+  ));
+  compile_executable_from_source(
+    "(fn main () -> left::Box (left::box 1))",
+    ("main", "main"),
+    &library,
+  )
+  .unwrap();
+}
+
+#[test]
 fn call_main_with_args_is_public_api() {
   let package = compile_executable_from_source(
     "(fn main (a:Int b:Int) ->Int (+ a b))",

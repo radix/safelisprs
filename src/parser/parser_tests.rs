@@ -117,6 +117,22 @@ fn parses_mandatory_parameter_and_return_types_without_whitespace() {
 }
 
 #[test]
+fn parses_qualified_type_names() {
+  let asts = read_multiple("(fn use-box (box:left::Box) -> right::Box box)").unwrap();
+  let ASTKind::DefineFn(function) = &asts[0].kind else {
+    panic!("expected function")
+  };
+  assert_eq!(
+    function.params[0].1,
+    Some(TypeAst::Named("left::Box".to_string()))
+  );
+  assert_eq!(
+    function.return_type,
+    Some(TypeAst::Named("right::Box".to_string()))
+  );
+}
+
+#[test]
 fn parses_function_types_and_annotated_lets() {
   let asts = read_multiple(
     "(fn apply (f:(Fn (Int) -> Int) x:Int) ->Int

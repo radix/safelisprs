@@ -372,7 +372,7 @@ fn rand_roll_rejects_non_positive_sides() {
 #[test]
 fn rand_roll_rejects_non_rng() {
   let err = eval_builtin_main("(fn main () ->Int (rand::roll! \"not-a-cell\" 6))").unwrap_err();
-  assert!(err.contains("expected `Rng`"), "got: {}", err);
+  assert!(err.contains("expected `rand::Rng`"), "got: {}", err);
 }
 
 /// `rand::rng` rejects non-Int seeds.

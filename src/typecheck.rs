@@ -11,6 +11,49 @@ use crate::parser::{
 
 pub type TvRef = Rc<RefCell<TypeVar>>;
 
+const SOURCE_MODULE: &str = "main";
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TypeName {
+  module: String,
+  name: String,
+}
+
+impl TypeName {
+  fn new(module: impl Into<String>, name: impl Into<String>) -> Self {
+    Self {
+      module: module.into(),
+      name: name.into(),
+    }
+  }
+
+  fn source(name: impl Into<String>) -> Self {
+    Self::new(SOURCE_MODULE, name)
+  }
+
+  fn parse_qualified(name: &str) -> Option<Self> {
+    let (module, name) = name.split_once("::")?;
+    if module.is_empty() || name.is_empty() || name.contains("::") {
+      return None;
+    }
+    Some(Self::new(module, name))
+  }
+
+  fn display(&self) -> String {
+    if self.module == SOURCE_MODULE {
+      self.name.clone()
+    } else {
+      format!("{}::{}", self.module, self.name)
+    }
+  }
+}
+
+impl fmt::Display for TypeName {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    write!(f, "{}", self.display())
+  }
+}
+
 #[derive(Clone)]
 pub enum Type {
   Int,
@@ -18,8 +61,8 @@ pub enum Type {
   String,
   Bool,
   Void,
-  Struct(String),
-  Enum(String),
+  Struct(TypeName),
+  Enum(TypeName),
   Cell(Box<Type>),
   List(Box<Type>),
   Fn {
@@ -161,7 +204,7 @@ pub struct TypecheckInfo {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FieldAccessInfo {
-  receiver_type: String,
+  receiver_type: TypeName,
   field_index: u16,
 }
 
@@ -202,7 +245,7 @@ impl TypecheckInfo {
 impl FieldAccessInfo {
   #[cfg(test)]
   fn receiver_type(&self) -> &str {
-    &self.receiver_type
+    &self.receiver_type.name
   }
 
   pub fn field_index(&self) -> u16 {
@@ -232,7 +275,7 @@ pub fn typecheck_named<'a>(
 
 struct Checker {
   schemes: HashMap<(String, String), FnScheme>,
-  types: HashMap<String, UserType>,
+  types: HashMap<TypeName, UserType>,
   field_accesses: HashMap<AstId, FieldAccessInfo>,
   matches: HashMap<AstId, MatchInfo>,
   next_var: usize,
@@ -284,11 +327,12 @@ impl Checker {
   }
 
   fn insert_custom_type(&mut self, type_: &CustomTypeSpec) -> Result<(), TypeError> {
-    if self.types.contains_key(type_.name) {
-      return Err(TypeError::new(format!("duplicate type `{}`", type_.name)));
+    let name = TypeName::new(type_.module, type_.name);
+    if self.types.contains_key(&name) {
+      return Err(TypeError::new(format!("duplicate type `{name}`")));
     }
     self.types.insert(
-      type_.name.to_string(),
+      name,
       UserType::Struct(StructAst {
         name: type_.name.to_string(),
         fields: type_
@@ -308,10 +352,11 @@ impl Checker {
         ASTKind::DefineEnum(enum_) => (&enum_.name, UserType::Enum(enum_.clone())),
         _ => continue,
       };
-      if self.types.contains_key(name) {
-        return Err(TypeError::new(format!("duplicate type `{name}`")).at(ast.span.clone()));
+      let type_name = TypeName::source(name.clone());
+      if self.types.contains_key(&type_name) {
+        return Err(TypeError::new(format!("duplicate type `{type_name}`")).at(ast.span.clone()));
       }
-      self.types.insert(name.clone(), user_type);
+      self.types.insert(type_name, user_type);
     }
 
     for ast in asts {
@@ -415,14 +460,14 @@ impl Checker {
     Ok(())
   }
 
-  fn struct_def(&self, name: &str) -> Result<StructAst, TypeError> {
+  fn struct_def(&self, name: &TypeName) -> Result<StructAst, TypeError> {
     match self.types.get(name) {
       Some(UserType::Struct(struct_)) => Ok(struct_.clone()),
       _ => Err(TypeError::new(format!("unknown struct `{name}`"))),
     }
   }
 
-  fn enum_def(&self, name: &str) -> Result<EnumAst, TypeError> {
+  fn enum_def(&self, name: &TypeName) -> Result<EnumAst, TypeError> {
     match self.types.get(name) {
       Some(UserType::Enum(enum_)) => Ok(enum_.clone()),
       _ => Err(TypeError::new(format!("unknown enum `{name}`"))),
@@ -635,7 +680,8 @@ impl Checker {
     name: &str,
     fields: &[(String, AST)],
   ) -> Result<Type, TypeError> {
-    let struct_ = self.struct_def(name)?;
+    let type_name = TypeName::source(name);
+    let struct_ = self.struct_def(&type_name)?;
     let mut provided = HashSet::new();
     for (field, expr) in fields {
       if !provided.insert(field.as_str()) {
@@ -663,7 +709,7 @@ impl Checker {
         )));
       }
     }
-    Ok(Type::Struct(name.to_string()))
+    Ok(Type::Struct(type_name))
   }
 
   fn infer_new_enum(
@@ -674,7 +720,8 @@ impl Checker {
     variant: &str,
     fields: &[(String, AST)],
   ) -> Result<Type, TypeError> {
-    let enum_ = self.enum_def(name)?;
+    let type_name = TypeName::source(name);
+    let enum_ = self.enum_def(&type_name)?;
     let variant = enum_
       .variants
       .iter()
@@ -714,7 +761,7 @@ impl Checker {
         )));
       }
     }
-    Ok(Type::Enum(name.to_string()))
+    Ok(Type::Enum(type_name))
   }
 
   fn infer_match(
@@ -1413,7 +1460,7 @@ fn types_equivalent(left: &Type, right: &Type) -> bool {
 fn resolve_type(
   ast: &TypeAst,
   vars: &TypeVars,
-  types: &HashMap<String, UserType>,
+  types: &HashMap<TypeName, UserType>,
 ) -> Result<Type, TypeError> {
   match ast {
     TypeAst::Named(name) => match name.as_str() {
@@ -1425,15 +1472,19 @@ fn resolve_type(
       "List" | "Cell" | "Fn" => Err(TypeError::new(format!(
         "type constructor `{name}` requires arguments"
       ))),
-      _ => match types.get(name) {
-        Some(UserType::Struct(_)) => Ok(Type::Struct(name.clone())),
-        Some(UserType::Enum(_)) => Ok(Type::Enum(name.clone())),
-        None => vars
+      _ => {
+        if let Some((type_name, user_type)) = resolve_user_type(name, types)? {
+          return match user_type {
+            UserType::Struct(_) => Ok(Type::Struct(type_name)),
+            UserType::Enum(_) => Ok(Type::Enum(type_name)),
+          };
+        }
+        vars
           .get(name)
           .cloned()
           .map(Type::Var)
-          .ok_or_else(|| TypeError::new(format!("unknown type `{name}`"))),
-      },
+          .ok_or_else(|| TypeError::new(format!("unknown type `{name}`")))
+      }
     },
     TypeAst::Apply(name, args) => match (name.as_str(), args.as_slice()) {
       ("List", [item]) => Ok(Type::List(Box::new(resolve_type(item, vars, types)?))),
@@ -1461,7 +1512,7 @@ fn resolve_type(
 fn collect_type_vars(
   ast: &TypeAst,
   names: &mut HashSet<String>,
-  types: &HashMap<String, UserType>,
+  types: &HashMap<TypeName, UserType>,
 ) -> Result<(), TypeError> {
   match ast {
     TypeAst::Named(name) => match name.as_str() {
@@ -1471,7 +1522,7 @@ fn collect_type_vars(
           "type constructor `{name}` requires arguments"
         )))
       }
-      _ if types.contains_key(name) => {}
+      _ if resolve_user_type(name, types)?.is_some() => {}
       _ if name.chars().next().is_some_and(char::is_uppercase) => {
         names.insert(name.clone());
       }
@@ -1500,6 +1551,43 @@ fn collect_type_vars(
     }
   }
   Ok(())
+}
+
+fn resolve_user_type<'a>(
+  name: &str,
+  types: &'a HashMap<TypeName, UserType>,
+) -> Result<Option<(TypeName, &'a UserType)>, TypeError> {
+  if name.contains("::") {
+    let Some(type_name) = TypeName::parse_qualified(name) else {
+      return Err(TypeError::new(format!("unknown type `{name}`")));
+    };
+    return Ok(
+      types
+        .get(&type_name)
+        .map(|user_type| (type_name, user_type)),
+    );
+  }
+
+  let mut matches = types
+    .iter()
+    .filter(|(type_name, _)| type_name.name == name)
+    .map(|(type_name, user_type)| (type_name.clone(), user_type))
+    .collect::<Vec<_>>();
+  match matches.len() {
+    0 => Ok(None),
+    1 => Ok(matches.pop()),
+    _ => {
+      let mut labels = matches
+        .iter()
+        .map(|(type_name, _)| type_name.display())
+        .collect::<Vec<_>>();
+      labels.sort();
+      Err(TypeError::new(format!(
+        "ambiguous type `{name}`: {}",
+        labels.join(", ")
+      )))
+    }
+  }
 }
 
 fn parse_trait(name: &str) -> Result<Trait, TypeError> {
@@ -1558,7 +1646,7 @@ fn type_ast_from_const(ty: &TypeConst) -> TypeAst {
       None,
       Box::new(type_ast_from_const(ret)),
     ),
-    TypeConst::Named { name, .. } => TypeAst::Named((*name).to_string()),
+    TypeConst::Named { module, name } => TypeAst::Named(format!("{module}::{name}")),
     TypeConst::Var(name) => TypeAst::Named(name.clone()),
   }
 }
@@ -1566,7 +1654,7 @@ fn type_ast_from_const(ty: &TypeConst) -> TypeAst {
 fn type_from_const(
   ty: &TypeConst,
   vars: &HashMap<String, TvRef>,
-  types: &HashMap<String, UserType>,
+  types: &HashMap<TypeName, UserType>,
 ) -> Result<Type, TypeError> {
   match ty {
     TypeConst::Int => Ok(Type::Int),
@@ -1583,11 +1671,14 @@ fn type_from_const(
         .collect::<Result<Vec<_>, _>>()?,
       type_from_const(ret, vars, types)?,
     )),
-    TypeConst::Named { name, .. } => match types.get(*name) {
-      Some(UserType::Struct(_)) => Ok(Type::Struct((*name).to_string())),
-      Some(UserType::Enum(_)) => Ok(Type::Enum((*name).to_string())),
-      None => Err(TypeError::new(format!("unknown type `{name}`"))),
-    },
+    TypeConst::Named { module, name } => {
+      let type_name = TypeName::new(*module, *name);
+      match types.get(&type_name) {
+        Some(UserType::Struct(_)) => Ok(Type::Struct(type_name)),
+        Some(UserType::Enum(_)) => Ok(Type::Enum(type_name)),
+        None => Err(TypeError::new(format!("unknown type `{type_name}`"))),
+      }
+    }
     TypeConst::Var(name) => vars
       .get(name)
       .cloned()
@@ -1665,8 +1756,8 @@ fn display_type(ty: &Type) -> String {
     Type::String => "String".to_string(),
     Type::Bool => "Bool".to_string(),
     Type::Void => "Void".to_string(),
-    Type::Struct(name) => name,
-    Type::Enum(name) => name,
+    Type::Struct(name) => name.display(),
+    Type::Enum(name) => name.display(),
     Type::Cell(item) => format!("(Cell {})", display_type(&item)),
     Type::List(item) => format!("(List {})", display_type(&item)),
     Type::Fn { params, rest, ret } => {

@@ -1224,7 +1224,17 @@ impl Parser {
   fn parse_type(&mut self) -> Result<TypeAst, ParseError> {
     let token = self.advance();
     match token.kind {
-      TokenKind::Sym(name) => Ok(TypeAst::Named(name)),
+      TokenKind::Sym(name) => {
+        if matches!(self.peek().kind, TokenKind::DoubleColon) {
+          let (identifier, _) = self.parse_qualified_identifier(name, token.span)?;
+          let Identifier::Qualified(module, name) = identifier else {
+            unreachable!("qualified parser always returns a qualified identifier")
+          };
+          Ok(TypeAst::Named(format!("{module}::{name}")))
+        } else {
+          Ok(TypeAst::Named(name))
+        }
+      }
       TokenKind::LParen => {
         let constructor = self.expect_symbol("type application requires a constructor name")?;
         if constructor == "Fn" {
