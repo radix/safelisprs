@@ -777,11 +777,9 @@ impl Parser {
         Err(ParseError::new(token.span, "unexpected type-syntax token").expected("an expression"))
       }
       TokenKind::Sym(name) => {
-        if matches!(self.peek().kind, TokenKind::DoubleColon) {
-          let (identifier, span) = self.parse_qualified_identifier(name, token.span)?;
-          let Identifier::Qualified(module, name) = identifier else {
-            unreachable!("qualified parser always returns a qualified identifier")
-          };
+        if let Some(((module, name), span)) =
+          self.parse_qualified_identifier(name.clone(), token.span.clone())?
+        {
           Ok(AST::new(ASTKind::FunctionRef(module, name), span))
         } else {
           Ok(ast_from_symbol(name, token.span))
@@ -1148,28 +1146,23 @@ impl Parser {
     let TokenKind::Sym(name) = head.kind else {
       unreachable!("fixed calls have symbol heads")
     };
-    let (identifier, head_span) = if matches!(self.peek().kind, TokenKind::DoubleColon) {
-      self.parse_qualified_identifier(name, head.span)?
-    } else {
-      (Identifier::Bare(name.into()), head.span)
-    };
+    let qualified = self.parse_qualified_identifier(name.clone(), head.span.clone())?;
     let (args, close) = self.parse_call_args()?;
     let span = start..close.span.end;
-    match identifier {
-      Identifier::Bare(name) => {
-        let callee = ast_from_symbol(name.name, head_span);
-        match callee.kind {
-          ASTKind::Variable(name) => Ok(AST::new(
-            ASTKind::CallFixed(Identifier::Bare(name), args),
-            span,
-          )),
-          _ => Ok(AST::new(ASTKind::Call(Box::new(callee), args), span)),
-        }
-      }
-      Identifier::Qualified(module, name) => Ok(AST::new(
+    if let Some(((module, name), _)) = qualified {
+      Ok(AST::new(
         ASTKind::CallFixed(Identifier::Qualified(module, name), args),
         span,
-      )),
+      ))
+    } else {
+      let callee = ast_from_symbol(name, head.span);
+      match callee.kind {
+        ASTKind::Variable(name) => Ok(AST::new(
+          ASTKind::CallFixed(Identifier::Bare(name), args),
+          span,
+        )),
+        _ => Ok(AST::new(ASTKind::Call(Box::new(callee), args), span)),
+      }
     }
   }
 
@@ -1199,13 +1192,16 @@ impl Parser {
     &mut self,
     module: String,
     start_span: Span,
-  ) -> Result<(Identifier, Span), ParseError> {
+  ) -> Result<Option<((String, String), Span)>, ParseError> {
+    if !matches!(self.peek().kind, TokenKind::DoubleColon) {
+      return Ok(None);
+    }
     self.advance();
     let token = self.advance();
     match token.kind {
       TokenKind::Sym(name) => {
         let span = start_span.start..token.span.end;
-        Ok((Identifier::Qualified(module, name), span))
+        Ok(Some(((module, name), span)))
       }
       _ => {
         Err(ParseError::new(token.span, "`::` must be followed by a symbol").expected("a symbol"))
@@ -1225,11 +1221,9 @@ impl Parser {
     let token = self.advance();
     match token.kind {
       TokenKind::Sym(name) => {
-        if matches!(self.peek().kind, TokenKind::DoubleColon) {
-          let (identifier, _) = self.parse_qualified_identifier(name, token.span)?;
-          let Identifier::Qualified(module, name) = identifier else {
-            unreachable!("qualified parser always returns a qualified identifier")
-          };
+        if let Some(((module, name), _)) =
+          self.parse_qualified_identifier(name.clone(), token.span)?
+        {
           Ok(TypeAst::Named(format!("{module}::{name}")))
         } else {
           Ok(TypeAst::Named(name))
