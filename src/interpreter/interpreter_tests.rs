@@ -1,6 +1,7 @@
 use super::*;
-use crate::builtins::{sig, Builtin, Library, TypeConst};
+use crate::builtins::{sig, Builtin, Library};
 use crate::compiler::{self, *};
+use crate::types::Signature;
 use std::time::Duration;
 
 fn eval_main(source: &str) -> SLValue {
@@ -221,7 +222,7 @@ fn extending_builtins() {
   let builtins = Library::new().with_builtin(Builtin::unary(
     "main",
     "add2",
-    sig(&[], vec![TypeConst::Int], None, TypeConst::Int),
+    sig(&[], vec![Signature::Int], None, Signature::Int),
     |a| match a {
       Value::Int(n) => Ok(Value::Int(n + 2)),
       other => Err(format!("nope: {:?}", other)),
@@ -609,7 +610,7 @@ fn varargs_builtins() -> Library {
   Library::default().with_builtin(Builtin::variadic(
     "std",
     "varargs",
-    sig(&[], vec![], Some(TypeConst::Int), TypeConst::Int),
+    sig(&[], vec![], Some(Signature::Int), Signature::Int),
     |args| Ok(Value::Int(args.len() as i64)),
   ))
 }
@@ -725,7 +726,7 @@ fn if_does_not_evaluate_unselected_branch() {
   let builtins = Library::default().with_builtin(Builtin::unary(
     "main",
     "boom",
-    sig(&[], vec![TypeConst::Int], None, TypeConst::Int),
+    sig(&[], vec![Signature::Int], None, Signature::Int),
     |_| Err("boom".into()),
   ));
   let pkg = compile_executable_from_source(source, ("main", "main"), &builtins).unwrap();
@@ -2062,9 +2063,9 @@ fn resumable_host_call_with_value_returning_callback() {
     Some(1),
     sig(
       &[],
-      vec![TypeConst::function(vec![TypeConst::Int], TypeConst::Int)],
+      vec![Signature::function(vec![Signature::Int], Signature::Int)],
       None,
-      TypeConst::Int,
+      Signature::Int,
     ),
     |ctx, args| {
       ctx.push(args[0]);
@@ -2105,9 +2106,9 @@ fn resumable_host_call_with_void_returning_callback() {
     Some(1),
     sig(
       &[],
-      vec![TypeConst::function(vec![TypeConst::Int], TypeConst::Void)],
+      vec![Signature::function(vec![Signature::Int], Signature::Void)],
       None,
-      TypeConst::Bool,
+      Signature::Bool,
     ),
     |ctx, args| {
       ctx.push(args[0]);

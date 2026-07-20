@@ -11,7 +11,7 @@ use rstest::rstest;
 use safelisp::wasm::{self, SLValue as WasmVal};
 use safelisp::{
   compile_executable_from_source, sig, Builtin, CustomTypeSpec, Interpreter, Library, SLVal,
-  SLValue, TypeConst, Value,
+  SLValue, Signature, Value,
 };
 #[cfg(feature = "wasm-tests")]
 use wasmtime::{Engine, Linker, Module, Store};
@@ -54,7 +54,7 @@ fn custom_interpreter_builtins_are_public_api() {
   let builtins = Library::new().with_builtin(Builtin::unary(
     "main",
     "add2",
-    sig(&[], vec![TypeConst::Int], None, TypeConst::Int),
+    sig(&[], vec![Signature::Int], None, Signature::Int),
     |value| match value {
       Value::Int(n) => Ok(Value::Int(n + 2)),
       other => Err(format!("expected Int, got {}", other.type_name())),
@@ -75,7 +75,7 @@ fn libraries_can_be_composed_with_custom_types() {
   let types = Library::new().with_type(CustomTypeSpec::struct_(
     "box",
     "Box",
-    vec![("value", TypeConst::Int)],
+    vec![("value", Signature::Int)],
   ));
   let funcs = Library::new()
     .with_builtin(Builtin::contextual_value(
@@ -84,9 +84,9 @@ fn libraries_can_be_composed_with_custom_types() {
       Some(1),
       sig(
         &[],
-        vec![TypeConst::Int],
+        vec![Signature::Int],
         None,
-        TypeConst::named("box", "Box"),
+        Signature::named("box", "Box"),
       ),
       |ctx, args| ctx.alloc_struct("box", "Box", vec![args[0]]),
     ))
@@ -95,9 +95,9 @@ fn libraries_can_be_composed_with_custom_types() {
       "unbox",
       sig(
         &[],
-        vec![TypeConst::named("box", "Box")],
+        vec![Signature::named("box", "Box")],
         None,
-        TypeConst::Int,
+        Signature::Int,
       ),
       |value| match value {
         Value::Heap(heap) => match &heap.value {
@@ -129,12 +129,12 @@ fn custom_types_are_distinct_across_modules() {
     .with_type(CustomTypeSpec::struct_(
       "left",
       "Box",
-      vec![("value", TypeConst::Int)],
+      vec![("value", Signature::Int)],
     ))
     .with_type(CustomTypeSpec::struct_(
       "right",
       "Box",
-      vec![("value", TypeConst::String)],
+      vec![("value", Signature::String)],
     ))
     .with_builtin(Builtin::contextual_value(
       "right",
@@ -142,9 +142,9 @@ fn custom_types_are_distinct_across_modules() {
       Some(1),
       sig(
         &[],
-        vec![TypeConst::String],
+        vec![Signature::String],
         None,
-        TypeConst::named("right", "Box"),
+        Signature::named("right", "Box"),
       ),
       |ctx, args| ctx.alloc_struct("right", "Box", vec![args[0]]),
     ))
@@ -153,9 +153,9 @@ fn custom_types_are_distinct_across_modules() {
       "unbox",
       sig(
         &[],
-        vec![TypeConst::named("left", "Box")],
+        vec![Signature::named("left", "Box")],
         None,
-        TypeConst::Int,
+        Signature::Int,
       ),
       |value| match value {
         Value::Heap(heap) => match &heap.value {
@@ -185,12 +185,12 @@ fn bare_custom_type_annotations_must_be_unambiguous() {
     .with_type(CustomTypeSpec::struct_(
       "left",
       "Box",
-      vec![("value", TypeConst::Int)],
+      vec![("value", Signature::Int)],
     ))
     .with_type(CustomTypeSpec::struct_(
       "right",
       "Box",
-      vec![("value", TypeConst::Int)],
+      vec![("value", Signature::Int)],
     ));
 
   let err =
@@ -206,9 +206,9 @@ fn bare_custom_type_annotations_must_be_unambiguous() {
     Some(1),
     sig(
       &[],
-      vec![TypeConst::Int],
+      vec![Signature::Int],
       None,
-      TypeConst::named("left", "Box"),
+      Signature::named("left", "Box"),
     ),
     |ctx, args| ctx.alloc_struct("left", "Box", vec![args[0]]),
   ));

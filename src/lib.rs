@@ -26,10 +26,10 @@ pub mod wasm;
 
 pub use builtins::{
   sig, Builtin, BuiltinSignature, BuiltinSpec, CustomFieldSpec, CustomTypeSpec, Library, Trait,
-  TypeConst,
 };
 pub use compiler::{compile_executable_from_source, Package};
 pub use interpreter::{
   Accounted, CellContents, EnumInstance, Execution, HostCtx, HostPoll, Interpreter,
   MemoryReservation, Partial, SLVal, SLValue, Status, StructInstance, Value,
 };
+pub use types::{QualifiedTypeName, Signature};

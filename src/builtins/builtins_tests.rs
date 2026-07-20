@@ -8,14 +8,14 @@ fn signatures_own_their_type_declarations() {
   let variable_name = String::from("Element");
   let signature = sig(
     &[(variable_name.as_str(), &[Trait::Eq])],
-    vec![TypeConst::var(variable_name.clone())],
+    vec![Signature::var(variable_name.clone())],
     None,
-    TypeConst::list(TypeConst::var(variable_name.clone())),
+    Signature::list(Signature::var(variable_name.clone())),
   );
   drop(variable_name);
 
   assert_eq!(signature.type_vars[0].0, "Element");
-  assert_eq!(signature.params[0], TypeConst::var("Element"));
+  assert_eq!(signature.params[0], Signature::var("Element"));
 }
 
 /// Helper: evaluate `main` with [`Library::default`] and return the result.

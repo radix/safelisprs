@@ -313,7 +313,7 @@ fn custom_builtin_with_different_module_name() {
   let builtins = Builtins::new().with_builtin(Builtin::unary(
     "math",
     "double",
-    sig(&[], vec![TypeConst::Int], None, TypeConst::Int),
+    sig(&[], vec![TypeSignature::Int], None, TypeSignature::Int),
     |v| match v {
       SLValue::Int(n) => SLValue::Int(n * 2),
       _ => SLValue::Void,
@@ -328,7 +328,7 @@ fn bare_builtin_name_requires_qualification() {
   let builtins = Builtins::new().with_builtin(Builtin::unary(
     "host",
     "double",
-    sig(&[], vec![TypeConst::Int], None, TypeConst::Int),
+    sig(&[], vec![TypeSignature::Int], None, TypeSignature::Int),
     |v| match v {
       SLValue::Int(n) => SLValue::Int(n * 2),
       _ => SLValue::Void,

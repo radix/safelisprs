@@ -6,6 +6,7 @@ use rand_chacha::rand_core::{RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
 use crate::interpreter::{CellContents, HostCtx, HostPoll, MemoryReservation, SLVal, Value};
+use crate::types::Signature;
 
 /// A type-class-style bound that a generic builtin type variable can require.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
@@ -22,82 +23,17 @@ pub enum Trait {
   Slice,
 }
 
-/// A compile-time SafeLisp type used in builtin signatures.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TypeConst {
-  /// The integer type.
-  Int,
-  /// The floating-point type.
-  Float,
-  /// The string type.
-  String,
-  /// The boolean type.
-  Bool,
-  /// The void type.
-  Void,
-  /// A mutable cell containing a value of the given type.
-  Cell(Box<TypeConst>),
-  /// A list containing values of the given type.
-  List(Box<TypeConst>),
-  /// A callable type with fixed parameters and a return type.
-  Fn {
-    /// Parameter types accepted by the callable.
-    params: Vec<TypeConst>,
-    /// Return type produced by the callable.
-    ret: Box<TypeConst>,
-  },
-  /// A user-defined or library-defined named type.
-  Named {
-    /// Module containing the type declaration.
-    module: &'static str,
-    /// Type name.
-    name: &'static str,
-  },
-  /// A generic type variable by name.
-  Var(String),
-}
-
-impl TypeConst {
-  /// Construct a type variable with the given name.
-  pub fn var(name: impl Into<String>) -> Self {
-    Self::Var(name.into())
-  }
-
-  /// Construct a cell type containing `item`.
-  pub fn cell(item: TypeConst) -> Self {
-    Self::Cell(Box::new(item))
-  }
-
-  /// Construct a list type containing `item`.
-  pub fn list(item: TypeConst) -> Self {
-    Self::List(Box::new(item))
-  }
-
-  /// Construct a function type from parameter and return types.
-  pub fn function(params: Vec<TypeConst>, ret: TypeConst) -> Self {
-    Self::Fn {
-      params,
-      ret: Box::new(ret),
-    }
-  }
-
-  /// Construct a named type reference.
-  pub fn named(module: &'static str, name: &'static str) -> Self {
-    Self::Named { module, name }
-  }
-}
-
 /// The type signature of a builtin function.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuiltinSignature {
   /// Generic type variables and their required trait bounds.
   pub type_vars: Vec<(String, Vec<Trait>)>,
   /// Fixed positional parameter types.
-  pub params: Vec<TypeConst>,
+  pub params: Vec<Signature>,
   /// Variadic rest parameter type, if the builtin accepts extra arguments.
-  pub rest: Option<TypeConst>,
+  pub rest: Option<Signature>,
   /// Return type of the builtin.
-  pub ret: TypeConst,
+  pub ret: Signature,
 }
 
 /// A compile-time description of a builtin: which module/name it lives in and
@@ -120,7 +56,7 @@ pub struct CustomFieldSpec {
   /// Field name.
   pub name: &'static str,
   /// Field type.
-  pub ty: TypeConst,
+  pub ty: Signature,
 }
 
 /// A custom SafeLisp type supplied by a host library.
@@ -139,7 +75,7 @@ impl CustomTypeSpec {
   pub fn struct_(
     module: &'static str,
     name: &'static str,
-    fields: Vec<(&'static str, TypeConst)>,
+    fields: Vec<(&'static str, Signature)>,
   ) -> Self {
     Self {
       module,
@@ -155,9 +91,9 @@ impl CustomTypeSpec {
 /// Construct a [`BuiltinSignature`] from borrowed type-variable metadata.
 pub fn sig(
   type_vars: &[(&str, &[Trait])],
-  params: Vec<TypeConst>,
-  rest: Option<TypeConst>,
-  ret: TypeConst,
+  params: Vec<Signature>,
+  rest: Option<Signature>,
+  ret: Signature,
 ) -> BuiltinSignature {
   BuiltinSignature {
     type_vars: type_vars
@@ -700,16 +636,16 @@ impl Default for Library {
       .with_type(CustomTypeSpec::struct_(
         "rand",
         "Rng",
-        vec![("state", TypeConst::cell(TypeConst::Int))],
+        vec![("state", Signature::cell(Signature::Int))],
       ))
       .with_builtin(Builtin::binary(
         "std",
         "+",
         sig(
           &[("A", &[Trait::Add])],
-          vec![TypeConst::var("A"), TypeConst::var("A")],
+          vec![Signature::var("A"), Signature::var("A")],
           None,
-          TypeConst::var("A"),
+          Signature::var("A"),
         ),
         |a, b| match (a, b) {
           (Value::Int(x), Value::Int(y)) => Ok(Value::Int(x + y)),
@@ -726,9 +662,9 @@ impl Default for Library {
         "-",
         sig(
           &[("A", &[Trait::Sub])],
-          vec![TypeConst::var("A"), TypeConst::var("A")],
+          vec![Signature::var("A"), Signature::var("A")],
           None,
-          TypeConst::var("A"),
+          Signature::var("A"),
         ),
         |a, b| {
           match (a, b) {
@@ -748,9 +684,9 @@ impl Default for Library {
         "==",
         sig(
           &[("A", &[Trait::Eq])],
-          vec![TypeConst::var("A"), TypeConst::var("A")],
+          vec![Signature::var("A"), Signature::var("A")],
           None,
-          TypeConst::Bool,
+          Signature::Bool,
         ),
         |a, b| Ok(Value::Bool(a == b)),
       ))
@@ -760,9 +696,9 @@ impl Default for Library {
         Some(2),
         sig(
           &[("A", &[Trait::Concat])],
-          vec![TypeConst::var("A"), TypeConst::var("A")],
+          vec![Signature::var("A"), Signature::var("A")],
           None,
-          TypeConst::var("A"),
+          Signature::var("A"),
         ),
         |ctx, args| {
           let (a, b) = (args[0], args[1]);
@@ -809,8 +745,8 @@ impl Default for Library {
         sig(
           &[("A", &[])],
           vec![],
-          Some(TypeConst::var("A")),
-          TypeConst::list(TypeConst::var("A")),
+          Some(Signature::var("A")),
+          Signature::list(Signature::var("A")),
         ),
         |ctx, args| {
           let (mut items, _reservation) = reserved_vec(ctx, args.len(), "list")?;
@@ -824,9 +760,9 @@ impl Default for Library {
         Some(1),
         sig(
           &[("A", &[])],
-          vec![TypeConst::var("A")],
+          vec![Signature::var("A")],
           None,
-          TypeConst::cell(TypeConst::var("A")),
+          Signature::cell(Signature::var("A")),
         ),
         |ctx, args| {
           let contents = CellContents::new(args[0]);
@@ -839,9 +775,9 @@ impl Default for Library {
         Some(1),
         sig(
           &[("A", &[])],
-          vec![TypeConst::cell(TypeConst::var("A"))],
+          vec![Signature::cell(Signature::var("A"))],
           None,
-          TypeConst::var("A"),
+          Signature::var("A"),
         ),
         |_ctx, args| match args[0] {
           Value::Cell(cell) => Ok(cell.borrow().value),
@@ -857,9 +793,9 @@ impl Default for Library {
         Some(2),
         sig(
           &[("A", &[])],
-          vec![TypeConst::cell(TypeConst::var("A")), TypeConst::var("A")],
+          vec![Signature::cell(Signature::var("A")), Signature::var("A")],
           None,
-          TypeConst::Void,
+          Signature::Void,
         ),
         |ctx, args| match args[0] {
           Value::Cell(cell) => {
@@ -877,9 +813,9 @@ impl Default for Library {
         "len",
         sig(
           &[("A", &[])],
-          vec![TypeConst::list(TypeConst::var("A"))],
+          vec![Signature::list(Signature::var("A"))],
           None,
-          TypeConst::Int,
+          Signature::Int,
         ),
         |a| match a {
           Value::Heap(heap) => match &heap.value {
@@ -895,9 +831,9 @@ impl Default for Library {
         Some(2),
         sig(
           &[("A", &[])],
-          vec![TypeConst::list(TypeConst::var("A")), TypeConst::Int],
+          vec![Signature::list(Signature::var("A")), Signature::Int],
           None,
-          TypeConst::var("A"),
+          Signature::var("A"),
         ),
         |_ctx, args| {
           let (a, b) = (args[0], args[1]);
@@ -935,9 +871,9 @@ impl Default for Library {
         Some(2),
         sig(
           &[("A", &[])],
-          vec![TypeConst::list(TypeConst::var("A")), TypeConst::var("A")],
+          vec![Signature::list(Signature::var("A")), Signature::var("A")],
           None,
-          TypeConst::list(TypeConst::var("A")),
+          Signature::list(Signature::var("A")),
         ),
         |ctx, args| {
           let (a, b) = (args[0], args[1]);
@@ -968,9 +904,9 @@ impl Default for Library {
         Some(2),
         sig(
           &[],
-          vec![TypeConst::Int, TypeConst::Int],
+          vec![Signature::Int, Signature::Int],
           None,
-          TypeConst::list(TypeConst::Int),
+          Signature::list(Signature::Int),
         ),
         |ctx, args| {
           let (a, b) = (args[0], args[1]);
@@ -1008,11 +944,11 @@ impl Default for Library {
         sig(
           &[("A", &[]), ("B", &[])],
           vec![
-            TypeConst::list(TypeConst::var("A")),
-            TypeConst::function(vec![TypeConst::var("A")], TypeConst::var("B")),
+            Signature::list(Signature::var("A")),
+            Signature::function(vec![Signature::var("A")], Signature::var("B")),
           ],
           None,
-          TypeConst::list(TypeConst::var("B")),
+          Signature::list(Signature::var("B")),
         ),
         map_start,
         map_resume,
@@ -1023,9 +959,9 @@ impl Default for Library {
         Some(3),
         sig(
           &[("A", &[Trait::Slice])],
-          vec![TypeConst::var("A"), TypeConst::Int, TypeConst::Int],
+          vec![Signature::var("A"), Signature::Int, Signature::Int],
           None,
-          TypeConst::var("A"),
+          Signature::var("A"),
         ),
         |ctx, args| {
           let (a, b, c) = (args[0], args[1], args[2]);
@@ -1090,9 +1026,9 @@ impl Default for Library {
         Some(2),
         sig(
           &[],
-          vec![TypeConst::Int, TypeConst::String],
+          vec![Signature::Int, Signature::String],
           None,
-          TypeConst::named("rand", "Rng"),
+          Signature::named("rand", "Rng"),
         ),
         |ctx, args| {
           let (seed, name) = (args[0], args[1]);
@@ -1141,9 +1077,9 @@ impl Default for Library {
         Some(2),
         sig(
           &[],
-          vec![TypeConst::named("rand", "Rng"), TypeConst::Int],
+          vec![Signature::named("rand", "Rng"), Signature::Int],
           None,
-          TypeConst::Int,
+          Signature::Int,
         ),
         |ctx, args| {
           let (rng, sides) = (args[0], args[1]);

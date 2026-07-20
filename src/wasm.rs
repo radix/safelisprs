@@ -8,9 +8,10 @@ use wasm_encoder::{
   TableType, TypeSection, ValType,
 };
 
-use crate::builtins::{sig, BuiltinSignature, Trait, TypeConst};
+use crate::builtins::{sig, BuiltinSignature, Trait};
 use crate::parser::{self, ASTKind, BindingId, Identifier, AST};
 use crate::prelude::resolve_module_names;
+use crate::types::Signature as TypeSignature;
 
 /// Tag values for the SafeLisp tagged-value representation. Every SafeLisp
 /// value on the WASM stack is a `(payload: i64, tag: i32)` pair — payload
@@ -974,9 +975,9 @@ pub fn std_builtins() -> Builtins {
       "+",
       sig(
         &[("A", &[Trait::Add])],
-        vec![TypeConst::var("A"), TypeConst::var("A")],
+        vec![TypeSignature::var("A"), TypeSignature::var("A")],
         None,
-        TypeConst::var("A"),
+        TypeSignature::var("A"),
       ),
       |a, b| match (a, b) {
         (SLValue::Int(x), SLValue::Int(y)) => SLValue::Int(x.wrapping_add(y)),
@@ -989,9 +990,9 @@ pub fn std_builtins() -> Builtins {
       "-",
       sig(
         &[("A", &[Trait::Sub])],
-        vec![TypeConst::var("A"), TypeConst::var("A")],
+        vec![TypeSignature::var("A"), TypeSignature::var("A")],
         None,
-        TypeConst::var("A"),
+        TypeSignature::var("A"),
       ),
       |a, b| match (a, b) {
         (SLValue::Int(x), SLValue::Int(y)) => SLValue::Int(x - y),
@@ -1004,9 +1005,9 @@ pub fn std_builtins() -> Builtins {
       "==",
       sig(
         &[("A", &[Trait::Eq])],
-        vec![TypeConst::var("A"), TypeConst::var("A")],
+        vec![TypeSignature::var("A"), TypeSignature::var("A")],
         None,
-        TypeConst::Bool,
+        TypeSignature::Bool,
       ),
       |a, b| SLValue::Bool(a == b),
     ))

@@ -3,12 +3,12 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::rc::Rc;
 
-use crate::builtins::{BuiltinSignature, CustomTypeSpec, Library, Trait, TypeConst};
+use crate::builtins::{BuiltinSignature, CustomTypeSpec, Library, Trait};
 use crate::parser::{
   source_position, ASTKind, AstId, BindingId, Enum as EnumAst, EnumVariant, Function, Identifier,
   MatchArm, MatchPattern, ResolvedName, Span, Struct as StructAst, TypeAst, TypeNameAst, AST,
 };
-use crate::types::QualifiedTypeName;
+use crate::types::{QualifiedTypeName, Signature};
 
 pub type TvRef = Rc<RefCell<TypeVar>>;
 
@@ -203,7 +203,7 @@ impl TypecheckInfo {
 impl FieldAccessInfo {
   #[cfg(test)]
   fn receiver_type(&self) -> &str {
-    &self.receiver_type.name
+    self.receiver_type.name()
   }
 
   pub fn field_index(&self) -> u16 {
@@ -296,7 +296,7 @@ impl Checker {
         fields: type_
           .fields
           .iter()
-          .map(|field| (field.name.to_string(), type_ast_from_const(&field.ty)))
+          .map(|field| (field.name.to_string(), type_ast_from_signature(&field.ty)))
           .collect(),
       }),
     );
@@ -1039,14 +1039,14 @@ impl Checker {
       params: signature
         .params
         .iter()
-        .map(|ty| type_from_const(ty, &vars, &self.types))
+        .map(|ty| type_from_signature(ty, &vars, &self.types))
         .collect::<Result<Vec<_>, _>>()?,
       rest: signature
         .rest
         .as_ref()
-        .map(|ty| type_from_const(ty, &vars, &self.types))
+        .map(|ty| type_from_signature(ty, &vars, &self.types))
         .transpose()?,
-      ret: type_from_const(&signature.ret, &vars, &self.types)?,
+      ret: type_from_signature(&signature.ret, &vars, &self.types)?,
       quantified,
     })
   }
@@ -1549,7 +1549,7 @@ fn resolve_user_type<'a>(
     TypeNameAst::Bare(name) => {
       let mut matches = types
         .iter()
-        .filter(|(type_name, _)| type_name.name == *name)
+        .filter(|(type_name, _)| type_name.name() == name)
         .map(|(type_name, user_type)| (type_name.clone(), user_type))
         .collect::<Vec<_>>();
       match matches.len() {
@@ -1558,7 +1558,7 @@ fn resolve_user_type<'a>(
         _ => {
           let mut labels = matches
             .iter()
-            .map(|(type_name, _)| type_name.display())
+            .map(|(type_name, _)| type_name.to_string())
             .collect::<Vec<_>>();
           labels.sort();
           Err(TypeError::new(format!(
@@ -1613,54 +1613,59 @@ fn ensure_bounds_available(
   Ok(())
 }
 
-fn type_ast_from_const(ty: &TypeConst) -> TypeAst {
+fn type_ast_from_signature(ty: &Signature) -> TypeAst {
   match ty {
-    TypeConst::Int => TypeAst::Named(TypeNameAst::bare("Int")),
-    TypeConst::Float => TypeAst::Named(TypeNameAst::bare("Float")),
-    TypeConst::String => TypeAst::Named(TypeNameAst::bare("String")),
-    TypeConst::Bool => TypeAst::Named(TypeNameAst::bare("Bool")),
-    TypeConst::Void => TypeAst::Named(TypeNameAst::bare("Void")),
-    TypeConst::Cell(item) => TypeAst::Apply("Cell".to_string(), vec![type_ast_from_const(item)]),
-    TypeConst::List(item) => TypeAst::Apply("List".to_string(), vec![type_ast_from_const(item)]),
-    TypeConst::Fn { params, ret } => TypeAst::Fn(
-      params.iter().map(type_ast_from_const).collect(),
+    Signature::Int => TypeAst::Named(TypeNameAst::bare("Int")),
+    Signature::Float => TypeAst::Named(TypeNameAst::bare("Float")),
+    Signature::String => TypeAst::Named(TypeNameAst::bare("String")),
+    Signature::Bool => TypeAst::Named(TypeNameAst::bare("Bool")),
+    Signature::Void => TypeAst::Named(TypeNameAst::bare("Void")),
+    Signature::Cell(item) => {
+      TypeAst::Apply("Cell".to_string(), vec![type_ast_from_signature(item)])
+    }
+    Signature::List(item) => {
+      TypeAst::Apply("List".to_string(), vec![type_ast_from_signature(item)])
+    }
+    Signature::Fn { params, ret } => TypeAst::Fn(
+      params.iter().map(type_ast_from_signature).collect(),
       None,
-      Box::new(type_ast_from_const(ret)),
+      Box::new(type_ast_from_signature(ret)),
     ),
-    TypeConst::Named { module, name } => TypeAst::Named(TypeNameAst::qualified(*module, *name)),
-    TypeConst::Var(name) => TypeAst::Named(TypeNameAst::bare(name.clone())),
+    Signature::Named(name) => TypeAst::Named(TypeNameAst::Qualified(name.clone())),
+    Signature::Var(name) => TypeAst::Named(TypeNameAst::bare(name.clone())),
   }
 }
 
-fn type_from_const(
-  ty: &TypeConst,
+fn type_from_signature(
+  ty: &Signature,
   vars: &HashMap<String, TvRef>,
   types: &HashMap<QualifiedTypeName, UserType>,
 ) -> Result<Type, TypeError> {
   match ty {
-    TypeConst::Int => Ok(Type::Int),
-    TypeConst::Float => Ok(Type::Float),
-    TypeConst::String => Ok(Type::String),
-    TypeConst::Bool => Ok(Type::Bool),
-    TypeConst::Void => Ok(Type::Void),
-    TypeConst::Cell(item) => Ok(Type::Cell(Box::new(type_from_const(item, vars, types)?))),
-    TypeConst::List(item) => Ok(Type::List(Box::new(type_from_const(item, vars, types)?))),
-    TypeConst::Fn { params, ret } => Ok(Type::fixed_fn(
+    Signature::Int => Ok(Type::Int),
+    Signature::Float => Ok(Type::Float),
+    Signature::String => Ok(Type::String),
+    Signature::Bool => Ok(Type::Bool),
+    Signature::Void => Ok(Type::Void),
+    Signature::Cell(item) => Ok(Type::Cell(Box::new(type_from_signature(
+      item, vars, types,
+    )?))),
+    Signature::List(item) => Ok(Type::List(Box::new(type_from_signature(
+      item, vars, types,
+    )?))),
+    Signature::Fn { params, ret } => Ok(Type::fixed_fn(
       params
         .iter()
-        .map(|param| type_from_const(param, vars, types))
+        .map(|param| type_from_signature(param, vars, types))
         .collect::<Result<Vec<_>, _>>()?,
-      type_from_const(ret, vars, types)?,
+      type_from_signature(ret, vars, types)?,
     )),
-    TypeConst::Named { module, name } => {
-      let type_name = QualifiedTypeName::new(*module, *name);
-      match types.get(&type_name) {
-        Some(UserType::Struct(_)) => Ok(Type::Struct(type_name)),
-        Some(UserType::Enum(_)) => Ok(Type::Enum(type_name)),
-        None => Err(TypeError::new(format!("unknown type `{type_name}`"))),
-      }
-    }
-    TypeConst::Var(name) => vars
+    Signature::Named(type_name) => match types.get(type_name) {
+      Some(UserType::Struct(_)) => Ok(Type::Struct(type_name.clone())),
+      Some(UserType::Enum(_)) => Ok(Type::Enum(type_name.clone())),
+      None => Err(TypeError::new(format!("unknown type `{type_name}`"))),
+    },
+    Signature::Var(name) => vars
       .get(name)
       .cloned()
       .map(Type::Var)
@@ -1737,8 +1742,8 @@ fn display_type(ty: &Type) -> String {
     Type::String => "String".to_string(),
     Type::Bool => "Bool".to_string(),
     Type::Void => "Void".to_string(),
-    Type::Struct(name) => name.display(),
-    Type::Enum(name) => name.display(),
+    Type::Struct(name) => name.to_string(),
+    Type::Enum(name) => name.to_string(),
     Type::Cell(item) => format!("(Cell {})", display_type(&item)),
     Type::List(item) => format!("(List {})", display_type(&item)),
     Type::Fn { params, rest, ret } => {
