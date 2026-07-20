@@ -130,14 +130,14 @@ pub fn sig(
 /// invoking one builtin (distinct from `'gc` so the borrow checker can
 /// reborrow `&'gc mut ExecRoot<'gc>` as `&'call mut ExecRoot<'gc>` without
 /// affecting the inner arena brand).
-pub(crate) type HostFn = Arc<
+type HostFn = Arc<
   dyn for<'gc, 'call> Fn(&mut HostCtx<'gc, 'call>, &[Value<'gc>]) -> Result<Value<'gc>, String>,
 >;
 
-pub(crate) type HostStartFn =
+type HostStartFn =
   Arc<dyn for<'gc, 'call> Fn(&mut HostCtx<'gc, 'call>, &[Value<'gc>]) -> Result<(), String>>;
 
-pub(crate) type HostResumeFn = Arc<
+type HostResumeFn = Arc<
   dyn for<'gc, 'call> Fn(
     &mut HostCtx<'gc, 'call>,
     Option<Value<'gc>>,
@@ -1030,7 +1030,7 @@ pub fn default_builtins() -> Builtins {
 
 /// Derive a deterministic 64-bit seed from a parent seed and a name, using
 /// BLAKE3. The 64-bit result is the first 8 bytes of the BLAKE3 XOF output.
-pub(crate) fn rand_rng(parent_seed: i64, name: &str) -> i64 {
+fn rand_rng(parent_seed: i64, name: &str) -> i64 {
   // NEVER CHANGE THIS CODE
   let mut h = Hasher::new();
   h.update(&parent_seed.to_le_bytes());
@@ -1044,7 +1044,7 @@ pub(crate) fn rand_rng(parent_seed: i64, name: &str) -> i64 {
 /// `roll` is in `1..=sides` and `new_seed` is the advanced state, so callers
 /// thread it into the next `rand_roll` (or `rand::rng`) call. Pure and
 /// deterministic: same inputs always yield the same outputs.
-pub(crate) fn rand_roll(seed: i64, sides: i64) -> (i64, i64) {
+fn rand_roll(seed: i64, sides: i64) -> (i64, i64) {
   // NEVER CHANGE THIS CODE
   let mut chachaseed = [0u8; 32];
   chachaseed[..8].copy_from_slice(&seed.to_le_bytes());

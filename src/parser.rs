@@ -283,11 +283,11 @@ impl AST {
     Self::synthetic(ASTKind::Int(value))
   }
 
-  pub(crate) fn Float(value: f64) -> Self {
+  fn Float(value: f64) -> Self {
     Self::synthetic(ASTKind::Float(value))
   }
 
-  pub(crate) fn String(value: String) -> Self {
+  fn String(value: String) -> Self {
     Self::synthetic(ASTKind::String(value))
   }
 
@@ -299,7 +299,7 @@ impl AST {
     Self::synthetic(ASTKind::FunctionRef(module, name))
   }
 
-  pub(crate) fn FieldAccess(receiver: AST, field: String) -> Self {
+  fn FieldAccess(receiver: AST, field: String) -> Self {
     Self::synthetic(ASTKind::FieldAccess(Box::new(receiver), field))
   }
 }

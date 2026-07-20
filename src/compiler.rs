@@ -103,13 +103,13 @@ type CompiledInstruction = Instruction<(String, String), (String, String)>;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct TypeDef {
-  pub(crate) name: String,
+  name: String,
   pub(crate) constructors: Vec<ConstructorDef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct ConstructorDef {
-  pub(crate) name: String,
+  name: String,
   pub(crate) fields: Vec<String>,
 }
 
@@ -123,7 +123,7 @@ pub(crate) struct Module<CallType, StructType> {
 type CompiledModule = Module<(String, String), (String, String)>;
 type CompiledModules = Vec<CompiledModule>;
 pub(crate) type LinkedModule = Module<(u32, u32), (u32, u32)>;
-pub(crate) type LinkedModules = Vec<LinkedModule>;
+type LinkedModules = Vec<LinkedModule>;
 
 struct ModuleIndexEntry {
   module: u32,
@@ -165,7 +165,7 @@ impl Package {
       .map(|(_, f)| f)
   }
 
-  pub(crate) fn get_type(&self, module: u32, type_: u32) -> Option<&TypeDef> {
+  fn get_type(&self, module: u32, type_: u32) -> Option<&TypeDef> {
     self
       .modules
       .get(module as usize)

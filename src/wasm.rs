@@ -96,7 +96,7 @@ pub struct Builtin {
   /// WASM side, so the actual WASM param count is `num_params * 2`).
   pub num_params: usize,
   /// The SafeLisp-level type checked at call sites.
-  pub(crate) signature: BuiltinSignature,
+  signature: BuiltinSignature,
   /// The host implementation.
   pub func: HostFn,
 }
@@ -104,7 +104,7 @@ pub struct Builtin {
 impl Builtin {
   /// A unary (one-arg) host function.
   #[cfg(test)]
-  pub(crate) fn unary(
+  fn unary(
     module: &str,
     name: &str,
     signature: BuiltinSignature,
@@ -120,7 +120,7 @@ impl Builtin {
   }
 
   /// A binary (two-arg) host function.
-  pub(crate) fn binary(
+  fn binary(
     module: &str,
     name: &str,
     signature: BuiltinSignature,
@@ -144,12 +144,12 @@ pub struct Builtins {
 
 impl Builtins {
   /// Create an empty registry.
-  pub(crate) fn new() -> Self {
+  fn new() -> Self {
     Builtins::default()
   }
 
   /// Add a builtin to this registry (builder style).
-  pub(crate) fn with_builtin(mut self, builtin: Builtin) -> Self {
+  fn with_builtin(mut self, builtin: Builtin) -> Self {
     self.entries.push(builtin);
     self
   }

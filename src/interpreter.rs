@@ -15,7 +15,7 @@ use crate::compiler::{Callable, Instruction, LinkedFunction as Function, Package
 /// cap. `Rc<Cell<_>>` is appropriate because gc-arena is single-threaded; if
 /// `Execution` ever needs to be `Send`, swap for `Arc<AtomicUsize>`.
 #[derive(Default)]
-pub(crate) struct MemoryTracker {
+struct MemoryTracker {
   external_bytes: Cell<usize>,
   limit: Cell<Option<usize>>,
   /// Accumulated *positive* external allocation debt waiting to be fed to
@@ -31,7 +31,7 @@ pub(crate) struct MemoryTracker {
 }
 
 impl MemoryTracker {
-  pub(crate) fn new() -> Self {
+  fn new() -> Self {
     Self::default()
   }
 
@@ -87,15 +87,15 @@ impl MemoryTracker {
     Ok(())
   }
 
-  pub(crate) fn external_bytes(&self) -> usize {
+  fn external_bytes(&self) -> usize {
     self.external_bytes.get()
   }
 
-  pub(crate) fn limit(&self) -> Option<usize> {
+  fn limit(&self) -> Option<usize> {
     self.limit.get()
   }
 
-  pub(crate) fn set_limit(&self, limit: Option<usize>) {
+  fn set_limit(&self, limit: Option<usize>) {
     self.limit.set(limit);
   }
 
@@ -117,7 +117,7 @@ impl MemoryTracker {
 /// box. Each `Execution` mints one `Rc<MemoryTracker>`; every value allocated
 /// in that execution receives a clone. The tracker stays alive until the last
 /// `Accounted` box is swept (which releases its `Rc`).
-pub(crate) type SharedTracker = Rc<MemoryTracker>;
+type SharedTracker = Rc<MemoryTracker>;
 
 /// A per-execution reservation for temporary Rust-heap memory.
 ///
@@ -223,7 +223,7 @@ impl Drop for MemoryCharge {
 ///
 /// Only *directly owned* storage is counted; pointed-to `Gc` boxes are
 /// accounted by their own `Accounted` wrappers, so there's no double-counting.
-pub(crate) fn external_bytes_of<'gc>(value: &SLVal<'gc>) -> usize {
+fn external_bytes_of<'gc>(value: &SLVal<'gc>) -> usize {
   match value {
     SLVal::String(s) => s.capacity(),
     SLVal::List(items) => items.capacity() * std::mem::size_of::<Value<'gc>>(),
@@ -335,7 +335,7 @@ pub enum Value<'gc> {
 /// `Vec<T>` payload first, then releases the accounting charge.
 #[derive(Collect)]
 #[collect(no_drop)]
-pub(crate) struct TrackedVec<T> {
+struct TrackedVec<T> {
   inner: Vec<T>,
   #[collect(require_static)]
   charge: MemoryCharge,
@@ -435,7 +435,7 @@ impl<T> std::ops::IndexMut<usize> for TrackedVec<T> {
 /// single `mutate_root` callback.
 #[derive(Collect)]
 #[collect(no_drop)]
-pub(crate) struct ExecRoot<'gc> {
+struct ExecRoot<'gc> {
   stack: TrackedVec<Value<'gc>>,
   frames: TrackedVec<Frame<'gc>>,
   /// Per-execution memory tracker. Owns the running external-bytes count (Rust
@@ -453,7 +453,7 @@ impl<'gc> ExecRoot<'gc> {
   /// The single chokepoint for creating heap-backed values. Wraps the
   /// `SLVal` in `Accounted` (charging the tracker for any directly-owned
   /// external Rust-heap storage) and boxes it via `Gc::new`.
-  pub(crate) fn alloc_heap(&mut self, mc: &'gc Mutation<'gc>, value: SLVal<'gc>) -> Value<'gc> {
+  fn alloc_heap(&mut self, mc: &'gc Mutation<'gc>, value: SLVal<'gc>) -> Value<'gc> {
     Value::Heap(Gc::new(mc, Accounted::new(value, self.tracker.clone())))
   }
 
@@ -883,7 +883,7 @@ pub struct Execution {
 }
 
 impl Execution {
-  pub(crate) fn new(package: Package, builtins: Builtins) -> Self {
+  fn new(package: Package, builtins: Builtins) -> Self {
     let tracker = Rc::new(MemoryTracker::new());
     let tracker_for_root = tracker.clone();
     let arena = Arena::new(move |_mc| ExecRoot {
@@ -912,7 +912,7 @@ impl Execution {
 
   /// The number of items currently on the value stack.
   #[cfg(test)]
-  pub(crate) fn stack_len(&self) -> usize {
+  fn stack_len(&self) -> usize {
     self.arena.mutate(|_, root| root.stack.len())
   }
 
@@ -938,7 +938,7 @@ impl Execution {
   /// The total bytes currently allocated by live `Gc` pointers in this
   /// execution's arena (the gc-arena-reported portion of `memory_usage`).
   #[cfg(test)]
-  pub(crate) fn gc_allocation_bytes(&self) -> usize {
+  fn gc_allocation_bytes(&self) -> usize {
     self.arena.metrics().total_gc_allocation()
   }
 
@@ -969,7 +969,7 @@ impl Execution {
   /// pointers. Useful for tests that want to verify that collection reclaims
   /// garbage.
   #[cfg(test)]
-  pub(crate) fn collect_all(&mut self) {
+  fn collect_all(&mut self) {
     self.arena.finish_cycle();
   }
 
@@ -1032,7 +1032,7 @@ impl Execution {
   /// this execution's `Package`, with optional pre-bound values given as owned
   /// `SLValue`s. The frame stores the index (not a clone of the function's
   /// instructions), so deep recursion is cheap.
-  pub(crate) fn enter_function_at(
+  fn enter_function_at(
     &mut self,
     mod_idx: u32,
     func_idx: u32,
@@ -1155,7 +1155,7 @@ impl<'gc> ExecRoot<'gc> {
 
   /// Push a `Value` onto the execution's value stack. Used by
   /// [`Builtin::call`] to push a builtin's result.
-  pub(crate) fn push_value(&mut self, val: Value<'gc>) {
+  fn push_value(&mut self, val: Value<'gc>) {
     self.stack.push(val);
   }
 
