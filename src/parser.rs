@@ -807,7 +807,7 @@ impl Parser {
       );
     }
 
-    match &self.peek().kind {
+    match self.peek().kind.clone() {
       TokenKind::Sym(name) if name == "let" => {
         self.advance();
         self.parse_let(start)
@@ -840,7 +840,7 @@ impl Parser {
         self.advance();
         self.parse_block(start)
       }
-      TokenKind::Sym(_) => self.parse_fixed_call(start),
+      TokenKind::Sym(name) => self.parse_fixed_call(start, name),
       _ => self.parse_dynamic_call(start),
     }
   }
@@ -1141,11 +1141,8 @@ impl Parser {
     Ok(AST::new(ASTKind::Block(expressions), span))
   }
 
-  fn parse_fixed_call(&mut self, start: usize) -> Result<AST, ParseError> {
+  fn parse_fixed_call(&mut self, start: usize, name: String) -> Result<AST, ParseError> {
     let head = self.advance();
-    let TokenKind::Sym(name) = head.kind else {
-      unreachable!("fixed calls have symbol heads")
-    };
     let qualified = self.parse_qualified_identifier(name.clone(), head.span.clone())?;
     let (args, close) = self.parse_call_args()?;
     let span = start..close.span.end;
