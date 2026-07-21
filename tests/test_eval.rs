@@ -384,6 +384,14 @@ fn register_one(linker: &mut Linker<()>, b: &safelisp::wasm::Builtin) {
 #[case::if_selects_then_branch("(fn main () ->Int (if true 42 0))", Val::Int(42))]
 #[case::if_selects_else_branch("(fn main () ->Int (if false 42 0))", Val::Int(0))]
 #[case::if_with_condition_from_call("(fn main () ->Int (if (std::== 1 1) 7 8))", Val::Int(7))]
+#[case::layout_fn_and_if(
+  "fn main () -> Int --
+     if (std::== 1 1) --
+       7
+     else --
+       8",
+  Val::Int(7)
+)]
 #[case::if_branches_can_use_let_variables(
   "(fn main () ->Int (let a 10) (if true a 0))",
   Val::Int(10)

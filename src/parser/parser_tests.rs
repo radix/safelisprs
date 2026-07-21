@@ -88,6 +88,76 @@ fn parses_nested_functions() {
 }
 
 #[test]
+fn parses_layout_function_like_parenthesized_function() {
+  let layout = read_multiple(
+    "fn foo (x:Int) -> Int --
+       (+ x 1)",
+  )
+  .unwrap();
+  let parenthesized = read_multiple("(fn foo (x:Int) -> Int (+ x 1))").unwrap();
+
+  assert_eq!(layout, parenthesized);
+}
+
+#[test]
+fn parses_layout_if_like_parenthesized_if() {
+  let layout = read_multiple(
+    "if (> x 0) --
+       x
+     else --
+       (- 0 x)",
+  )
+  .unwrap();
+  let parenthesized = read_multiple("(if (> x 0) x (- 0 x))").unwrap();
+
+  assert_eq!(layout, parenthesized);
+}
+
+#[test]
+fn parses_nested_layout_forms() {
+  let layout = read_multiple(
+    "fn main () -> Int --
+       if true --
+         1
+       else --
+         2",
+  )
+  .unwrap();
+  let parenthesized = read_multiple("(fn main () -> Int (if true 1 2))").unwrap();
+
+  assert_eq!(layout, parenthesized);
+}
+
+#[test]
+fn layout_if_branches_with_multiple_expressions_are_implicit_blocks() {
+  let layout = read_multiple(
+    "fn main () -> Int --
+       if true --
+         (let x 1)
+         x
+       else --
+         2",
+  )
+  .unwrap();
+  let parenthesized = read_multiple("(fn main () -> Int (if true (block (let x 1) x) 2))").unwrap();
+
+  assert_eq!(layout, parenthesized);
+}
+
+#[test]
+fn parses_layout_for_arbitrary_function_calls() {
+  let layout = read_multiple(
+    "foo 1 --
+       2
+       (bar 3)",
+  )
+  .unwrap();
+  let parenthesized = read_multiple("(foo 1 2 (bar 3))").unwrap();
+
+  assert_eq!(layout, parenthesized);
+}
+
+#[test]
 fn parses_mandatory_parameter_and_return_types_without_whitespace() {
   let asts = read_multiple("(fn id (a:A xs:(List Int))->A where ((A Eq)) a)").unwrap();
   let ASTKind::DefineFn(function) = &asts[0].kind else {
@@ -379,6 +449,27 @@ fn ast_nodes_keep_full_byte_spans() {
     panic!("expected fixed call, got {then_branch:?}");
   };
   assert_eq!(args[0].span, 12..13);
+}
+
+#[test]
+fn layout_preserves_real_token_spans() {
+  let source = "fn main () -> Int --\n    (+ 1\n       \"bad\")";
+  let function = parse_internal(source).unwrap().remove(0);
+  let ASTKind::DefineFn(function) = function.kind else {
+    panic!("expected function");
+  };
+  let ASTKind::CallFixed(_, args) = &function.code[0].kind else {
+    panic!("expected call");
+  };
+  let expected_start = source.find("\"bad\"").unwrap();
+  assert_eq!(args[1].span, expected_start..expected_start + 5);
+}
+
+#[test]
+fn layout_requires_an_indented_body() {
+  let error = read_multiple("foo --").unwrap_err();
+  assert!(error.contains("`--` requires an indented body"), "{error}");
+  assert!(error.contains("line 1, column 5"), "{error}");
 }
 
 #[test]

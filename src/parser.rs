@@ -509,6 +509,25 @@ enum TokenKind {
   Colon,
   DoubleColon,
   Arrow,
+  DashDash,
+  Indent,
+  Dedent,
+  Sym(String),
+  Int(i64),
+  Float(f64),
+  Str(String),
+  Eof,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+enum RawTokenKind {
+  LParen,
+  RParen,
+  Colon,
+  DoubleColon,
+  Arrow,
+  DashDash,
+  Newline,
   Sym(String),
   Int(i64),
   Float(f64),
@@ -519,6 +538,12 @@ enum TokenKind {
 #[derive(Debug, PartialEq, Clone)]
 struct Token {
   kind: TokenKind,
+  span: Span,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+struct RawToken {
+  kind: RawTokenKind,
   span: Span,
 }
 
@@ -587,50 +612,65 @@ impl<'a> Lexer<'a> {
     loop {
       self.skip_ignored();
       if self.offset == self.source.len() {
-        tokens.push(Token {
-          kind: TokenKind::Eof,
+        tokens.push(RawToken {
+          kind: RawTokenKind::Eof,
           span: self.offset..self.offset,
         });
-        return Ok(tokens);
+        return normalize_layout(self.source, tokens);
       }
 
       let start = self.offset;
       let ch = self.peek_char().expect("offset is before end of source");
       let token = match ch {
+        '\n' => {
+          self.bump_char();
+          RawToken {
+            kind: RawTokenKind::Newline,
+            span: start..self.offset,
+          }
+        }
         '(' => {
           self.bump_char();
-          Token {
-            kind: TokenKind::LParen,
+          RawToken {
+            kind: RawTokenKind::LParen,
             span: start..self.offset,
           }
         }
         ')' => {
           self.bump_char();
-          Token {
-            kind: TokenKind::RParen,
+          RawToken {
+            kind: RawTokenKind::RParen,
             span: start..self.offset,
           }
         }
         ':' if self.source[self.offset..].starts_with("::") => {
           self.bump_char();
           self.bump_char();
-          Token {
-            kind: TokenKind::DoubleColon,
+          RawToken {
+            kind: RawTokenKind::DoubleColon,
             span: start..self.offset,
           }
         }
         ':' => {
           self.bump_char();
-          Token {
-            kind: TokenKind::Colon,
+          RawToken {
+            kind: RawTokenKind::Colon,
             span: start..self.offset,
           }
         }
         '-' if self.source[self.offset..].starts_with("->") => {
           self.bump_char();
           self.bump_char();
-          Token {
-            kind: TokenKind::Arrow,
+          RawToken {
+            kind: RawTokenKind::Arrow,
+            span: start..self.offset,
+          }
+        }
+        '-' if self.source[self.offset..].starts_with("--") => {
+          self.bump_char();
+          self.bump_char();
+          RawToken {
+            kind: RawTokenKind::DashDash,
             span: start..self.offset,
           }
         }
@@ -638,8 +678,8 @@ impl<'a> Lexer<'a> {
           self.bump_char();
           self.bump_char();
           self.bump_char();
-          Token {
-            kind: TokenKind::Sym("...".to_string()),
+          RawToken {
+            kind: RawTokenKind::Sym("...".to_string()),
             span: start..self.offset,
           }
         }
@@ -652,7 +692,10 @@ impl<'a> Lexer<'a> {
 
   fn skip_ignored(&mut self) {
     loop {
-      while self.peek_char().is_some_and(char::is_whitespace) {
+      while self
+        .peek_char()
+        .is_some_and(|ch| ch.is_whitespace() && ch != '\n')
+      {
         self.bump_char();
       }
 
@@ -668,7 +711,7 @@ impl<'a> Lexer<'a> {
     }
   }
 
-  fn lex_string(&mut self) -> Result<Token, ParseError> {
+  fn lex_string(&mut self) -> Result<RawToken, ParseError> {
     let start = self.offset;
     self.bump_char();
     let contents_start = self.offset;
@@ -682,8 +725,8 @@ impl<'a> Lexer<'a> {
           let contents = &self.source[contents_start..contents_end];
           let value = unescape::unescape(contents)
             .ok_or_else(|| ParseError::new(span.clone(), "invalid escape in string literal"))?;
-          return Ok(Token {
-            kind: TokenKind::Str(value),
+          return Ok(RawToken {
+            kind: RawTokenKind::Str(value),
             span,
           });
         }
@@ -708,10 +751,11 @@ impl<'a> Lexer<'a> {
     )
   }
 
-  fn lex_value(&mut self) -> Result<Token, ParseError> {
+  fn lex_value(&mut self) -> Result<RawToken, ParseError> {
     let start = self.offset;
     while self.peek_char().is_some_and(|ch| !is_delimiter(ch))
       && !self.source[self.offset..].starts_with("->")
+      && !self.source[self.offset..].starts_with("--")
       && !self.source[self.offset..].starts_with("...")
     {
       self.bump_char();
@@ -722,9 +766,9 @@ impl<'a> Lexer<'a> {
     let kind = if is_numeric_candidate(text) {
       parse_number(text, span.clone())?
     } else {
-      TokenKind::Sym(text.to_string())
+      RawTokenKind::Sym(text.to_string())
     };
-    Ok(Token { kind, span })
+    Ok(RawToken { kind, span })
   }
 
   fn peek_char(&self) -> Option<char> {
@@ -735,6 +779,231 @@ impl<'a> Lexer<'a> {
     let ch = self.peek_char()?;
     self.offset += ch.len_utf8();
     Some(ch)
+  }
+}
+
+enum LayoutFrame {
+  Pending {
+    opener_indent: usize,
+    marker_span: Span,
+  },
+  Active {
+    indent: usize,
+  },
+}
+
+struct LayoutNormalizer<'a> {
+  source: &'a str,
+  output: Vec<Token>,
+  frames: Vec<LayoutFrame>,
+}
+
+impl<'a> LayoutNormalizer<'a> {
+  fn new(source: &'a str) -> Self {
+    Self {
+      source,
+      output: Vec::new(),
+      frames: Vec::new(),
+    }
+  }
+
+  fn normalize(mut self, raw_tokens: Vec<RawToken>) -> Result<Vec<Token>, ParseError> {
+    let mut line = Vec::new();
+    let mut explicit_paren_depth = 0usize;
+
+    for token in raw_tokens {
+      match token.kind {
+        RawTokenKind::Eof => {
+          self.finish_line(&mut line)?;
+          self.finish_eof(token.span.clone())?;
+          self.output.push(Token {
+            kind: TokenKind::Eof,
+            span: token.span,
+          });
+          return Ok(self.output);
+        }
+        RawTokenKind::Newline if explicit_paren_depth == 0 => {
+          self.finish_line(&mut line)?;
+        }
+        RawTokenKind::Newline => {}
+        RawTokenKind::LParen => {
+          explicit_paren_depth += 1;
+          line.push(token);
+        }
+        RawTokenKind::RParen => {
+          explicit_paren_depth = explicit_paren_depth.saturating_sub(1);
+          line.push(token);
+        }
+        _ => line.push(token),
+      }
+    }
+
+    unreachable!("raw lexer always emits EOF")
+  }
+
+  fn finish_line(&mut self, line: &mut Vec<RawToken>) -> Result<(), ParseError> {
+    if line.is_empty() {
+      return Ok(());
+    }
+
+    let indent = self.line_indent(line[0].span.start)?;
+    self.prepare_for_line(indent, line[0].span.start)?;
+
+    let dashdash_positions = line
+      .iter()
+      .enumerate()
+      .filter_map(|(index, token)| matches!(token.kind, RawTokenKind::DashDash).then_some(index))
+      .collect::<Vec<_>>();
+
+    match dashdash_positions.as_slice() {
+      [] => {
+        for token in line.drain(..) {
+          self.output.push(source_token_from_raw(token));
+        }
+      }
+      [dashdash_index] if *dashdash_index == line.len() - 1 && *dashdash_index > 0 => {
+        let marker = line
+          .pop()
+          .expect("dashdash_index proves a marker token exists");
+        for token in line.drain(..) {
+          self.output.push(source_token_from_raw(token));
+        }
+        self.output.push(Token {
+          kind: TokenKind::DashDash,
+          span: marker.span.clone(),
+        });
+        self.frames.push(LayoutFrame::Pending {
+          opener_indent: indent,
+          marker_span: marker.span,
+        });
+      }
+      [dashdash_index] if *dashdash_index == 0 => {
+        let marker = line[*dashdash_index].span.clone();
+        line.clear();
+        return Err(
+          ParseError::new(marker, "`--` must follow a form head").expected("tokens before `--`"),
+        );
+      }
+      [dashdash_index] => {
+        let marker = line[*dashdash_index].span.clone();
+        line.clear();
+        return Err(ParseError::new(marker, "`--` must end a logical line"));
+      }
+      [first, ..] => {
+        let marker = line[*first].span.clone();
+        line.clear();
+        return Err(ParseError::new(
+          marker,
+          "a logical line can only contain one `--`",
+        ));
+      }
+    }
+    Ok(())
+  }
+
+  fn prepare_for_line(&mut self, indent: usize, line_start: usize) -> Result<(), ParseError> {
+    if let Some(LayoutFrame::Pending {
+      opener_indent,
+      marker_span,
+    }) = self.frames.last()
+    {
+      if indent <= *opener_indent {
+        return Err(
+          ParseError::new(marker_span.clone(), "`--` requires an indented body")
+            .expected("an indented line after `--`"),
+        );
+      }
+      let indent = indent;
+      *self
+        .frames
+        .last_mut()
+        .expect("last frame was just inspected") = LayoutFrame::Active { indent };
+      self.output.push(Token {
+        kind: TokenKind::Indent,
+        span: line_start..line_start,
+      });
+      return Ok(());
+    }
+
+    while matches!(self.frames.last(), Some(LayoutFrame::Active { indent: active }) if indent < *active)
+    {
+      self.frames.pop();
+      self.output.push(Token {
+        kind: TokenKind::Dedent,
+        span: line_start..line_start,
+      });
+    }
+
+    Ok(())
+  }
+
+  fn finish_eof(&mut self, eof_span: Span) -> Result<(), ParseError> {
+    if let Some(LayoutFrame::Pending { marker_span, .. }) = self.frames.last() {
+      return Err(
+        ParseError::new(marker_span.clone(), "`--` requires an indented body")
+          .expected("an indented line after `--`"),
+      );
+    }
+
+    while self.frames.pop().is_some() {
+      self.output.push(Token {
+        kind: TokenKind::Dedent,
+        span: eof_span.clone(),
+      });
+    }
+
+    Ok(())
+  }
+
+  fn line_indent(&self, offset: usize) -> Result<usize, ParseError> {
+    let line_start = self.source[..offset]
+      .rfind('\n')
+      .map_or(0, |index| index + 1);
+    let mut columns = 0usize;
+    let mut cursor = line_start;
+
+    for ch in self.source[line_start..offset].chars() {
+      match ch {
+        ' ' => columns += 1,
+        '\t' => {
+          return Err(ParseError::new(
+            cursor..cursor + ch.len_utf8(),
+            "tabs are not allowed in indentation",
+          ));
+        }
+        '\r' => {}
+        _ => break,
+      }
+      cursor += ch.len_utf8();
+    }
+
+    Ok(columns)
+  }
+}
+
+fn normalize_layout(source: &str, raw_tokens: Vec<RawToken>) -> Result<Vec<Token>, ParseError> {
+  LayoutNormalizer::new(source).normalize(raw_tokens)
+}
+
+fn source_token_from_raw(token: RawToken) -> Token {
+  let kind = match token.kind {
+    RawTokenKind::LParen => TokenKind::LParen,
+    RawTokenKind::RParen => TokenKind::RParen,
+    RawTokenKind::Colon => TokenKind::Colon,
+    RawTokenKind::DoubleColon => TokenKind::DoubleColon,
+    RawTokenKind::Arrow => TokenKind::Arrow,
+    RawTokenKind::DashDash => TokenKind::DashDash,
+    RawTokenKind::Sym(name) => TokenKind::Sym(name),
+    RawTokenKind::Int(value) => TokenKind::Int(value),
+    RawTokenKind::Float(value) => TokenKind::Float(value),
+    RawTokenKind::Str(value) => TokenKind::Str(value),
+    RawTokenKind::Newline | RawTokenKind::Eof => {
+      unreachable!("layout-only raw tokens are handled by the normalizer")
+    }
+  };
+  Token {
+    kind,
+    span: token.span,
   }
 }
 
@@ -751,11 +1020,11 @@ fn is_numeric_candidate(text: &str) -> bool {
   }
 }
 
-fn parse_number(text: &str, span: Span) -> Result<TokenKind, ParseError> {
+fn parse_number(text: &str, span: Span) -> Result<RawTokenKind, ParseError> {
   let unsigned = text.strip_prefix(['+', '-']).unwrap_or(text);
 
   if unsigned.bytes().all(|byte| byte.is_ascii_digit()) {
-    return text.parse::<i64>().map(TokenKind::Int).map_err(|_| {
+    return text.parse::<i64>().map(RawTokenKind::Int).map_err(|_| {
       ParseError::new(
         span,
         format!("integer literal `{text}` is outside the i64 range"),
@@ -785,7 +1054,33 @@ fn parse_number(text: &str, span: Span) -> Result<TokenKind, ParseError> {
       format!("float literal `{text}` is not finite"),
     ));
   }
-  Ok(TokenKind::Float(value))
+  Ok(RawTokenKind::Float(value))
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum FormMode {
+  Paren,
+  Layout,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum FormEnd {
+  RParen,
+  Dedent,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum NonemptyExprContext {
+  Form(&'static str),
+  IfThenBranch,
+  ElseBranch,
+}
+
+struct FnHeader {
+  name: String,
+  params: Vec<(String, Option<TypeAst>)>,
+  return_type: Option<TypeAst>,
+  bounds: Vec<Bound>,
 }
 
 struct Parser {
@@ -807,17 +1102,28 @@ impl Parser {
   }
 
   fn parse_expr(&mut self) -> Result<AST, ParseError> {
+    self.parse_expr_with_layout(true)
+  }
+
+  fn parse_expr_with_layout(&mut self, allow_layout: bool) -> Result<AST, ParseError> {
     let token = self.advance();
     match token.kind {
-      TokenKind::LParen => self.parse_list(token.span.start),
+      TokenKind::LParen => self.parse_list(token.span.start, FormMode::Paren),
       TokenKind::RParen => {
         Err(ParseError::new(token.span, "unexpected `)`").expected("an expression"))
       }
-      TokenKind::Colon | TokenKind::DoubleColon | TokenKind::Arrow => {
+      TokenKind::Colon
+      | TokenKind::DoubleColon
+      | TokenKind::Arrow
+      | TokenKind::DashDash
+      | TokenKind::Indent
+      | TokenKind::Dedent => {
         Err(ParseError::new(token.span, "unexpected type-syntax token").expected("an expression"))
       }
       TokenKind::Sym(name) => {
-        if let Some(((module, name), span)) =
+        if allow_layout && self.has_dashdash_before_form_boundary() {
+          self.parse_form_after_head(token.span.start, token.span.clone(), name, FormMode::Layout)
+        } else if let Some(((module, name), span)) =
           self.parse_qualified_identifier(name.clone(), token.span.clone())?
         {
           Ok(AST::new(ASTKind::FunctionRef(module, name), span))
@@ -834,7 +1140,7 @@ impl Parser {
     }
   }
 
-  fn parse_list(&mut self, start: usize) -> Result<AST, ParseError> {
+  fn parse_list(&mut self, start: usize, mode: FormMode) -> Result<AST, ParseError> {
     if matches!(self.peek().kind, TokenKind::RParen) {
       let close = self.advance();
       return Err(ParseError::new(start..close.span.end, "Empty call"));
@@ -848,44 +1154,35 @@ impl Parser {
     }
 
     match self.peek().kind.clone() {
-      TokenKind::Sym(name) if name == "let" => {
-        self.advance();
-        self.parse_let(start)
+      TokenKind::Sym(name) => {
+        let head = self.advance();
+        self.parse_form_after_head(start, head.span, name, mode)
       }
-      TokenKind::Sym(name) if name == "fn" => {
-        self.advance();
-        self.parse_fn(start)
-      }
-      TokenKind::Sym(name) if name == "struct" => {
-        self.advance();
-        self.parse_struct(start)
-      }
-      TokenKind::Sym(name) if name == "enum" => {
-        self.advance();
-        self.parse_enum(start)
-      }
-      TokenKind::Sym(name) if name == "new" => {
-        self.advance();
-        self.parse_new(start)
-      }
-      TokenKind::Sym(name) if name == "match" => {
-        self.advance();
-        self.parse_match(start)
-      }
-      TokenKind::Sym(name) if name == "if" => {
-        self.advance();
-        self.parse_if(start)
-      }
-      TokenKind::Sym(name) if name == "block" => {
-        self.advance();
-        self.parse_block(start)
-      }
-      TokenKind::Sym(name) => self.parse_fixed_call(start, name),
       _ => self.parse_dynamic_call(start),
     }
   }
 
-  fn parse_let(&mut self, start: usize) -> Result<AST, ParseError> {
+  fn parse_form_after_head(
+    &mut self,
+    start: usize,
+    head_span: Span,
+    name: String,
+    mode: FormMode,
+  ) -> Result<AST, ParseError> {
+    match name.as_str() {
+      "let" => self.parse_let(start, mode),
+      "fn" => self.parse_fn(start, mode),
+      "struct" => self.parse_struct(start, mode),
+      "enum" => self.parse_enum(start, mode),
+      "new" => self.parse_new(start, mode),
+      "match" => self.parse_match(start, mode),
+      "if" => self.parse_if(start, mode),
+      "block" => self.parse_block(start, mode),
+      _ => self.parse_fixed_call_after_head(start, head_span, name, mode),
+    }
+  }
+
+  fn parse_let(&mut self, start: usize, mode: FormMode) -> Result<AST, ParseError> {
     let variable = self.expect_symbol("first argument to `let` must be a symbol")?;
     let annotation = if matches!(self.peek().kind, TokenKind::Colon) {
       self.advance();
@@ -893,8 +1190,9 @@ impl Parser {
     } else {
       None
     };
+    let end = self.enter_form_body(mode, "let")?;
     let expression = self.parse_expr()?;
-    let close = self.expect_close("`let` must have exactly two arguments")?;
+    let close = self.expect_form_end(end, "`let` must have exactly two arguments")?;
     let span = start..close.span.end;
     Ok(AST::new(
       ASTKind::Let(variable.into(), annotation, Box::new(expression)),
@@ -902,7 +1200,27 @@ impl Parser {
     ))
   }
 
-  fn parse_fn(&mut self, start: usize) -> Result<AST, ParseError> {
+  fn parse_fn(&mut self, start: usize, mode: FormMode) -> Result<AST, ParseError> {
+    let header = self.parse_fn_header()?;
+    let (body, close) = self.parse_nonempty_exprs_for_form(mode, "fn")?;
+    let span = start..close.span.end;
+    Ok(AST::new(
+      ASTKind::DefineFn(Function {
+        name: header.name.into(),
+        params: header
+          .params
+          .into_iter()
+          .map(|(name, annotation)| (name.into(), annotation))
+          .collect(),
+        return_type: header.return_type,
+        bounds: header.bounds,
+        code: body,
+      }),
+      span,
+    ))
+  }
+
+  fn parse_fn_header(&mut self) -> Result<FnHeader, ParseError> {
     let name = self.expect_symbol("`fn` name must be a symbol")?;
     let params_open = self.advance();
     if !matches!(params_open.kind, TokenKind::LParen) {
@@ -956,57 +1274,31 @@ impl Parser {
       self.advance();
     }
 
-    if matches!(self.peek().kind, TokenKind::RParen) {
-      return Err(ParseError::new(
-        self.peek().span.clone(),
-        "`fn` must have at least one body expression",
-      ));
-    }
-
-    let mut body = Vec::new();
-    while !matches!(self.peek().kind, TokenKind::RParen) {
-      if matches!(self.peek().kind, TokenKind::Eof) {
-        return Err(
-          ParseError::new(self.peek().span.clone(), "unterminated `fn` form")
-            .expected("a body expression")
-            .expected("`)`"),
-        );
-      }
-      body.push(self.parse_expr()?);
-    }
-    let close = self.advance();
-    let span = start..close.span.end;
-    Ok(AST::new(
-      ASTKind::DefineFn(Function {
-        name: name.into(),
-        params: params
-          .into_iter()
-          .map(|(name, annotation)| (name.into(), annotation))
-          .collect(),
-        return_type,
-        bounds,
-        code: body,
-      }),
-      span,
-    ))
+    Ok(FnHeader {
+      name,
+      params,
+      return_type,
+      bounds,
+    })
   }
 
-  fn parse_struct(&mut self, start: usize) -> Result<AST, ParseError> {
+  fn parse_struct(&mut self, start: usize, mode: FormMode) -> Result<AST, ParseError> {
     let name = self.expect_symbol("`struct` name must be a symbol")?;
+    let end = self.enter_form_body(mode, "struct")?;
     let mut fields = Vec::new();
-    while !matches!(self.peek().kind, TokenKind::RParen) {
+    while !self.at_form_end(end) {
       if matches!(self.peek().kind, TokenKind::Eof) {
         return Err(
           ParseError::new(self.peek().span.clone(), "unterminated `struct` form")
             .expected("a field")
-            .expected("`)`"),
+            .expected(form_end_expected(end)),
         );
       }
       let field = self.expect_symbol("struct field names must be symbols")?;
       self.expect_colon("struct fields require a type annotation")?;
       fields.push((field, self.parse_type()?));
     }
-    let close = self.advance();
+    let close = self.expect_form_end(end, "unterminated `struct` form")?;
     let span = start..close.span.end;
     Ok(AST::new(
       ASTKind::DefineStruct(Struct { name, fields }),
@@ -1014,15 +1306,16 @@ impl Parser {
     ))
   }
 
-  fn parse_enum(&mut self, start: usize) -> Result<AST, ParseError> {
+  fn parse_enum(&mut self, start: usize, mode: FormMode) -> Result<AST, ParseError> {
     let name = self.expect_symbol("`enum` name must be a symbol")?;
+    let end = self.enter_form_body(mode, "enum")?;
     let mut variants = Vec::new();
-    while !matches!(self.peek().kind, TokenKind::RParen) {
+    while !self.at_form_end(end) {
       if matches!(self.peek().kind, TokenKind::Eof) {
         return Err(
           ParseError::new(self.peek().span.clone(), "unterminated `enum` form")
             .expected("a variant")
-            .expected("`)`"),
+            .expected(form_end_expected(end)),
         );
       }
       self.expect_open("enum variants must be parenthesized")?;
@@ -1046,12 +1339,12 @@ impl Parser {
         fields,
       });
     }
-    let close = self.advance();
+    let close = self.expect_form_end(end, "unterminated `enum` form")?;
     let span = start..close.span.end;
     Ok(AST::new(ASTKind::DefineEnum(Enum { name, variants }), span))
   }
 
-  fn parse_new(&mut self, start: usize) -> Result<AST, ParseError> {
+  fn parse_new(&mut self, start: usize, mode: FormMode) -> Result<AST, ParseError> {
     let name = self.expect_symbol("`new` requires a struct name")?;
     let variant = if matches!(self.peek().kind, TokenKind::DoubleColon) {
       self.advance();
@@ -1059,20 +1352,21 @@ impl Parser {
     } else {
       None
     };
+    let end = self.enter_form_body(mode, "new")?;
     let mut fields = Vec::new();
-    while !matches!(self.peek().kind, TokenKind::RParen) {
+    while !self.at_form_end(end) {
       if matches!(self.peek().kind, TokenKind::Eof) {
         return Err(
           ParseError::new(self.peek().span.clone(), "unterminated `new` form")
             .expected("a field initializer")
-            .expected("`)`"),
+            .expected(form_end_expected(end)),
         );
       }
       let field = self.expect_symbol("struct initializer field names must be symbols")?;
       self.expect_colon("struct initializer fields require `:`")?;
       fields.push((field, self.parse_expr()?));
     }
-    let close = self.advance();
+    let close = self.expect_form_end(end, "unterminated `new` form")?;
     let span = start..close.span.end;
     if let Some(variant) = variant {
       Ok(AST::new(ASTKind::NewEnum(name, variant, fields), span))
@@ -1081,15 +1375,20 @@ impl Parser {
     }
   }
 
-  fn parse_match(&mut self, start: usize) -> Result<AST, ParseError> {
-    let scrutinee = self.parse_expr()?;
+  fn parse_match(&mut self, start: usize, mode: FormMode) -> Result<AST, ParseError> {
+    let scrutinee = if mode == FormMode::Layout {
+      self.parse_expr_with_layout(false)?
+    } else {
+      self.parse_expr()?
+    };
+    let end = self.enter_form_body(mode, "match")?;
     let mut arms = Vec::new();
-    while !matches!(self.peek().kind, TokenKind::RParen) {
+    while !self.at_form_end(end) {
       if matches!(self.peek().kind, TokenKind::Eof) {
         return Err(
           ParseError::new(self.peek().span.clone(), "unterminated `match` form")
             .expected("a match arm")
-            .expected("`)`"),
+            .expected(form_end_expected(end)),
         );
       }
       arms.push(self.parse_match_arm()?);
@@ -1100,7 +1399,7 @@ impl Parser {
         "`match` must have at least one arm",
       ));
     }
-    let close = self.advance();
+    let close = self.expect_form_end(end, "unterminated `match` form")?;
     let span = start..close.span.end;
     Ok(AST::new(ASTKind::Match(Box::new(scrutinee), arms), span))
   }
@@ -1141,11 +1440,59 @@ impl Parser {
     Ok(MatchArm { pattern, body })
   }
 
-  fn parse_if(&mut self, start: usize) -> Result<AST, ParseError> {
-    let condition = self.parse_expr()?;
-    let then_branch = self.parse_expr()?;
-    let else_branch = self.parse_expr()?;
-    let close = self.expect_close("`if` must have exactly three arguments: cond, then, else")?;
+  fn parse_if(&mut self, start: usize, mode: FormMode) -> Result<AST, ParseError> {
+    let condition = if mode == FormMode::Layout {
+      self.parse_expr_with_layout(false)?
+    } else {
+      self.parse_expr()?
+    };
+    let (then_branch, else_branch, close) = match mode {
+      FormMode::Paren => {
+        let then_branch = self.parse_expr()?;
+        let else_branch = self.parse_expr()?;
+        let close = self.expect_form_end(
+          FormEnd::RParen,
+          "`if` must have exactly three arguments: cond, then, else",
+        )?;
+        (then_branch, else_branch, close)
+      }
+      FormMode::Layout => {
+        let then_end = self.enter_layout_body(
+          "`if` layout then branch requires `--`",
+          "`if` layout then branch must be indented",
+        )?;
+        let then_exprs =
+          self.parse_nonempty_exprs_until(then_end, NonemptyExprContext::IfThenBranch)?;
+        self.expect_form_end(
+          then_end,
+          nonempty_expr_eof_message(NonemptyExprContext::IfThenBranch),
+        )?;
+
+        let else_token = self.expect_symbol("`if` layout requires an `else` clause")?;
+        if else_token != "else" {
+          return Err(ParseError::new(
+            self.previous_span(),
+            "`if` layout requires an `else` clause",
+          ));
+        }
+
+        let else_end = self.enter_layout_body(
+          "`else` layout branch requires `--`",
+          "`else` layout branch must be indented",
+        )?;
+        let else_exprs =
+          self.parse_nonempty_exprs_until(else_end, NonemptyExprContext::ElseBranch)?;
+        let close = self.expect_form_end(
+          else_end,
+          nonempty_expr_eof_message(NonemptyExprContext::ElseBranch),
+        )?;
+        (
+          implicit_branch_block(then_exprs),
+          implicit_branch_block(else_exprs),
+          close,
+        )
+      }
+    };
     let span = start..close.span.end;
     Ok(AST::new(
       ASTKind::If(
@@ -1157,34 +1504,21 @@ impl Parser {
     ))
   }
 
-  fn parse_block(&mut self, start: usize) -> Result<AST, ParseError> {
-    if matches!(self.peek().kind, TokenKind::RParen) {
-      return Err(ParseError::new(
-        self.peek().span.clone(),
-        "`block` must have at least one expression",
-      ));
-    }
-
-    let mut expressions = Vec::new();
-    while !matches!(self.peek().kind, TokenKind::RParen) {
-      if matches!(self.peek().kind, TokenKind::Eof) {
-        return Err(
-          ParseError::new(self.peek().span.clone(), "unterminated `block` form")
-            .expected("an expression")
-            .expected("`)`"),
-        );
-      }
-      expressions.push(self.parse_expr()?);
-    }
-    let close = self.advance();
+  fn parse_block(&mut self, start: usize, mode: FormMode) -> Result<AST, ParseError> {
+    let (expressions, close) = self.parse_nonempty_exprs_for_form(mode, "block")?;
     let span = start..close.span.end;
     Ok(AST::new(ASTKind::Block(expressions), span))
   }
 
-  fn parse_fixed_call(&mut self, start: usize, name: String) -> Result<AST, ParseError> {
-    let head = self.advance();
-    let qualified = self.parse_qualified_identifier(name.clone(), head.span.clone())?;
-    let (args, close) = self.parse_call_args()?;
+  fn parse_fixed_call_after_head(
+    &mut self,
+    start: usize,
+    head_span: Span,
+    name: String,
+    mode: FormMode,
+  ) -> Result<AST, ParseError> {
+    let qualified = self.parse_qualified_identifier(name.clone(), head_span.clone())?;
+    let (args, close) = self.parse_call_args(mode)?;
     let span = start..close.span.end;
     if let Some(((module, name), _)) = qualified {
       Ok(AST::new(
@@ -1192,7 +1526,7 @@ impl Parser {
         span,
       ))
     } else {
-      let callee = ast_from_symbol(name, head.span);
+      let callee = ast_from_symbol(name, head_span);
       match callee.kind {
         ASTKind::Variable(name) => Ok(AST::new(
           ASTKind::CallFixed(Identifier::Bare(name), args),
@@ -1205,24 +1539,150 @@ impl Parser {
 
   fn parse_dynamic_call(&mut self, start: usize) -> Result<AST, ParseError> {
     let callee = self.parse_expr()?;
-    let (args, close) = self.parse_call_args()?;
+    let (args, close) = self.parse_call_args(FormMode::Paren)?;
     let span = start..close.span.end;
     Ok(AST::new(ASTKind::Call(Box::new(callee), args), span))
   }
 
-  fn parse_call_args(&mut self) -> Result<(Vec<AST>, Token), ParseError> {
+  fn parse_call_args(&mut self, mode: FormMode) -> Result<(Vec<AST>, Token), ParseError> {
     let mut args = Vec::new();
-    while !matches!(self.peek().kind, TokenKind::RParen) {
+    if mode == FormMode::Layout {
+      while !matches!(self.peek().kind, TokenKind::DashDash) {
+        if matches!(
+          self.peek().kind,
+          TokenKind::Eof | TokenKind::RParen | TokenKind::Dedent
+        ) {
+          return Err(
+            ParseError::new(self.peek().span.clone(), "layout call requires `--`").expected("`--`"),
+          );
+        }
+        args.push(self.parse_expr_with_layout(false)?);
+      }
+    }
+
+    let end = self.enter_form_body(mode, "call")?;
+    while !self.at_form_end(end) {
       if matches!(self.peek().kind, TokenKind::Eof) {
         return Err(
           ParseError::new(self.peek().span.clone(), "unterminated call")
             .expected("an argument")
-            .expected("`)`"),
+            .expected(form_end_expected(end)),
         );
       }
       args.push(self.parse_expr()?);
     }
-    Ok((args, self.advance()))
+    Ok((args, self.expect_form_end(end, "unterminated call")?))
+  }
+
+  fn enter_form_body(&mut self, mode: FormMode, form: &'static str) -> Result<FormEnd, ParseError> {
+    match mode {
+      FormMode::Paren => Ok(FormEnd::RParen),
+      FormMode::Layout => self.enter_layout_body(
+        layout_requires_dashdash_message(form),
+        layout_requires_indent_message(form),
+      ),
+    }
+  }
+
+  fn enter_layout_body(
+    &mut self,
+    dashdash_message: &'static str,
+    indent_message: &'static str,
+  ) -> Result<FormEnd, ParseError> {
+    self.expect_dashdash(dashdash_message)?;
+    self.expect_indent(indent_message)?;
+    Ok(FormEnd::Dedent)
+  }
+
+  fn parse_nonempty_exprs_for_form(
+    &mut self,
+    mode: FormMode,
+    form: &'static str,
+  ) -> Result<(Vec<AST>, Token), ParseError> {
+    let context = NonemptyExprContext::Form(form);
+    let end = self.enter_form_body(mode, form)?;
+    let expressions = self.parse_nonempty_exprs_until(end, context)?;
+    let close = self.expect_form_end(end, nonempty_expr_eof_message(context))?;
+    Ok((expressions, close))
+  }
+
+  fn parse_nonempty_exprs_until(
+    &mut self,
+    end: FormEnd,
+    context: NonemptyExprContext,
+  ) -> Result<Vec<AST>, ParseError> {
+    if self.at_form_end(end) {
+      return Err(ParseError::new(
+        self.peek().span.clone(),
+        nonempty_expr_empty_message(context),
+      ));
+    }
+
+    let mut expressions = Vec::new();
+    while !self.at_form_end(end) {
+      if matches!(self.peek().kind, TokenKind::Eof) {
+        return Err(
+          ParseError::new(self.peek().span.clone(), nonempty_expr_eof_message(context))
+            .expected(nonempty_expr_eof_expected(context))
+            .expected(form_end_expected(end)),
+        );
+      }
+      expressions.push(self.parse_expr()?);
+    }
+    Ok(expressions)
+  }
+
+  fn at_form_end(&self, end: FormEnd) -> bool {
+    match end {
+      FormEnd::RParen => matches!(self.peek().kind, TokenKind::RParen),
+      FormEnd::Dedent => matches!(self.peek().kind, TokenKind::Dedent),
+    }
+  }
+
+  fn expect_form_end(&mut self, end: FormEnd, message: &'static str) -> Result<Token, ParseError> {
+    let token = self.advance();
+    let matches = match end {
+      FormEnd::RParen => matches!(token.kind, TokenKind::RParen),
+      FormEnd::Dedent => matches!(token.kind, TokenKind::Dedent),
+    };
+    if matches {
+      Ok(token)
+    } else {
+      Err(ParseError::new(token.span, message).expected(form_end_expected(end)))
+    }
+  }
+
+  fn expect_dashdash(&mut self, message: &'static str) -> Result<Token, ParseError> {
+    let token = self.advance();
+    if matches!(token.kind, TokenKind::DashDash) {
+      Ok(token)
+    } else {
+      Err(ParseError::new(token.span, message).expected("`--`"))
+    }
+  }
+
+  fn expect_indent(&mut self, message: &'static str) -> Result<Token, ParseError> {
+    let token = self.advance();
+    if matches!(token.kind, TokenKind::Indent) {
+      Ok(token)
+    } else {
+      Err(ParseError::new(token.span, message).expected("an indented body"))
+    }
+  }
+
+  fn has_dashdash_before_form_boundary(&self) -> bool {
+    let mut paren_depth = 0usize;
+    for token in self.tokens.iter().skip(self.current) {
+      match token.kind {
+        TokenKind::DashDash if paren_depth == 0 => return true,
+        TokenKind::LParen => paren_depth += 1,
+        TokenKind::RParen if paren_depth == 0 => return false,
+        TokenKind::RParen => paren_depth -= 1,
+        TokenKind::Dedent | TokenKind::Eof if paren_depth == 0 => return false,
+        _ => {}
+      }
+    }
+    false
   }
 
   fn parse_qualified_identifier(
@@ -1416,6 +1876,90 @@ fn ast_from_variable_or_field_access(name: String, span: Span) -> AST {
     );
   }
   ast
+}
+
+fn implicit_branch_block(expressions: Vec<AST>) -> AST {
+  if expressions.len() == 1 {
+    return expressions
+      .into_iter()
+      .next()
+      .expect("len() proves one expression exists");
+  }
+
+  let start = expressions
+    .first()
+    .expect("caller only builds branches from nonempty expression lists")
+    .span
+    .start;
+  let end = expressions
+    .last()
+    .expect("caller only builds branches from nonempty expression lists")
+    .span
+    .end;
+  AST::new(ASTKind::Block(expressions), start..end)
+}
+
+fn layout_requires_dashdash_message(form: &'static str) -> &'static str {
+  match form {
+    "let" => "`let` layout body requires `--`",
+    "fn" => "`fn` layout body requires `--`",
+    "struct" => "`struct` layout body requires `--`",
+    "enum" => "`enum` layout body requires `--`",
+    "new" => "`new` layout body requires `--`",
+    "match" => "`match` layout body requires `--`",
+    "block" => "`block` layout body requires `--`",
+    "call" => "layout call body requires `--`",
+    _ => "layout body requires `--`",
+  }
+}
+
+fn layout_requires_indent_message(form: &'static str) -> &'static str {
+  match form {
+    "let" => "`let` layout body must be indented",
+    "fn" => "`fn` layout body must be indented",
+    "struct" => "`struct` layout body must be indented",
+    "enum" => "`enum` layout body must be indented",
+    "new" => "`new` layout body must be indented",
+    "match" => "`match` layout body must be indented",
+    "block" => "`block` layout body must be indented",
+    "call" => "layout call body must be indented",
+    _ => "layout body must be indented",
+  }
+}
+
+fn form_end_expected(end: FormEnd) -> &'static str {
+  match end {
+    FormEnd::RParen => "`)`",
+    FormEnd::Dedent => "dedent",
+  }
+}
+
+fn nonempty_expr_empty_message(context: NonemptyExprContext) -> &'static str {
+  match context {
+    NonemptyExprContext::Form("fn") => "`fn` must have at least one body expression",
+    NonemptyExprContext::Form("block") => "`block` must have at least one expression",
+    NonemptyExprContext::Form(_) => "form must have at least one expression",
+    NonemptyExprContext::IfThenBranch => "`if` then branch must have at least one expression",
+    NonemptyExprContext::ElseBranch => "`else` branch must have at least one expression",
+  }
+}
+
+fn nonempty_expr_eof_message(context: NonemptyExprContext) -> &'static str {
+  match context {
+    NonemptyExprContext::Form("fn") => "unterminated `fn` form",
+    NonemptyExprContext::Form("block") => "unterminated `block` form",
+    NonemptyExprContext::Form(_) => "unterminated form",
+    NonemptyExprContext::IfThenBranch => "unterminated `if` then branch",
+    NonemptyExprContext::ElseBranch => "unterminated `else` branch",
+  }
+}
+
+fn nonempty_expr_eof_expected(context: NonemptyExprContext) -> &'static str {
+  match context {
+    NonemptyExprContext::Form("fn") => "a body expression",
+    NonemptyExprContext::Form(_) | NonemptyExprContext::ElseBranch => "an expression",
+    NonemptyExprContext::IfThenBranch => "a then-branch expression",
+  }
 }
 
 fn parse_internal(source: &str) -> Result<Vec<AST>, ParseError> {
