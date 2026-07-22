@@ -1493,7 +1493,7 @@ impl Parser {
       let wildcard = self.expect_symbol("match arms require a pattern")?;
       if wildcard != "_" {
         return Err(ParseError::new(
-          self.previous_span(),
+          self.previous_token().span.clone(),
           "default match arm must use `_`",
         ));
       }
@@ -1727,7 +1727,7 @@ impl Parser {
   fn expect_layout_line_end(&mut self, message: &'static str) -> Result<Token, ParseError> {
     match self.peek().kind {
       TokenKind::Newline => Ok(self.advance()),
-      TokenKind::Dedent | TokenKind::Eof => Ok(self.previous_token()),
+      TokenKind::Dedent | TokenKind::Eof => Ok(self.previous_token().clone()),
       _ => Err(ParseError::new(self.peek().span.clone(), message).expected("end of line")),
     }
   }
@@ -1924,18 +1924,14 @@ impl Parser {
     }
   }
 
-  fn previous_span(&self) -> Span {
-    self.tokens[self.current.saturating_sub(1)].span.clone()
-  }
-
-  fn previous_token(&self) -> Token {
-    self.tokens[self.current.saturating_sub(1)].clone()
+  fn previous_token(&self) -> &Token {
+    &self.tokens[self.current.saturating_sub(1)]
   }
 
   fn at_layout_line_start(&self) -> bool {
     self.current == 0
       || matches!(
-        self.tokens[self.current.saturating_sub(1)].kind,
+        self.previous_token().kind,
         TokenKind::Newline | TokenKind::Indent | TokenKind::Dedent
       )
   }
