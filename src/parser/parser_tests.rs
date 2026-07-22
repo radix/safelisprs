@@ -585,6 +585,34 @@ fn layout_preserves_real_token_spans() {
 }
 
 #[test]
+fn layout_normalizer_omits_newlines_next_to_indents_and_dedents() {
+  let tokens = Lexer::new(
+    "fn main () -> Int
+  let x 1
+  x
+let y 2",
+  )
+  .lex()
+  .unwrap();
+
+  assert!(
+    tokens.windows(2).all(|window| !matches!(
+      (&window[0].kind, &window[1].kind),
+      (TokenKind::Newline, TokenKind::Indent | TokenKind::Dedent)
+        | (TokenKind::Indent | TokenKind::Dedent, TokenKind::Newline)
+    )),
+    "tokens: {tokens:?}",
+  );
+  assert!(
+    tokens.windows(3).any(|window| matches!(
+      (&window[0].kind, &window[1].kind, &window[2].kind),
+      (TokenKind::Int(1), TokenKind::Newline, TokenKind::Sym(name)) if name == "x"
+    )),
+    "tokens: {tokens:?}",
+  );
+}
+
+#[test]
 fn layout_requires_an_indented_body() {
   let error = read_multiple("fn main () -> Int").unwrap_err();
   assert!(

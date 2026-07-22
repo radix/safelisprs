@@ -825,6 +825,7 @@ struct LayoutNormalizer<'a> {
   source: &'a str,
   output: Vec<Token>,
   indent_stack: Vec<usize>,
+  pending_line_end: Option<Span>,
   pending_layout: Option<usize>,
 }
 
@@ -834,6 +835,7 @@ impl<'a> LayoutNormalizer<'a> {
       source,
       output: Vec::new(),
       indent_stack: vec![0],
+      pending_line_end: None,
       pending_layout: None,
     }
   }
@@ -888,12 +890,7 @@ impl<'a> LayoutNormalizer<'a> {
     for token in line.drain(..) {
       self.output.push(token);
     }
-    if let Some(span) = newline_span {
-      self.output.push(Token {
-        kind: TokenKind::Newline,
-        span,
-      });
-    }
+    self.pending_line_end = newline_span;
     if opens_layout_body {
       self.pending_layout = Some(indent);
     }
@@ -902,6 +899,7 @@ impl<'a> LayoutNormalizer<'a> {
 
   fn prepare_for_line(&mut self, indent: usize, line_start: usize) -> Result<(), ParseError> {
     if let Some(opener_indent) = self.pending_layout.take() {
+      self.pending_line_end = None;
       if indent > opener_indent {
         self.indent_stack.push(indent);
         self.output.push(Token {
@@ -918,6 +916,7 @@ impl<'a> LayoutNormalizer<'a> {
       .expect("indent stack always contains root indent");
     if indent > current {
       if self.indent_stack.len() == 1 {
+        self.flush_pending_line_end();
         return Ok(());
       }
       return Err(ParseError::new(
@@ -927,9 +926,11 @@ impl<'a> LayoutNormalizer<'a> {
     }
 
     if indent == current {
+      self.flush_pending_line_end();
       return Ok(());
     }
 
+    self.pending_line_end = None;
     while indent
       < *self
         .indent_stack
@@ -960,6 +961,7 @@ impl<'a> LayoutNormalizer<'a> {
 
   fn finish_eof(&mut self, eof_span: Span) -> Result<(), ParseError> {
     self.pending_layout = None;
+    self.pending_line_end = None;
     while self.indent_stack.len() > 1 {
       self.indent_stack.pop();
       self.output.push(Token {
@@ -969,6 +971,15 @@ impl<'a> LayoutNormalizer<'a> {
     }
 
     Ok(())
+  }
+
+  fn flush_pending_line_end(&mut self) {
+    if let Some(span) = self.pending_line_end.take() {
+      self.output.push(Token {
+        kind: TokenKind::Newline,
+        span,
+      });
+    }
   }
 
   fn line_indent(&self, offset: usize) -> Result<usize, ParseError> {
@@ -1505,7 +1516,7 @@ impl Parser {
   }
 
   fn parse_match_arm_body(&mut self, mode: FormMode) -> Result<AST, ParseError> {
-    if mode == FormMode::Layout && matches!(self.peek().kind, TokenKind::Newline) {
+    if mode == FormMode::Layout && matches!(self.peek().kind, TokenKind::Indent) {
       let body_end = self.enter_layout_body("match arm")?;
       let expressions =
         self.parse_nonempty_exprs_until(body_end, NonemptyExprContext::MatchArmBody)?;
@@ -1641,7 +1652,6 @@ impl Parser {
   }
 
   fn enter_layout_body(&mut self, form: &'static str) -> Result<FormEnd, ParseError> {
-    self.expect_layout_line_end(layout_requires_newline_message(form))?;
     self.expect_indent(layout_requires_indent_message(form))?;
     Ok(FormEnd::Dedent)
   }
@@ -2017,22 +2027,6 @@ fn is_form_head_token(kind: &TokenKind) -> bool {
       | TokenKind::If
       | TokenKind::Block
   )
-}
-
-fn layout_requires_newline_message(form: &'static str) -> &'static str {
-  match form {
-    "fn" => "`fn` layout body must start on the next line",
-    "struct" => "`struct` layout body must start on the next line",
-    "enum" => "`enum` layout body must start on the next line",
-    "new" => "`new` layout body must start on the next line",
-    "match" => "`match` layout body must start on the next line",
-    "match arm" => "match arm body must start on the next line",
-    "if" => "`if` then branch must start on the next line",
-    "else" => "`else` branch must start on the next line",
-    "block" => "`block` layout body must start on the next line",
-    "call" => "layout call body must start on the next line",
-    _ => "layout body must start on the next line",
-  }
 }
 
 fn layout_requires_indent_message(form: &'static str) -> &'static str {
