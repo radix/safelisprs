@@ -1198,8 +1198,7 @@ impl Parser {
   }
 
   fn parse_list(&mut self, start: usize, mode: FormMode) -> Result<AST, ParseError> {
-    if matches!(self.peek().kind, TokenKind::RParen) {
-      let close = self.advance();
+    if let Some(close) = self.check_token(TokenKind::RParen) {
       return Err(ParseError::new(start..close.span.end, "Empty call"));
     }
     if matches!(self.peek().kind, TokenKind::Eof) {
@@ -1244,8 +1243,7 @@ impl Parser {
 
   fn parse_let(&mut self, start: usize, mode: FormMode) -> Result<AST, ParseError> {
     let variable = self.expect_symbol("first argument to `let` must be a symbol")?;
-    let annotation = if matches!(self.peek().kind, TokenKind::Colon) {
-      self.advance();
+    let annotation = if self.check_token(TokenKind::Colon).is_some() {
       Some(self.parse_type()?)
     } else {
       None
@@ -1306,16 +1304,14 @@ impl Parser {
     }
     self.advance();
 
-    let return_type = if matches!(self.peek().kind, TokenKind::Arrow) {
-      self.advance();
+    let return_type = if self.check_token(TokenKind::Arrow).is_some() {
       Some(self.parse_type()?)
     } else {
       None
     };
 
     let mut bounds = Vec::new();
-    if matches!(self.peek().kind, TokenKind::Where) {
-      self.advance();
+    if self.check_token(TokenKind::Where).is_some() {
       self.expect(
         TokenKind::LParen,
         "`where` requires a parenthesized bound list",
@@ -1420,8 +1416,7 @@ impl Parser {
 
   fn parse_new(&mut self, start: usize, mode: FormMode) -> Result<AST, ParseError> {
     let name = self.expect_symbol("`new` requires a struct name")?;
-    let variant = if matches!(self.peek().kind, TokenKind::DoubleColon) {
-      self.advance();
+    let variant = if self.check_token(TokenKind::DoubleColon).is_some() {
       Some(self.expect_symbol("enum construction requires a variant name after `::`")?)
     } else {
       None
@@ -1484,8 +1479,7 @@ impl Parser {
   }
 
   fn parse_match_arm(&mut self, mode: FormMode) -> Result<MatchArm, ParseError> {
-    let pattern = if matches!(self.peek().kind, TokenKind::LParen) {
-      self.advance();
+    let pattern = if self.check_token(TokenKind::LParen).is_some() {
       let variant = self.expect_symbol("match variant patterns must name a variant")?;
       let mut fields = Vec::new();
       while !matches!(self.peek().kind, TokenKind::RParen) {
@@ -1573,8 +1567,7 @@ impl Parser {
   }
 
   fn parse_layout_else_branch(&mut self) -> Result<(AST, Token), ParseError> {
-    if matches!(self.peek().kind, TokenKind::If) {
-      let if_token = self.advance();
+    if let Some(if_token) = self.check_token(TokenKind::If) {
       let branch = self.parse_if(if_token.span.start, FormMode::Layout)?;
       let close = Token {
         span: branch.span.clone(),
@@ -1759,10 +1752,9 @@ impl Parser {
     module: String,
     start_span: Span,
   ) -> Result<Option<((String, String), Span)>, ParseError> {
-    if !matches!(self.peek().kind, TokenKind::DoubleColon) {
+    if self.check_token(TokenKind::DoubleColon).is_none() {
       return Ok(None);
     }
-    self.advance();
     let token = self.advance();
     match token.kind {
       TokenKind::Sym(name) => {
@@ -1850,8 +1842,8 @@ impl Parser {
           .expected("`)`"),
         );
       }
-      if matches!(self.peek().kind, TokenKind::Ellipsis) {
-        let span = self.advance().span;
+      if let Some(ellipsis) = self.check_token(TokenKind::Ellipsis) {
+        let span = ellipsis.span;
         if rest.is_some() {
           return Err(ParseError::new(
             span,
@@ -1881,14 +1873,16 @@ impl Parser {
     }
   }
 
+  fn check_token(&mut self, token_kind: TokenKind) -> Option<Token> {
+    (self.peek().kind == token_kind).then(|| self.advance())
+  }
+
   fn peek(&self) -> &Token {
     &self.tokens[self.current]
   }
 
   fn skip_newlines(&mut self) {
-    while matches!(self.peek().kind, TokenKind::Newline) {
-      self.advance();
-    }
+    while self.check_token(TokenKind::Newline).is_some() {}
   }
 
   fn previous_token(&self) -> &Token {
