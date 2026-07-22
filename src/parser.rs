@@ -638,26 +638,62 @@ pub(crate) fn source_position(source: &str, offset: usize) -> (usize, usize) {
 }
 
 struct Lexer<'a> {
+  /// Original source text. Spans are byte offsets into this string.
   source: &'a str,
+  /// Current byte offset into `source`.
   offset: usize,
+  /// Final token stream consumed by the parser, including layout tokens.
+  output: Vec<Token>,
+  /// Number of unmatched open-parens. Newlines are only significant when this is 0.
+  paren_depth: usize,
+  /// Stack of active layout indentation columns.
+  indent_stack: Vec<usize>,
+  /// The current line's indentation column.
+  line_indent: usize,
+  /// Track the starting token to know if it potentially opens layout (fn/match/etc).
+  line_first: Option<TokenKind>,
+  /// Deferred newline from the previous logical line. It is emitted only when
+  /// the next line stays in the same layout block.
+  pending_line_end: Option<Span>,
+  /// Indentation column of a line that opened a layout body. The next real line
+  /// must be indented further to produce an `Indent`.
+  pending_layout: Option<usize>,
 }
 
 impl<'a> Lexer<'a> {
   fn new(source: &'a str) -> Self {
-    Self { source, offset: 0 }
+    Self {
+      source,
+      offset: 0,
+      output: Vec::new(),
+      paren_depth: 0,
+      indent_stack: vec![0],
+      line_indent: 0,
+      line_first: None,
+      pending_line_end: None,
+      pending_layout: None,
+    }
   }
 
   fn lex(mut self) -> Result<Vec<Token>, ParseError> {
-    let mut tokens = Vec::new();
-
     loop {
       self.skip_ignored();
       if self.offset == self.source.len() {
-        tokens.push(Token {
+        self.finish_line(None);
+        self.pending_layout = None;
+        self.pending_line_end = None;
+        while self.indent_stack.len() > 1 {
+          self.indent_stack.pop();
+          self.output.push(Token {
+            kind: TokenKind::Dedent,
+            span: self.offset..self.offset,
+          });
+        }
+        self.output.push(Token {
           kind: TokenKind::Eof,
           span: self.offset..self.offset,
         });
-        return normalize_layout(self.source, tokens);
+        return Ok(self.output);
       }
 
       let start = self.offset;
@@ -727,7 +763,130 @@ impl<'a> Lexer<'a> {
         '"' => self.lex_string()?,
         _ => self.lex_value()?,
       };
-      tokens.push(token);
+
+      match token.kind {
+        TokenKind::Newline if self.paren_depth == 0 => self.finish_line(Some(token.span)),
+        TokenKind::Newline => {}
+        TokenKind::LParen => {
+          self.push_line_token(token)?;
+          self.paren_depth += 1;
+        }
+        TokenKind::RParen => {
+          self.push_line_token(token)?;
+          self.paren_depth = self.paren_depth.saturating_sub(1);
+        }
+        _ => {
+          self.push_line_token(token)?;
+        }
+      }
+    }
+  }
+
+  fn push_line_token(&mut self, token: Token) -> Result<(), ParseError> {
+    if self.line_first.is_none() {
+      let indent = self.source_indent(token.span.start)?;
+      self.prepare_for_line(indent, token.span.start)?;
+      self.line_indent = indent;
+      self.line_first = Some(token.kind.clone());
+    }
+
+    self.output.push(token);
+    Ok(())
+  }
+
+  fn finish_line(&mut self, newline_span: Option<Span>) {
+    let Some(first) = self.line_first.take() else {
+      return;
+    };
+
+    self.pending_line_end = newline_span;
+    if matches!(
+      self.output.last().map(|token| &token.kind),
+      Some(TokenKind::FatArrow)
+    ) || matches!(
+      first,
+      TokenKind::Fn
+        | TokenKind::Struct
+        | TokenKind::Enum
+        | TokenKind::New
+        | TokenKind::Match
+        | TokenKind::If
+        | TokenKind::Else
+        | TokenKind::Block
+    ) {
+      self.pending_layout = Some(self.line_indent);
+    }
+    self.line_indent = 0;
+  }
+
+  fn prepare_for_line(&mut self, indent: usize, line_start: usize) -> Result<(), ParseError> {
+    if let Some(opener_indent) = self.pending_layout.take() {
+      self.pending_line_end = None;
+      if indent > opener_indent {
+        self.indent_stack.push(indent);
+        self.output.push(Token {
+          kind: TokenKind::Indent,
+          span: line_start..line_start,
+        });
+        return Ok(());
+      }
+    }
+
+    let current = *self
+      .indent_stack
+      .last()
+      .expect("indent stack always contains root indent");
+    if indent > current {
+      if self.indent_stack.len() == 1 {
+        self.flush_pending_line_end();
+        return Ok(());
+      }
+      return Err(ParseError::new(
+        line_start..line_start,
+        "unexpected indentation",
+      ));
+    }
+
+    if indent == current {
+      self.flush_pending_line_end();
+      return Ok(());
+    }
+
+    self.pending_line_end = None;
+    while indent
+      < *self
+        .indent_stack
+        .last()
+        .expect("indent stack always contains root indent")
+    {
+      self.indent_stack.pop();
+      self.output.push(Token {
+        kind: TokenKind::Dedent,
+        span: line_start..line_start,
+      });
+    }
+
+    if indent
+      != *self
+        .indent_stack
+        .last()
+        .expect("indent stack always contains root indent")
+    {
+      return Err(ParseError::new(
+        line_start..line_start,
+        "inconsistent indentation",
+      ));
+    }
+
+    Ok(())
+  }
+
+  fn flush_pending_line_end(&mut self) {
+    if let Some(span) = self.pending_line_end.take() {
+      self.output.push(Token {
+        kind: TokenKind::Newline,
+        span,
+      });
     }
   }
 
@@ -819,170 +978,8 @@ impl<'a> Lexer<'a> {
     self.offset += ch.len_utf8();
     Some(ch)
   }
-}
 
-struct LayoutNormalizer<'a> {
-  source: &'a str,
-  output: Vec<Token>,
-  indent_stack: Vec<usize>,
-  pending_line_end: Option<Span>,
-  pending_layout: Option<usize>,
-}
-
-impl<'a> LayoutNormalizer<'a> {
-  fn new(source: &'a str) -> Self {
-    Self {
-      source,
-      output: Vec::new(),
-      indent_stack: vec![0],
-      pending_line_end: None,
-      pending_layout: None,
-    }
-  }
-
-  fn normalize(mut self, tokens: Vec<Token>) -> Result<Vec<Token>, ParseError> {
-    let mut line = Vec::new();
-    let mut explicit_paren_depth = 0usize;
-
-    for token in tokens {
-      match token.kind {
-        TokenKind::Eof => {
-          self.finish_line(&mut line, None)?;
-          self.finish_eof(token.span.clone())?;
-          self.output.push(Token {
-            kind: TokenKind::Eof,
-            span: token.span,
-          });
-          return Ok(self.output);
-        }
-        TokenKind::Newline if explicit_paren_depth == 0 => {
-          self.finish_line(&mut line, Some(token.span))?;
-        }
-        TokenKind::Newline => {}
-        TokenKind::LParen => {
-          explicit_paren_depth += 1;
-          line.push(token);
-        }
-        TokenKind::RParen => {
-          explicit_paren_depth = explicit_paren_depth.saturating_sub(1);
-          line.push(token);
-        }
-        _ => line.push(token),
-      }
-    }
-
-    unreachable!("raw lexer always emits EOF")
-  }
-
-  fn finish_line(
-    &mut self,
-    line: &mut Vec<Token>,
-    newline_span: Option<Span>,
-  ) -> Result<(), ParseError> {
-    if line.is_empty() {
-      return Ok(());
-    }
-
-    let indent = self.line_indent(line[0].span.start)?;
-    self.prepare_for_line(indent, line[0].span.start)?;
-    let opens_layout_body = line_opens_layout_body(line.as_slice());
-
-    for token in line.drain(..) {
-      self.output.push(token);
-    }
-    self.pending_line_end = newline_span;
-    if opens_layout_body {
-      self.pending_layout = Some(indent);
-    }
-    Ok(())
-  }
-
-  fn prepare_for_line(&mut self, indent: usize, line_start: usize) -> Result<(), ParseError> {
-    if let Some(opener_indent) = self.pending_layout.take() {
-      self.pending_line_end = None;
-      if indent > opener_indent {
-        self.indent_stack.push(indent);
-        self.output.push(Token {
-          kind: TokenKind::Indent,
-          span: line_start..line_start,
-        });
-        return Ok(());
-      }
-    }
-
-    let current = *self
-      .indent_stack
-      .last()
-      .expect("indent stack always contains root indent");
-    if indent > current {
-      if self.indent_stack.len() == 1 {
-        self.flush_pending_line_end();
-        return Ok(());
-      }
-      return Err(ParseError::new(
-        line_start..line_start,
-        "unexpected indentation",
-      ));
-    }
-
-    if indent == current {
-      self.flush_pending_line_end();
-      return Ok(());
-    }
-
-    self.pending_line_end = None;
-    while indent
-      < *self
-        .indent_stack
-        .last()
-        .expect("indent stack always contains root indent")
-    {
-      self.indent_stack.pop();
-      self.output.push(Token {
-        kind: TokenKind::Dedent,
-        span: line_start..line_start,
-      });
-    }
-
-    if indent
-      != *self
-        .indent_stack
-        .last()
-        .expect("indent stack always contains root indent")
-    {
-      return Err(ParseError::new(
-        line_start..line_start,
-        "inconsistent indentation",
-      ));
-    }
-
-    Ok(())
-  }
-
-  fn finish_eof(&mut self, eof_span: Span) -> Result<(), ParseError> {
-    self.pending_layout = None;
-    self.pending_line_end = None;
-    while self.indent_stack.len() > 1 {
-      self.indent_stack.pop();
-      self.output.push(Token {
-        kind: TokenKind::Dedent,
-        span: eof_span.clone(),
-      });
-    }
-
-    Ok(())
-  }
-
-  fn flush_pending_line_end(&mut self) {
-    if let Some(span) = self.pending_line_end.take() {
-      self.output.push(Token {
-        kind: TokenKind::Newline,
-        span,
-      });
-    }
-  }
-
-  fn line_indent(&self, offset: usize) -> Result<usize, ParseError> {
+  fn source_indent(&self, offset: usize) -> Result<usize, ParseError> {
     let line_start = self.source[..offset]
       .rfind('\n')
       .map_or(0, |index| index + 1);
@@ -1006,33 +1003,6 @@ impl<'a> LayoutNormalizer<'a> {
 
     Ok(columns)
   }
-}
-
-fn normalize_layout(source: &str, tokens: Vec<Token>) -> Result<Vec<Token>, ParseError> {
-  LayoutNormalizer::new(source).normalize(tokens)
-}
-
-fn line_opens_layout_body(line: &[Token]) -> bool {
-  if matches!(
-    line.last().map(|token| &token.kind),
-    Some(TokenKind::FatArrow)
-  ) {
-    return true;
-  }
-
-  matches!(
-    line.first().map(|token| &token.kind),
-    Some(
-      TokenKind::Fn
-        | TokenKind::Struct
-        | TokenKind::Enum
-        | TokenKind::New
-        | TokenKind::Match
-        | TokenKind::If
-        | TokenKind::Else
-        | TokenKind::Block
-    )
-  )
 }
 
 fn identifier_token_kind(text: &str) -> TokenKind {

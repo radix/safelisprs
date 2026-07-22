@@ -585,7 +585,7 @@ fn layout_preserves_real_token_spans() {
 }
 
 #[test]
-fn layout_normalizer_omits_newlines_next_to_indents_and_dedents() {
+fn lexer_omits_newlines_next_to_indents_and_dedents() {
   let tokens = Lexer::new(
     "fn main () -> Int
   let x 1
