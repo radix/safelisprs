@@ -582,7 +582,7 @@ struct ParseError {
   span: Span,
   message: String,
   annotations: Vec<String>,
-  expected: Vec<&'static str>,
+  expected: Vec<String>,
 }
 
 impl ParseError {
@@ -600,8 +600,8 @@ impl ParseError {
     self
   }
 
-  fn expected(mut self, expected: &'static str) -> Self {
-    self.expected.push(expected);
+  fn expected(mut self, expected: impl Into<String>) -> Self {
+    self.expected.push(expected.into());
     self
   }
 
@@ -618,9 +618,9 @@ impl ParseError {
     format!("line {line}, column {column}: {}", parts.join("; "))
   }
 
-  fn unexpected(token: Token, expected: &'static str) -> Self {
+  fn unexpected(token: Token, expected: impl Into<String>) -> Self {
     let message = format!("unexpected {}", token.kind);
-    Self::new(token.span, message).expected(expected)
+    Self::new(token.span, message).expected(expected.into())
   }
 }
 
@@ -1286,12 +1286,7 @@ impl Parser {
 
   fn parse_fn_header(&mut self) -> Result<FnHeader, ParseError> {
     let name = self.expect_symbol("`fn` name must be a symbol")?;
-    let params_open = self.advance();
-    if !matches!(params_open.kind, TokenKind::LParen) {
-      return Err(
-        ParseError::new(params_open.span, "`fn` requires a parameter list").expected("`(`"),
-      );
-    }
+    self.expect(TokenKind::LParen, "`fn` requires a parameter list")?;
 
     let mut params = Vec::new();
     while !matches!(self.peek().kind, TokenKind::RParen) {
@@ -1303,7 +1298,10 @@ impl Parser {
         );
       }
       let param = self.expect_symbol("Parameters must be symbols")?;
-      self.expect_colon("function parameters require a type annotation")?;
+      self.expect(
+        TokenKind::Colon,
+        "function parameters require a type annotation",
+      )?;
       params.push((param, Some(self.parse_type()?)));
     }
     self.advance();
@@ -1318,9 +1316,12 @@ impl Parser {
     let mut bounds = Vec::new();
     if matches!(self.peek().kind, TokenKind::Where) {
       self.advance();
-      self.expect_open("`where` requires a parenthesized bound list")?;
+      self.expect(
+        TokenKind::LParen,
+        "`where` requires a parenthesized bound list",
+      )?;
       while !matches!(self.peek().kind, TokenKind::RParen) {
-        self.expect_open("each bound must be parenthesized")?;
+        self.expect(TokenKind::LParen, "each bound must be parenthesized")?;
         let var = self.expect_symbol("a bound must name a type variable")?;
         let mut traits = Vec::new();
         while !matches!(self.peek().kind, TokenKind::RParen) {
@@ -1360,7 +1361,7 @@ impl Parser {
         );
       }
       let field = self.expect_symbol("struct field names must be symbols")?;
-      self.expect_colon("struct fields require a type annotation")?;
+      self.expect(TokenKind::Colon, "struct fields require a type annotation")?;
       fields.push((field, self.parse_type()?));
       self.finish_layout_item_line(mode, "struct fields must end at the end of the line")?;
       self.skip_newlines();
@@ -1386,7 +1387,7 @@ impl Parser {
             .expected(form_end_expected(end)),
         );
       }
-      self.expect_open("enum variants must be parenthesized")?;
+      self.expect(TokenKind::LParen, "enum variants must be parenthesized")?;
       let variant = self.expect_symbol("enum variant names must be symbols")?;
       let mut fields = Vec::new();
       while !matches!(self.peek().kind, TokenKind::RParen) {
@@ -1398,7 +1399,10 @@ impl Parser {
           );
         }
         let field = self.expect_symbol("enum variant field names must be symbols")?;
-        self.expect_colon("enum variant fields require a type annotation")?;
+        self.expect(
+          TokenKind::Colon,
+          "enum variant fields require a type annotation",
+        )?;
         fields.push((field, self.parse_type()?));
       }
       self.advance();
@@ -1434,7 +1438,7 @@ impl Parser {
         );
       }
       let field = self.expect_symbol("struct initializer field names must be symbols")?;
-      self.expect_colon("struct initializer fields require `:`")?;
+      self.expect(TokenKind::Colon, "struct initializer fields require `:`")?;
       fields.push((field, self.parse_expr()?));
       self.finish_layout_item_line(
         mode,
@@ -1510,7 +1514,7 @@ impl Parser {
       }
       MatchPattern::Default
     };
-    self.expect_arrow_arm()?;
+    self.expect(TokenKind::FatArrow, "match arms require `=>`")?;
     let body = self.parse_match_arm_body(mode)?;
     Ok(MatchArm { pattern, body })
   }
@@ -1551,7 +1555,7 @@ impl Parser {
           nonempty_expr_eof_message(NonemptyExprContext::IfThenBranch),
         )?;
 
-        self.expect_else("`if` layout requires an `else` clause")?;
+        self.expect(TokenKind::Else, "`if` layout requires an `else` clause")?;
 
         let (else_branch, close) = self.parse_layout_else_branch()?;
         (implicit_branch_block(then_exprs), else_branch, close)
@@ -1652,7 +1656,7 @@ impl Parser {
   }
 
   fn enter_layout_body(&mut self, form: &'static str) -> Result<FormEnd, ParseError> {
-    self.expect_indent(layout_requires_indent_message(form))?;
+    self.expect(TokenKind::Indent, layout_requires_indent_message(form))?;
     Ok(FormEnd::Dedent)
   }
 
@@ -1725,15 +1729,6 @@ impl Parser {
     }
   }
 
-  fn expect_indent(&mut self, message: &'static str) -> Result<Token, ParseError> {
-    let token = self.advance();
-    if matches!(token.kind, TokenKind::Indent) {
-      Ok(token)
-    } else {
-      Err(ParseError::new(token.span, message).expected("an indented body"))
-    }
-  }
-
   fn expect_layout_line_end(&mut self, message: &'static str) -> Result<Token, ParseError> {
     match self.peek().kind {
       TokenKind::Newline => Ok(self.advance()),
@@ -1797,15 +1792,6 @@ impl Parser {
     }
   }
 
-  fn expect_else(&mut self, message: &'static str) -> Result<Token, ParseError> {
-    let token = self.advance();
-    if matches!(token.kind, TokenKind::Else) {
-      Ok(token)
-    } else {
-      Err(ParseError::new(token.span, message).expected("`else`"))
-    }
-  }
-
   fn parse_type(&mut self) -> Result<TypeAst, ParseError> {
     let token = self.advance();
     match token.kind {
@@ -1821,17 +1807,15 @@ impl Parser {
       TokenKind::LParen => {
         let constructor = self.expect_symbol("type application requires a constructor name")?;
         if constructor == "Fn" {
-          self.expect_open("`Fn` requires a parenthesized parameter type list")?;
+          self.expect(
+            TokenKind::LParen,
+            "`Fn` requires a parenthesized parameter type list",
+          )?;
           let (params, rest) = self.parse_fn_type_params()?;
           self.advance();
-          let arrow = self.advance();
-          if !matches!(arrow.kind, TokenKind::Arrow) {
-            return Err(
-              ParseError::new(arrow.span, "function type requires `->`").expected("`->`"),
-            );
-          }
+          self.expect(TokenKind::Arrow, "function type requires `->`")?;
           let ret = self.parse_type()?;
-          self.expect_close("function type must end with `)`")?;
+          self.expect(TokenKind::RParen, "function type must end with `)`")?;
           Ok(TypeAst::Fn(params, rest.map(Box::new), Box::new(ret)))
         } else {
           let mut args = Vec::new();
@@ -1888,39 +1872,12 @@ impl Parser {
     Ok((params, rest))
   }
 
-  fn expect_open(&mut self, message: &'static str) -> Result<Token, ParseError> {
+  fn expect(&mut self, token_kind: TokenKind, message: &'static str) -> Result<Token, ParseError> {
     let token = self.advance();
-    if matches!(token.kind, TokenKind::LParen) {
+    if token.kind == token_kind {
       Ok(token)
     } else {
-      Err(ParseError::new(token.span, message).expected("`(`"))
-    }
-  }
-
-  fn expect_colon(&mut self, message: &'static str) -> Result<Token, ParseError> {
-    let token = self.advance();
-    if matches!(token.kind, TokenKind::Colon) {
-      Ok(token)
-    } else {
-      Err(ParseError::new(token.span, message).expected("`:`"))
-    }
-  }
-
-  fn expect_close(&mut self, message: &'static str) -> Result<Token, ParseError> {
-    let token = self.advance();
-    if matches!(token.kind, TokenKind::RParen) {
-      Ok(token)
-    } else {
-      Err(ParseError::new(token.span, message).expected("`)`"))
-    }
-  }
-
-  fn expect_arrow_arm(&mut self) -> Result<Token, ParseError> {
-    let token = self.advance();
-    if matches!(token.kind, TokenKind::FatArrow) {
-      Ok(token)
-    } else {
-      Err(ParseError::new(token.span, "match arms require `=>`").expected("`=>`"))
+      Err(ParseError::unexpected(token, format!("{token_kind}")).annotate(message))
     }
   }
 
