@@ -648,16 +648,19 @@ struct Lexer<'a> {
   paren_depth: usize,
   /// Stack of active layout indentation columns.
   indent_stack: Vec<usize>,
-  /// The current line's indentation column.
-  line_indent: usize,
-  /// Track the starting token to know if it potentially opens layout (fn/match/etc).
-  line_first: Option<TokenKind>,
+  /// The layout-opening candidate currently being scanned.
+  layout_head: Option<LayoutHead>,
   /// Deferred newline from the previous logical line. It is emitted only when
   /// the next line stays in the same layout block.
   pending_line_end: Option<Span>,
   /// Indentation column of a line that opened a layout body. The next real line
   /// must be indented further to produce an `Indent`.
   pending_layout: Option<usize>,
+}
+
+struct LayoutHead {
+  indent: usize,
+  opens_body: bool,
 }
 
 impl<'a> Lexer<'a> {
@@ -668,8 +671,7 @@ impl<'a> Lexer<'a> {
       output: Vec::new(),
       paren_depth: 0,
       indent_stack: vec![0],
-      line_indent: 0,
-      line_first: None,
+      layout_head: None,
       pending_line_end: None,
       pending_layout: None,
     }
@@ -783,11 +785,23 @@ impl<'a> Lexer<'a> {
   }
 
   fn push_line_token(&mut self, token: Token) -> Result<(), ParseError> {
-    if self.line_first.is_none() {
+    if self.layout_head.is_none() {
       let indent = self.source_indent(token.span.start)?;
       self.prepare_for_line(indent, token.span.start)?;
-      self.line_indent = indent;
-      self.line_first = Some(token.kind.clone());
+      self.layout_head = Some(LayoutHead {
+        indent,
+        opens_body: matches!(
+          token.kind,
+          TokenKind::Fn
+            | TokenKind::Struct
+            | TokenKind::Enum
+            | TokenKind::New
+            | TokenKind::Match
+            | TokenKind::If
+            | TokenKind::Else
+            | TokenKind::Block
+        ),
+      });
     }
 
     self.output.push(token);
@@ -795,7 +809,7 @@ impl<'a> Lexer<'a> {
   }
 
   fn finish_line(&mut self, newline_span: Option<Span>) {
-    let Some(first) = self.line_first.take() else {
+    let Some(head) = self.layout_head.take() else {
       return;
     };
 
@@ -803,20 +817,10 @@ impl<'a> Lexer<'a> {
     if matches!(
       self.output.last().map(|token| &token.kind),
       Some(TokenKind::FatArrow)
-    ) || matches!(
-      first,
-      TokenKind::Fn
-        | TokenKind::Struct
-        | TokenKind::Enum
-        | TokenKind::New
-        | TokenKind::Match
-        | TokenKind::If
-        | TokenKind::Else
-        | TokenKind::Block
-    ) {
-      self.pending_layout = Some(self.line_indent);
+    ) || head.opens_body
+    {
+      self.pending_layout = Some(head.indent);
     }
-    self.line_indent = 0;
   }
 
   fn prepare_for_line(&mut self, indent: usize, line_start: usize) -> Result<(), ParseError> {
