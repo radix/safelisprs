@@ -4,11 +4,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::types::QualifiedTypeName;
 
-pub type Span = Range<usize>;
+pub(crate) type Span = Range<usize>;
 
 /// Stable identity for one AST node across compiler passes.
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
-pub struct AstId(u64);
+pub(crate) struct AstId(u64);
 
 static NEXT_AST_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -20,7 +20,7 @@ impl AstId {
 
 /// Stable identity for one lexical binding within a resolved module.
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
-pub struct BindingId(u32);
+pub(crate) struct BindingId(u32);
 
 impl BindingId {
   const UNRESOLVED: Self = Self(u32::MAX);
@@ -33,7 +33,7 @@ impl BindingId {
     Self(u32::MAX - 1 - index)
   }
 
-  pub fn is_resolved(self) -> bool {
+  pub(crate) fn is_resolved(self) -> bool {
     self != Self::UNRESOLVED
   }
 }
@@ -43,13 +43,13 @@ impl BindingId {
 /// The parser creates unresolved names; [`crate::prelude::resolve_module_names`]
 /// assigns binding IDs before typechecking and lowering.
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
-pub struct ResolvedName {
-  pub name: String,
-  pub binding: BindingId,
+pub(crate) struct ResolvedName {
+  pub(crate) name: String,
+  pub(crate) binding: BindingId,
 }
 
 impl ResolvedName {
-  pub fn unresolved(name: impl Into<String>) -> Self {
+  pub(crate) fn unresolved(name: impl Into<String>) -> Self {
     Self {
       name: name.into(),
       binding: BindingId::UNRESOLVED,
@@ -63,7 +63,7 @@ impl ResolvedName {
     }
   }
 
-  pub fn as_str(&self) -> &str {
+  pub(crate) fn as_str(&self) -> &str {
     &self.name
   }
 }
@@ -99,10 +99,10 @@ impl From<&str> for ResolvedName {
 }
 
 #[derive(Clone)]
-pub struct AST {
+pub(crate) struct AST {
   id: AstId,
-  pub kind: ASTKind,
-  pub span: Span,
+  pub(crate) kind: ASTKind,
+  pub(crate) span: Span,
 }
 
 impl fmt::Debug for AST {
@@ -123,7 +123,7 @@ impl PartialEq for AST {
 }
 
 #[derive(Debug, PartialEq, Clone)]
-pub enum ASTKind {
+pub(crate) enum ASTKind {
   Let(ResolvedName, Option<TypeAst>, Box<AST>),
   DefineFn(Function),
   DefineStruct(Struct),
@@ -154,7 +154,7 @@ pub enum ASTKind {
 }
 
 impl AST {
-  pub fn new(kind: ASTKind, span: Span) -> Self {
+  pub(crate) fn new(kind: ASTKind, span: Span) -> Self {
     Self {
       id: AstId::fresh(),
       kind,
@@ -162,7 +162,7 @@ impl AST {
     }
   }
 
-  pub fn id(&self) -> AstId {
+  pub(crate) fn id(&self) -> AstId {
     self.id
   }
 
@@ -394,22 +394,22 @@ pub(crate) fn erase_bindings(asts: &[AST]) -> Vec<AST> {
 }
 
 #[derive(Debug, PartialEq, Clone)]
-pub enum Identifier {
+pub(crate) enum Identifier {
   Bare(ResolvedName),
   Qualified(String, String),
 }
 
 #[derive(Debug, PartialEq, Clone)]
-pub struct Function {
-  pub name: ResolvedName,
-  pub params: Vec<(ResolvedName, Option<TypeAst>)>,
-  pub return_type: Option<TypeAst>,
-  pub bounds: Vec<Bound>,
-  pub code: Vec<AST>,
+pub(crate) struct Function {
+  pub(crate) name: ResolvedName,
+  pub(crate) params: Vec<(ResolvedName, Option<TypeAst>)>,
+  pub(crate) return_type: Option<TypeAst>,
+  pub(crate) bounds: Vec<Bound>,
+  pub(crate) code: Vec<AST>,
 }
 
 impl Function {
-  pub fn returns_void(&self) -> bool {
+  pub(crate) fn returns_void(&self) -> bool {
     match &self.return_type {
       None => true,
       Some(TypeAst::Named(TypeNameAst::Bare(name))) => name == "Void",
@@ -420,31 +420,31 @@ impl Function {
 }
 
 #[derive(Debug, PartialEq, Clone)]
-pub struct Struct {
-  pub name: String,
-  pub fields: Vec<(String, TypeAst)>,
+pub(crate) struct Struct {
+  pub(crate) name: String,
+  pub(crate) fields: Vec<(String, TypeAst)>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
-pub struct Enum {
-  pub name: String,
-  pub variants: Vec<EnumVariant>,
+pub(crate) struct Enum {
+  pub(crate) name: String,
+  pub(crate) variants: Vec<EnumVariant>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
-pub struct EnumVariant {
-  pub name: String,
-  pub fields: Vec<(String, TypeAst)>,
+pub(crate) struct EnumVariant {
+  pub(crate) name: String,
+  pub(crate) fields: Vec<(String, TypeAst)>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
-pub struct MatchArm {
-  pub pattern: MatchPattern,
-  pub body: AST,
+pub(crate) struct MatchArm {
+  pub(crate) pattern: MatchPattern,
+  pub(crate) body: AST,
 }
 
 #[derive(Debug, PartialEq, Clone)]
-pub enum MatchPattern {
+pub(crate) enum MatchPattern {
   Variant {
     variant: String,
     fields: Vec<ResolvedName>,
@@ -453,17 +453,17 @@ pub enum MatchPattern {
 }
 
 #[derive(Debug, PartialEq, Clone)]
-pub enum TypeNameAst {
+pub(crate) enum TypeNameAst {
   Bare(String),
   Qualified(QualifiedTypeName),
 }
 
 impl TypeNameAst {
-  pub fn bare(name: impl Into<String>) -> Self {
+  pub(crate) fn bare(name: impl Into<String>) -> Self {
     Self::Bare(name.into())
   }
 
-  pub fn qualified(module: impl Into<String>, name: impl Into<String>) -> Self {
+  pub(crate) fn qualified(module: impl Into<String>, name: impl Into<String>) -> Self {
     Self::Qualified(QualifiedTypeName::new(module, name))
   }
 }
@@ -490,16 +490,16 @@ impl fmt::Display for TypeNameAst {
 }
 
 #[derive(Debug, PartialEq, Clone)]
-pub enum TypeAst {
+pub(crate) enum TypeAst {
   Named(TypeNameAst),
   Apply(String, Vec<TypeAst>),
   Fn(Vec<TypeAst>, Option<Box<TypeAst>>, Box<TypeAst>),
 }
 
 #[derive(Debug, PartialEq, Clone)]
-pub struct Bound {
-  pub var: String,
-  pub traits: Vec<String>,
+pub(crate) struct Bound {
+  pub(crate) var: String,
+  pub(crate) traits: Vec<String>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -2015,7 +2015,7 @@ fn parse_internal(source: &str) -> Result<Vec<AST>, ParseError> {
   Parser::new(tokens).parse_multiple()
 }
 
-pub fn read_multiple(source: &str) -> Result<Vec<AST>, String> {
+pub(crate) fn read_multiple(source: &str) -> Result<Vec<AST>, String> {
   parse_internal(source).map_err(|error| error.render(source))
 }
 

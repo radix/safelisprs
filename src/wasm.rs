@@ -207,22 +207,6 @@ pub fn compile(
   ModuleCompiler::new(builtins).compile(checked.asts())
 }
 
-/// Compile a slice of already-parsed top-level AST into a WASM binary.
-pub fn compile_asts(
-  asts: &[AST],
-  builtins: &Builtins,
-  prelude: &[(&str, &str)],
-) -> Result<Vec<u8>, String> {
-  let module_symbols = builtins
-    .iter()
-    .filter(|builtin| builtin.module == "main")
-    .map(|builtin| builtin.name.as_str())
-    .collect::<Vec<_>>();
-  let asts = resolve_module_names("main", asts, prelude, &module_symbols)?;
-  let checked = check_types(asts, builtins).map_err(|error| error.to_string())?;
-  ModuleCompiler::new(builtins).compile(checked.asts())
-}
-
 fn check_types(
   asts: Vec<AST>,
   builtins: &Builtins,
