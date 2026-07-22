@@ -90,8 +90,8 @@ fn parses_nested_functions() {
 #[test]
 fn parses_layout_function_like_parenthesized_function() {
   let layout = read_multiple(
-    "fn foo (x:Int) -> Int --
-       (+ x 1)",
+    "fn foo (x:Int) -> Int
+  (+ x 1)",
   )
   .unwrap();
   let parenthesized = read_multiple("(fn foo (x:Int) -> Int (+ x 1))").unwrap();
@@ -102,10 +102,10 @@ fn parses_layout_function_like_parenthesized_function() {
 #[test]
 fn parses_layout_if_like_parenthesized_if() {
   let layout = read_multiple(
-    "if (> x 0) --
-       x
-     else --
-       (- 0 x)",
+    "if (> x 0)
+  x
+else
+  (- 0 x)",
   )
   .unwrap();
   let parenthesized = read_multiple("(if (> x 0) x (- 0 x))").unwrap();
@@ -116,11 +116,11 @@ fn parses_layout_if_like_parenthesized_if() {
 #[test]
 fn parses_nested_layout_forms() {
   let layout = read_multiple(
-    "fn main () -> Int --
-       if true --
-         1
-       else --
-         2",
+    "fn main () -> Int
+  if true
+    1
+  else
+    2",
   )
   .unwrap();
   let parenthesized = read_multiple("(fn main () -> Int (if true 1 2))").unwrap();
@@ -131,12 +131,12 @@ fn parses_nested_layout_forms() {
 #[test]
 fn layout_if_branches_with_multiple_expressions_are_implicit_blocks() {
   let layout = read_multiple(
-    "fn main () -> Int --
-       if true --
-         (let x 1)
-         x
-       else --
-         2",
+    "fn main () -> Int
+  if true
+    let x 1
+    x
+  else
+    2",
   )
   .unwrap();
   let parenthesized = read_multiple("(fn main () -> Int (if true (block (let x 1) x) 2))").unwrap();
@@ -145,16 +145,41 @@ fn layout_if_branches_with_multiple_expressions_are_implicit_blocks() {
 }
 
 #[test]
-fn parses_layout_for_arbitrary_function_calls() {
+fn parses_layout_else_if_as_nested_if() {
   let layout = read_multiple(
-    "foo 1 --
-       2
-       (bar 3)",
+    "if a
+  1
+else if b
+  2
+else
+  3",
   )
   .unwrap();
-  let parenthesized = read_multiple("(foo 1 2 (bar 3))").unwrap();
+  let parenthesized = read_multiple("(if a 1 (if b 2 3))").unwrap();
 
   assert_eq!(layout, parenthesized);
+}
+
+#[test]
+fn parses_parenless_layout_let() {
+  let layout = read_multiple("let x 3").unwrap();
+  let parenthesized = read_multiple("(let x 3)").unwrap();
+
+  assert_eq!(layout, parenthesized);
+}
+
+#[test]
+fn parenless_ordinary_calls_are_not_layout_calls() {
+  let error = read_multiple(
+    "fn main () -> Int
+  foo 1",
+  )
+  .unwrap_err();
+
+  assert!(
+    error.contains("layout expressions must end at the end of the line"),
+    "got: {error}"
+  );
 }
 
 #[test]
@@ -318,6 +343,23 @@ fn parses_match_with_variant_and_default_arms() {
 }
 
 #[test]
+fn layout_match_arm_bodies_with_multiple_expressions_are_implicit_blocks() {
+  let layout = read_multiple(
+    "match x
+  (Some value) =>
+    let new (+ value 1)
+    new
+  (None) => 0",
+  )
+  .unwrap();
+  let parenthesized =
+    read_multiple("(match x (Some value) => (block (let new (+ value 1)) new) (None) => 0)")
+      .unwrap();
+
+  assert_eq!(layout, parenthesized);
+}
+
+#[test]
 fn ellipsis_is_lexed_as_its_own_symbol() {
   assert_eq!(
     read_multiple("...Int").unwrap(),
@@ -453,7 +495,7 @@ fn ast_nodes_keep_full_byte_spans() {
 
 #[test]
 fn layout_preserves_real_token_spans() {
-  let source = "fn main () -> Int --\n    (+ 1\n       \"bad\")";
+  let source = "fn main () -> Int\n    (+ 1\n       \"bad\")";
   let function = parse_internal(source).unwrap().remove(0);
   let ASTKind::DefineFn(function) = function.kind else {
     panic!("expected function");
@@ -467,9 +509,11 @@ fn layout_preserves_real_token_spans() {
 
 #[test]
 fn layout_requires_an_indented_body() {
-  let error = read_multiple("foo --").unwrap_err();
-  assert!(error.contains("`--` requires an indented body"), "{error}");
-  assert!(error.contains("line 1, column 5"), "{error}");
+  let error = read_multiple("fn main () -> Int").unwrap_err();
+  assert!(
+    error.contains("`fn` layout body must be indented"),
+    "{error}"
+  );
 }
 
 #[test]

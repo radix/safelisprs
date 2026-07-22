@@ -385,12 +385,24 @@ fn register_one(linker: &mut Linker<()>, b: &safelisp::wasm::Builtin) {
 #[case::if_selects_else_branch("(fn main () ->Int (if false 42 0))", Val::Int(0))]
 #[case::if_with_condition_from_call("(fn main () ->Int (if (std::== 1 1) 7 8))", Val::Int(7))]
 #[case::layout_fn_and_if(
-  "fn main () -> Int --
-     if (std::== 1 1) --
+  "fn main () -> Int
+     if (std::== 1 1)
        7
-     else --
+     else
        8",
   Val::Int(7)
+)]
+#[case::layout_match_arm_body(
+  "enum MaybeInt
+  (Some value:Int)
+  (None)
+fn main () -> Int
+  match (new MaybeInt::Some value:4)
+    (Some value) =>
+      let new (+ value 1)
+      new
+    (None) => 0",
+  Val::Int(5)
 )]
 #[case::if_branches_can_use_let_variables(
   "(fn main () ->Int (let a 10) (if true a 0))",
