@@ -82,6 +82,17 @@ fn parses_negative_numbers_and_operator_symbols() {
 }
 
 #[test]
+fn parses_boolean_literals() {
+  assert_eq!(
+    read_multiple("true false").unwrap(),
+    vec![
+      AST::synthetic(ASTKind::Bool(true)),
+      AST::synthetic(ASTKind::Bool(false))
+    ]
+  );
+}
+
+#[test]
 fn parses_nested_functions() {
   let result = read_multiple("(fn outer (x:Int) (fn inner (y:Int) ->Int (std::+ x y)) inner)");
   assert!(result.is_ok(), "got: {result:?}");
@@ -166,6 +177,21 @@ fn parses_parenless_layout_let() {
   let parenthesized = read_multiple("(let x 3)").unwrap();
 
   assert_eq!(layout, parenthesized);
+}
+
+#[test]
+fn reserved_syntax_words_cannot_be_used_as_names() {
+  for source in [
+    "let new 3",
+    "fn new () -> Int 3",
+    "struct Point\n  match:Int",
+    "enum Maybe\n  (Some else:Int)",
+    "fn main () -> Int\n  let x 1\n  else",
+    "fn main (where:Int) -> Int 1",
+  ] {
+    let error = read_multiple(source).unwrap_err();
+    assert!(error.contains("reserved syntax"), "{source}: {error}");
+  }
 }
 
 #[test]
@@ -347,13 +373,13 @@ fn layout_match_arm_bodies_with_multiple_expressions_are_implicit_blocks() {
   let layout = read_multiple(
     "match x
   (Some value) =>
-    let new (+ value 1)
-    new
+    let next (+ value 1)
+    next
   (None) => 0",
   )
   .unwrap();
   let parenthesized =
-    read_multiple("(match x (Some value) => (block (let new (+ value 1)) new) (None) => 0)")
+    read_multiple("(match x (Some value) => (block (let next (+ value 1)) next) (None) => 0)")
       .unwrap();
 
   assert_eq!(layout, parenthesized);

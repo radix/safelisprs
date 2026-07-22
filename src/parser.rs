@@ -512,7 +512,18 @@ enum TokenKind {
   Newline,
   Indent,
   Dedent,
+  Let,
+  Fn,
+  Struct,
+  Enum,
+  New,
+  Match,
+  If,
+  Else,
+  Block,
+  Where,
   Sym(String),
+  Bool(bool),
   Int(i64),
   Float(f64),
   Str(String),
@@ -733,7 +744,7 @@ impl<'a> Lexer<'a> {
     let kind = if is_numeric_candidate(text) {
       parse_number(text, span.clone())?
     } else {
-      TokenKind::Sym(text.to_string())
+      identifier_token_kind(text)
     };
     Ok(Token { kind, span })
   }
@@ -939,12 +950,35 @@ fn line_opens_layout_body(line: &[Token]) -> bool {
 
   matches!(
     line.first().map(|token| &token.kind),
-    Some(TokenKind::Sym(name))
-      if matches!(
-        name.as_str(),
-        "fn" | "struct" | "enum" | "new" | "match" | "if" | "else" | "block"
-      )
+    Some(
+      TokenKind::Fn
+        | TokenKind::Struct
+        | TokenKind::Enum
+        | TokenKind::New
+        | TokenKind::Match
+        | TokenKind::If
+        | TokenKind::Else
+        | TokenKind::Block
+    )
   )
+}
+
+fn identifier_token_kind(text: &str) -> TokenKind {
+  match text {
+    "let" => TokenKind::Let,
+    "fn" => TokenKind::Fn,
+    "struct" => TokenKind::Struct,
+    "enum" => TokenKind::Enum,
+    "new" => TokenKind::New,
+    "match" => TokenKind::Match,
+    "if" => TokenKind::If,
+    "else" => TokenKind::Else,
+    "block" => TokenKind::Block,
+    "where" => TokenKind::Where,
+    "true" => TokenKind::Bool(true),
+    "false" => TokenKind::Bool(false),
+    _ => TokenKind::Sym(text.to_string()),
+  }
 }
 
 fn is_delimiter(ch: char) -> bool {
@@ -1064,17 +1098,38 @@ impl Parser {
       | TokenKind::Dedent => {
         Err(ParseError::new(token.span, "unexpected syntax token").expected("an expression"))
       }
+      kind @ (TokenKind::Let
+      | TokenKind::Fn
+      | TokenKind::Struct
+      | TokenKind::Enum
+      | TokenKind::New
+      | TokenKind::Match
+      | TokenKind::If
+      | TokenKind::Block) => {
+        if layout_line_start && self.starts_layout_form(&kind) {
+          self.parse_form_after_head(
+            token.span.start,
+            Token {
+              kind,
+              span: token.span.clone(),
+            },
+            FormMode::Layout,
+          )
+        } else {
+          Err(reserved_syntax_error(&kind, token.span))
+        }
+      }
+      kind @ (TokenKind::Else | TokenKind::Where) => Err(reserved_syntax_error(&kind, token.span)),
       TokenKind::Sym(name) => {
-        if layout_line_start && self.starts_layout_form(name.as_str()) {
-          self.parse_form_after_head(token.span.start, token.span.clone(), name, FormMode::Layout)
-        } else if let Some(((module, name), span)) =
+        if let Some(((module, name), span)) =
           self.parse_qualified_identifier(name.clone(), token.span.clone())?
         {
           Ok(AST::new(ASTKind::FunctionRef(module, name), span))
         } else {
-          Ok(ast_from_symbol(name, token.span))
+          Ok(ast_from_variable_or_field_access(name, token.span))
         }
       }
+      TokenKind::Bool(value) => Ok(AST::new(ASTKind::Bool(value), token.span)),
       TokenKind::Int(value) => Ok(AST::new(ASTKind::Int(value), token.span)),
       TokenKind::Float(value) => Ok(AST::new(ASTKind::Float(value), token.span)),
       TokenKind::Str(value) => Ok(AST::new(ASTKind::String(value), token.span)),
@@ -1097,32 +1152,35 @@ impl Parser {
       );
     }
 
-    match self.peek().kind.clone() {
-      TokenKind::Sym(name) => {
-        let head = self.advance();
-        self.parse_form_after_head(start, head.span, name, mode)
-      }
-      _ => self.parse_dynamic_call(start),
+    if is_form_head_token(&self.peek().kind) || matches!(self.peek().kind, TokenKind::Sym(_)) {
+      let head = self.advance();
+      self.parse_form_after_head(start, head, mode)
+    } else {
+      self.parse_dynamic_call(start)
     }
   }
 
   fn parse_form_after_head(
     &mut self,
     start: usize,
-    head_span: Span,
-    name: String,
+    head: Token,
     mode: FormMode,
   ) -> Result<AST, ParseError> {
-    match name.as_str() {
-      "let" => self.parse_let(start, mode),
-      "fn" => self.parse_fn(start, mode),
-      "struct" => self.parse_struct(start, mode),
-      "enum" => self.parse_enum(start, mode),
-      "new" => self.parse_new(start, mode),
-      "match" => self.parse_match(start, mode),
-      "if" => self.parse_if(start, mode),
-      "block" => self.parse_block(start, mode),
-      _ => self.parse_fixed_call_after_head(start, head_span, name, mode),
+    let Token {
+      kind,
+      span: head_span,
+    } = head;
+    match kind {
+      TokenKind::Let => self.parse_let(start, mode),
+      TokenKind::Fn => self.parse_fn(start, mode),
+      TokenKind::Struct => self.parse_struct(start, mode),
+      TokenKind::Enum => self.parse_enum(start, mode),
+      TokenKind::New => self.parse_new(start, mode),
+      TokenKind::Match => self.parse_match(start, mode),
+      TokenKind::If => self.parse_if(start, mode),
+      TokenKind::Block => self.parse_block(start, mode),
+      TokenKind::Sym(name) => self.parse_fixed_call_after_head(start, head_span, name, mode),
+      _ => unreachable!("caller only passes valid form heads"),
     }
   }
 
@@ -1200,7 +1258,7 @@ impl Parser {
     };
 
     let mut bounds = Vec::new();
-    if matches!(&self.peek().kind, TokenKind::Sym(name) if name == "where") {
+    if matches!(self.peek().kind, TokenKind::Where) {
       self.advance();
       self.expect_open("`where` requires a parenthesized bound list")?;
       while !matches!(self.peek().kind, TokenKind::RParen) {
@@ -1443,13 +1501,7 @@ impl Parser {
           nonempty_expr_eof_message(NonemptyExprContext::IfThenBranch),
         )?;
 
-        let else_token = self.expect_symbol("`if` layout requires an `else` clause")?;
-        if else_token != "else" {
-          return Err(ParseError::new(
-            self.previous_span(),
-            "`if` layout requires an `else` clause",
-          ));
-        }
+        self.expect_else("`if` layout requires an `else` clause")?;
 
         let (else_branch, close) = self.parse_layout_else_branch()?;
         (implicit_branch_block(then_exprs), else_branch, close)
@@ -1467,7 +1519,7 @@ impl Parser {
   }
 
   fn parse_layout_else_branch(&mut self) -> Result<(AST, Token), ParseError> {
-    if matches!(&self.peek().kind, TokenKind::Sym(name) if name == "if") {
+    if matches!(self.peek().kind, TokenKind::If) {
       let if_token = self.advance();
       let branch = self.parse_if(if_token.span.start, FormMode::Layout)?;
       let close = Token {
@@ -1508,7 +1560,7 @@ impl Parser {
         span,
       ))
     } else {
-      let callee = ast_from_symbol(name, head_span);
+      let callee = ast_from_variable_or_field_access(name, head_span);
       match callee.kind {
         ASTKind::Variable(name) => Ok(AST::new(
           ASTKind::CallFixed(Identifier::Bare(name), args),
@@ -1683,7 +1735,19 @@ impl Parser {
     let token = self.advance();
     match token.kind {
       TokenKind::Sym(name) => Ok(name),
+      kind if reserved_syntax_token_name(&kind).is_some() => {
+        Err(reserved_syntax_error(&kind, token.span))
+      }
       _ => Err(ParseError::new(token.span, message).expected("a symbol")),
+    }
+  }
+
+  fn expect_else(&mut self, message: &'static str) -> Result<Token, ParseError> {
+    let token = self.advance();
+    if matches!(token.kind, TokenKind::Else) {
+      Ok(token)
+    } else {
+      Err(ParseError::new(token.span, message).expected("`else`"))
     }
   }
 
@@ -1832,11 +1896,11 @@ impl Parser {
       )
   }
 
-  fn starts_layout_form(&self, name: &str) -> bool {
-    if !is_layout_form_head(name) {
+  fn starts_layout_form(&self, kind: &TokenKind) -> bool {
+    if !is_form_head_token(kind) {
       return false;
     }
-    name == "block" || self.has_more_tokens_on_current_line()
+    matches!(kind, TokenKind::Block) || self.has_more_tokens_on_current_line()
   }
 
   fn has_more_tokens_on_current_line(&self) -> bool {
@@ -1859,15 +1923,6 @@ impl Parser {
     }
     token
   }
-}
-
-fn ast_from_symbol(name: String, span: Span) -> AST {
-  let kind = match name.as_str() {
-    "true" => ASTKind::Bool(true),
-    "false" => ASTKind::Bool(false),
-    _ => return ast_from_variable_or_field_access(name, span),
-  };
-  AST::new(kind, span)
 }
 
 fn ast_from_variable_or_field_access(name: String, span: Span) -> AST {
@@ -1910,11 +1965,39 @@ fn implicit_branch_block(expressions: Vec<AST>) -> AST {
   AST::new(ASTKind::Block(expressions), start..end)
 }
 
-fn is_layout_form_head(name: &str) -> bool {
+fn is_form_head_token(kind: &TokenKind) -> bool {
   matches!(
-    name,
-    "let" | "fn" | "struct" | "enum" | "new" | "match" | "if" | "block"
+    kind,
+    TokenKind::Let
+      | TokenKind::Fn
+      | TokenKind::Struct
+      | TokenKind::Enum
+      | TokenKind::New
+      | TokenKind::Match
+      | TokenKind::If
+      | TokenKind::Block
   )
+}
+
+fn reserved_syntax_token_name(kind: &TokenKind) -> Option<&'static str> {
+  match kind {
+    TokenKind::Let => Some("let"),
+    TokenKind::Fn => Some("fn"),
+    TokenKind::Struct => Some("struct"),
+    TokenKind::Enum => Some("enum"),
+    TokenKind::New => Some("new"),
+    TokenKind::Match => Some("match"),
+    TokenKind::If => Some("if"),
+    TokenKind::Else => Some("else"),
+    TokenKind::Block => Some("block"),
+    TokenKind::Where => Some("where"),
+    _ => None,
+  }
+}
+
+fn reserved_syntax_error(kind: &TokenKind, span: Span) -> ParseError {
+  let name = reserved_syntax_token_name(kind).expect("caller passed reserved syntax token");
+  ParseError::new(span, format!("`{name}` is reserved syntax"))
 }
 
 fn layout_requires_newline_message(form: &'static str) -> &'static str {

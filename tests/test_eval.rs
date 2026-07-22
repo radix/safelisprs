@@ -399,8 +399,8 @@ fn register_one(linker: &mut Linker<()>, b: &safelisp::wasm::Builtin) {
 fn main () -> Int
   match (new MaybeInt::Some value:4)
     (Some value) =>
-      let new (+ value 1)
-      new
+      let next (+ value 1)
+      next
     (None) => 0",
   Val::Int(5)
 )]
