@@ -1,4 +1,5 @@
 use super::*;
+use rstest::rstest;
 
 #[test]
 fn test_read_multiple() {
@@ -179,19 +180,24 @@ fn parses_parenless_layout_let() {
   assert_eq!(layout, parenthesized);
 }
 
-#[test]
-fn reserved_syntax_words_cannot_be_used_as_names() {
-  for source in [
-    "let new 3",
-    "fn new () -> Int 3",
-    "struct Point\n  match:Int",
-    "enum Maybe\n  (Some else:Int)",
-    "fn main () -> Int\n  let x 1\n  else",
-    "fn main (where:Int) -> Int 1",
-  ] {
-    let error = read_multiple(source).unwrap_err();
-    assert!(error.contains("reserved syntax"), "{source}: {error}");
-  }
+#[rstest]
+#[case("let new 3", "new", 1, 5)]
+#[case("fn new () -> Int 3", "new", 1, 4)]
+#[case("struct Point\n  match:Int", "match", 2, 3)]
+#[case("enum Maybe\n  (Some else:Int)", "else", 2, 9)]
+#[case("fn main () -> Int\n  let x 1\n  else", "else", 3, 3)]
+#[case("fn main (where:Int) -> Int 1", "where", 1, 10)]
+fn reserved_syntax_words_cannot_be_used_as_names(
+  #[case] source: &str,
+  #[case] token_name: &str,
+  #[case] line: usize,
+  #[case] column: usize,
+) {
+  let error = read_multiple(source).unwrap_err();
+  assert_eq!(
+    error,
+    format!("line {line}, column {column}: `{token_name}` is reserved syntax"),
+  );
 }
 
 #[test]
@@ -386,14 +392,9 @@ fn layout_match_arm_bodies_with_multiple_expressions_are_implicit_blocks() {
 }
 
 #[test]
-fn ellipsis_is_lexed_as_its_own_symbol() {
-  assert_eq!(
-    read_multiple("...Int").unwrap(),
-    vec![
-      AST::Variable("...".to_string()),
-      AST::Variable("Int".to_string())
-    ]
-  );
+fn ellipsis_is_syntax_not_a_symbol_expression() {
+  let error = read_multiple("...Int").unwrap_err();
+  assert!(error.contains("unexpected syntax token"), "got: {error}");
 }
 
 #[test]

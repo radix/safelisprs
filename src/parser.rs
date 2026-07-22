@@ -509,6 +509,8 @@ enum TokenKind {
   Colon,
   DoubleColon,
   Arrow,
+  FatArrow,
+  Ellipsis,
   Newline,
   Indent,
   Dedent,
@@ -534,6 +536,45 @@ enum TokenKind {
 struct Token {
   kind: TokenKind,
   span: Span,
+}
+
+impl fmt::Display for TokenKind {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    match self {
+      TokenKind::LParen => write!(formatter, "("),
+      TokenKind::RParen => write!(formatter, ")"),
+      TokenKind::Colon => write!(formatter, ":"),
+      TokenKind::DoubleColon => write!(formatter, "::"),
+      TokenKind::Arrow => write!(formatter, "->"),
+      TokenKind::FatArrow => write!(formatter, "=>"),
+      TokenKind::Ellipsis => write!(formatter, "..."),
+      TokenKind::Newline => write!(formatter, "newline"),
+      TokenKind::Indent => write!(formatter, "indent"),
+      TokenKind::Dedent => write!(formatter, "dedent"),
+      TokenKind::Let => write!(formatter, "let"),
+      TokenKind::Fn => write!(formatter, "fn"),
+      TokenKind::Struct => write!(formatter, "struct"),
+      TokenKind::Enum => write!(formatter, "enum"),
+      TokenKind::New => write!(formatter, "new"),
+      TokenKind::Match => write!(formatter, "match"),
+      TokenKind::If => write!(formatter, "if"),
+      TokenKind::Else => write!(formatter, "else"),
+      TokenKind::Block => write!(formatter, "block"),
+      TokenKind::Where => write!(formatter, "where"),
+      TokenKind::Sym(name) => write!(formatter, "{name}"),
+      TokenKind::Bool(value) => write!(formatter, "{value}"),
+      TokenKind::Int(value) => write!(formatter, "{value}"),
+      TokenKind::Float(value) => write!(formatter, "{value}"),
+      TokenKind::Str(value) => write!(formatter, "\"{value}\""),
+      TokenKind::Eof => write!(formatter, "end of input"),
+    }
+  }
+}
+
+impl fmt::Display for Token {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    self.kind.fmt(formatter)
+  }
 }
 
 #[derive(Debug, PartialEq)]
@@ -655,12 +696,20 @@ impl<'a> Lexer<'a> {
             span: start..self.offset,
           }
         }
+        '=' if self.source[self.offset..].starts_with("=>") => {
+          self.bump_char();
+          self.bump_char();
+          Token {
+            kind: TokenKind::FatArrow,
+            span: start..self.offset,
+          }
+        }
         '.' if self.source[self.offset..].starts_with("...") => {
           self.bump_char();
           self.bump_char();
           self.bump_char();
           Token {
-            kind: TokenKind::Sym("...".to_string()),
+            kind: TokenKind::Ellipsis,
             span: start..self.offset,
           }
         }
@@ -734,6 +783,7 @@ impl<'a> Lexer<'a> {
     let start = self.offset;
     while self.peek_char().is_some_and(|ch| !is_delimiter(ch))
       && !self.source[self.offset..].starts_with("->")
+      && !self.source[self.offset..].starts_with("=>")
       && !self.source[self.offset..].starts_with("...")
     {
       self.bump_char();
@@ -943,7 +993,7 @@ fn normalize_layout(source: &str, tokens: Vec<Token>) -> Result<Vec<Token>, Pars
 fn line_opens_layout_body(line: &[Token]) -> bool {
   if matches!(
     line.last().map(|token| &token.kind),
-    Some(TokenKind::Sym(separator)) if separator == "=>"
+    Some(TokenKind::FatArrow)
   ) {
     return true;
   }
@@ -1093,6 +1143,8 @@ impl Parser {
       TokenKind::Colon
       | TokenKind::DoubleColon
       | TokenKind::Arrow
+      | TokenKind::FatArrow
+      | TokenKind::Ellipsis
       | TokenKind::Newline
       | TokenKind::Indent
       | TokenKind::Dedent => {
@@ -1116,10 +1168,16 @@ impl Parser {
             FormMode::Layout,
           )
         } else {
-          Err(reserved_syntax_error(&kind, token.span))
+          Err(reserved_syntax_error(Token {
+            kind,
+            span: token.span,
+          }))
         }
       }
-      kind @ (TokenKind::Else | TokenKind::Where) => Err(reserved_syntax_error(&kind, token.span)),
+      kind @ (TokenKind::Else | TokenKind::Where) => Err(reserved_syntax_error(Token {
+        kind,
+        span: token.span,
+      })),
       TokenKind::Sym(name) => {
         if let Some(((module, name), span)) =
           self.parse_qualified_identifier(name.clone(), token.span.clone())?
@@ -1735,9 +1793,10 @@ impl Parser {
     let token = self.advance();
     match token.kind {
       TokenKind::Sym(name) => Ok(name),
-      kind if reserved_syntax_token_name(&kind).is_some() => {
-        Err(reserved_syntax_error(&kind, token.span))
-      }
+      kind if is_reserved_syntax_token(&kind) => Err(reserved_syntax_error(Token {
+        kind,
+        span: token.span,
+      })),
       _ => Err(ParseError::new(token.span, message).expected("a symbol")),
     }
   }
@@ -1811,24 +1870,22 @@ impl Parser {
           .expected("`)`"),
         );
       }
-      if let TokenKind::Sym(name) = self.peek().kind.clone() {
-        if name == "..." {
-          let span = self.advance().span;
-          if rest.is_some() {
-            return Err(ParseError::new(
-              span,
-              "function type can only have one rest parameter",
-            ));
-          }
-          rest = Some(self.parse_type()?);
-          if !matches!(self.peek().kind, TokenKind::RParen) {
-            return Err(ParseError::new(
-              self.peek().span.clone(),
-              "function rest parameter type must be last",
-            ));
-          }
-          continue;
+      if matches!(self.peek().kind, TokenKind::Ellipsis) {
+        let span = self.advance().span;
+        if rest.is_some() {
+          return Err(ParseError::new(
+            span,
+            "function type can only have one rest parameter",
+          ));
         }
+        rest = Some(self.parse_type()?);
+        if !matches!(self.peek().kind, TokenKind::RParen) {
+          return Err(ParseError::new(
+            self.peek().span.clone(),
+            "function rest parameter type must be last",
+          ));
+        }
+        continue;
       }
       params.push(self.parse_type()?);
     }
@@ -1864,9 +1921,10 @@ impl Parser {
 
   fn expect_arrow_arm(&mut self) -> Result<Token, ParseError> {
     let token = self.advance();
-    match token.kind {
-      TokenKind::Sym(ref separator) if separator == "=>" => Ok(token),
-      _ => Err(ParseError::new(token.span, "match arms require `=>`").expected("`=>`")),
+    if matches!(token.kind, TokenKind::FatArrow) {
+      Ok(token)
+    } else {
+      Err(ParseError::new(token.span, "match arms require `=>`").expected("`=>`"))
     }
   }
 
@@ -1926,7 +1984,7 @@ impl Parser {
 }
 
 fn ast_from_variable_or_field_access(name: String, span: Span) -> AST {
-  if name == "..." || !name.contains('.') || name.split('.').any(str::is_empty) {
+  if !name.contains('.') || name.split('.').any(str::is_empty) {
     return AST::new(ASTKind::Variable(name.into()), span);
   }
 
@@ -1979,25 +2037,24 @@ fn is_form_head_token(kind: &TokenKind) -> bool {
   )
 }
 
-fn reserved_syntax_token_name(kind: &TokenKind) -> Option<&'static str> {
-  match kind {
-    TokenKind::Let => Some("let"),
-    TokenKind::Fn => Some("fn"),
-    TokenKind::Struct => Some("struct"),
-    TokenKind::Enum => Some("enum"),
-    TokenKind::New => Some("new"),
-    TokenKind::Match => Some("match"),
-    TokenKind::If => Some("if"),
-    TokenKind::Else => Some("else"),
-    TokenKind::Block => Some("block"),
-    TokenKind::Where => Some("where"),
-    _ => None,
-  }
+fn is_reserved_syntax_token(kind: &TokenKind) -> bool {
+  matches!(
+    kind,
+    TokenKind::Let
+      | TokenKind::Fn
+      | TokenKind::Struct
+      | TokenKind::Enum
+      | TokenKind::New
+      | TokenKind::Match
+      | TokenKind::If
+      | TokenKind::Else
+      | TokenKind::Block
+      | TokenKind::Where
+  )
 }
 
-fn reserved_syntax_error(kind: &TokenKind, span: Span) -> ParseError {
-  let name = reserved_syntax_token_name(kind).expect("caller passed reserved syntax token");
-  ParseError::new(span, format!("`{name}` is reserved syntax"))
+fn reserved_syntax_error(token: Token) -> ParseError {
+  ParseError::new(token.span.clone(), format!("`{token}` is reserved syntax"))
 }
 
 fn layout_requires_newline_message(form: &'static str) -> &'static str {
