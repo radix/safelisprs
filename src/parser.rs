@@ -581,6 +581,7 @@ impl fmt::Display for Token {
 struct ParseError {
   span: Span,
   message: String,
+  annotations: Vec<String>,
   expected: Vec<&'static str>,
 }
 
@@ -589,8 +590,14 @@ impl ParseError {
     Self {
       span,
       message: message.into(),
+      annotations: Vec::new(),
       expected: Vec::new(),
     }
+  }
+
+  fn annotate(mut self, annotation: impl Into<String>) -> Self {
+    self.annotations.push(annotation.into());
+    self
   }
 
   fn expected(mut self, expected: &'static str) -> Self {
@@ -600,16 +607,20 @@ impl ParseError {
 
   fn render(&self, source: &str) -> String {
     let (line, column) = source_position(source, self.span.start);
+    let mut parts = Vec::with_capacity(2 + self.annotations.len());
+    parts.push(self.message.clone());
+    parts.extend(self.annotations.iter().cloned());
 
-    if self.expected.is_empty() {
-      format!("line {line}, column {column}: {}", self.message)
-    } else {
-      format!(
-        "line {line}, column {column}: {}; expected {}",
-        self.message,
-        self.expected.join(" or ")
-      )
+    if !self.expected.is_empty() {
+      parts.push(format!("expected {}", self.expected.join(" or ")));
     }
+
+    format!("line {line}, column {column}: {}", parts.join("; "))
+  }
+
+  fn unexpected(token: Token, expected: &'static str) -> Self {
+    let message = format!("unexpected {}", token.kind);
+    Self::new(token.span, message).expected(expected)
   }
 }
 
@@ -1129,27 +1140,10 @@ impl Parser {
   }
 
   fn parse_expr(&mut self) -> Result<AST, ParseError> {
-    self.parse_expr_with_layout(true)
-  }
-
-  fn parse_expr_with_layout(&mut self, allow_layout: bool) -> Result<AST, ParseError> {
-    let layout_line_start = allow_layout && self.at_layout_line_start();
+    let layout_line_start = self.at_layout_line_start();
     let token = self.advance();
     match token.kind {
       TokenKind::LParen => self.parse_list(token.span.start, FormMode::Paren),
-      TokenKind::RParen => {
-        Err(ParseError::new(token.span, "unexpected `)`").expected("an expression"))
-      }
-      TokenKind::Colon
-      | TokenKind::DoubleColon
-      | TokenKind::Arrow
-      | TokenKind::FatArrow
-      | TokenKind::Ellipsis
-      | TokenKind::Newline
-      | TokenKind::Indent
-      | TokenKind::Dedent => {
-        Err(ParseError::new(token.span, "unexpected syntax token").expected("an expression"))
-      }
       kind @ (TokenKind::Let
       | TokenKind::Fn
       | TokenKind::Struct
@@ -1157,27 +1151,18 @@ impl Parser {
       | TokenKind::New
       | TokenKind::Match
       | TokenKind::If
-      | TokenKind::Block) => {
-        if layout_line_start && self.starts_layout_form(&kind) {
-          self.parse_form_after_head(
-            token.span.start,
-            Token {
-              kind,
-              span: token.span.clone(),
-            },
-            FormMode::Layout,
-          )
-        } else {
-          Err(reserved_syntax_error(Token {
+      | TokenKind::Block)
+        if layout_line_start && self.starts_layout_form(&kind) =>
+      {
+        self.parse_form_after_head(
+          token.span.start,
+          Token {
             kind,
-            span: token.span,
-          }))
-        }
+            span: token.span.clone(),
+          },
+          FormMode::Layout,
+        )
       }
-      kind @ (TokenKind::Else | TokenKind::Where) => Err(reserved_syntax_error(Token {
-        kind,
-        span: token.span,
-      })),
       TokenKind::Sym(name) => {
         if let Some(((module, name), span)) =
           self.parse_qualified_identifier(name.clone(), token.span.clone())?
@@ -1191,9 +1176,13 @@ impl Parser {
       TokenKind::Int(value) => Ok(AST::new(ASTKind::Int(value), token.span)),
       TokenKind::Float(value) => Ok(AST::new(ASTKind::Float(value), token.span)),
       TokenKind::Str(value) => Ok(AST::new(ASTKind::String(value), token.span)),
-      TokenKind::Eof => {
-        Err(ParseError::new(token.span, "unexpected end of input").expected("an expression"))
-      }
+      kind => Err(ParseError::unexpected(
+        Token {
+          kind,
+          span: token.span,
+        },
+        "an expression",
+      )),
     }
   }
 
@@ -1452,11 +1441,7 @@ impl Parser {
   }
 
   fn parse_match(&mut self, start: usize, mode: FormMode) -> Result<AST, ParseError> {
-    let scrutinee = if mode == FormMode::Layout {
-      self.parse_expr_with_layout(false)?
-    } else {
-      self.parse_expr()?
-    };
+    let scrutinee = self.parse_expr()?;
     let end = self.enter_form_body(mode, "match")?;
     let mut arms = Vec::new();
     self.skip_newlines();
@@ -1531,15 +1516,11 @@ impl Parser {
       return Ok(implicit_branch_block(expressions));
     }
 
-    self.parse_expr_with_layout(false)
+    self.parse_expr()
   }
 
   fn parse_if(&mut self, start: usize, mode: FormMode) -> Result<AST, ParseError> {
-    let condition = if mode == FormMode::Layout {
-      self.parse_expr_with_layout(false)?
-    } else {
-      self.parse_expr()?
-    };
+    let condition = self.parse_expr()?;
     let (then_branch, else_branch, close) = match mode {
       FormMode::Paren => {
         let then_branch = self.parse_expr()?;
@@ -1793,11 +1774,16 @@ impl Parser {
     let token = self.advance();
     match token.kind {
       TokenKind::Sym(name) => Ok(name),
-      kind if is_reserved_syntax_token(&kind) => Err(reserved_syntax_error(Token {
-        kind,
-        span: token.span,
-      })),
-      _ => Err(ParseError::new(token.span, message).expected("a symbol")),
+      kind => Err(
+        ParseError::unexpected(
+          Token {
+            kind,
+            span: token.span,
+          },
+          "a symbol",
+        )
+        .annotate(message),
+      ),
     }
   }
 
@@ -2035,26 +2021,6 @@ fn is_form_head_token(kind: &TokenKind) -> bool {
       | TokenKind::If
       | TokenKind::Block
   )
-}
-
-fn is_reserved_syntax_token(kind: &TokenKind) -> bool {
-  matches!(
-    kind,
-    TokenKind::Let
-      | TokenKind::Fn
-      | TokenKind::Struct
-      | TokenKind::Enum
-      | TokenKind::New
-      | TokenKind::Match
-      | TokenKind::If
-      | TokenKind::Else
-      | TokenKind::Block
-      | TokenKind::Where
-  )
-}
-
-fn reserved_syntax_error(token: Token) -> ParseError {
-  ParseError::new(token.span.clone(), format!("`{token}` is reserved syntax"))
 }
 
 fn layout_requires_newline_message(form: &'static str) -> &'static str {

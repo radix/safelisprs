@@ -181,22 +181,69 @@ fn parses_parenless_layout_let() {
 }
 
 #[rstest]
-#[case("let new 3", "new", 1, 5)]
-#[case("fn new () -> Int 3", "new", 1, 4)]
-#[case("struct Point\n  match:Int", "match", 2, 3)]
-#[case("enum Maybe\n  (Some else:Int)", "else", 2, 9)]
-#[case("fn main () -> Int\n  let x 1\n  else", "else", 3, 3)]
-#[case("fn main (where:Int) -> Int 1", "where", 1, 10)]
-fn reserved_syntax_words_cannot_be_used_as_names(
+#[case(
+  "let new 3",
+  "new",
+  Some("first argument to `let` must be a symbol"),
+  "a symbol",
+  1,
+  5
+)]
+#[case(
+  "fn new () -> Int 3",
+  "new",
+  Some("`fn` name must be a symbol"),
+  "a symbol",
+  1,
+  4
+)]
+#[case(
+  "struct Point\n  match:Int",
+  "match",
+  Some("struct field names must be symbols"),
+  "a symbol",
+  2,
+  3
+)]
+#[case(
+  "enum Maybe\n  (Some else:Int)",
+  "else",
+  Some("enum variant field names must be symbols"),
+  "a symbol",
+  2,
+  9
+)]
+#[case(
+  "fn main () -> Int\n  let x 1\n  else",
+  "else",
+  None,
+  "an expression",
+  3,
+  3
+)]
+#[case(
+  "fn main (where:Int) -> Int 1",
+  "where",
+  Some("Parameters must be symbols"),
+  "a symbol",
+  1,
+  10
+)]
+fn syntax_tokens_cannot_be_used_as_names(
   #[case] source: &str,
   #[case] token_name: &str,
+  #[case] annotation: Option<&str>,
+  #[case] expected: &str,
   #[case] line: usize,
   #[case] column: usize,
 ) {
   let error = read_multiple(source).unwrap_err();
+  let annotation = annotation.map_or(String::new(), |annotation| format!("; {annotation}"));
   assert_eq!(
     error,
-    format!("line {line}, column {column}: `{token_name}` is reserved syntax"),
+    format!(
+      "line {line}, column {column}: unexpected {token_name}{annotation}; expected {expected}"
+    ),
   );
 }
 
@@ -394,7 +441,10 @@ fn layout_match_arm_bodies_with_multiple_expressions_are_implicit_blocks() {
 #[test]
 fn ellipsis_is_syntax_not_a_symbol_expression() {
   let error = read_multiple("...Int").unwrap_err();
-  assert!(error.contains("unexpected syntax token"), "got: {error}");
+  assert_eq!(
+    error,
+    "line 1, column 1: unexpected ...; expected an expression"
+  );
 }
 
 #[test]
