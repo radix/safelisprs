@@ -1,3 +1,4 @@
+use super::rand::rand_roll;
 use super::*;
 use crate::compiler::compile_executable_from_source;
 use crate::interpreter::{Execution, Interpreter, SLValue};
@@ -16,6 +17,48 @@ fn signatures_own_their_type_declarations() {
 
   assert_eq!(signature.type_vars[0].0, "Element");
   assert_eq!(signature.params[0], Signature::var("Element"));
+}
+
+#[test]
+fn default_library_merges_std_and_rand_libraries() {
+  let std_library = super::std::library();
+  let rand_library = super::rand::library();
+
+  assert!(std_library
+    .builtins()
+    .all(|builtin| builtin.spec().module == "std"));
+  assert_eq!(std_library.types().count(), 0);
+  assert!(std_library.prelude().is_empty());
+
+  assert!(rand_library
+    .builtins()
+    .all(|builtin| builtin.spec().module == "rand"));
+  assert_eq!(
+    rand_library
+      .types()
+      .map(|type_| (type_.module, type_.name))
+      .collect::<Vec<_>>(),
+    vec![("rand", "Rng")]
+  );
+  assert!(rand_library.prelude().is_empty());
+
+  let expected_builtins = std_library
+    .builtins()
+    .chain(rand_library.builtins())
+    .map(|builtin| (builtin.spec().module, builtin.spec().name))
+    .collect::<Vec<_>>();
+  let default_library = Library::default();
+  assert_eq!(
+    default_library
+      .builtins()
+      .map(|builtin| (builtin.spec().module, builtin.spec().name))
+      .collect::<Vec<_>>(),
+    expected_builtins
+  );
+  assert_eq!(
+    default_library.prelude().len(),
+    std_library.builtins().count()
+  );
 }
 
 /// Helper: evaluate `main` with [`Library::default`] and return the result.
@@ -449,7 +492,7 @@ fn assert_final_builtin_reservation_fails(
 ) {
   assert!(result_external_bytes > 0);
   let mut exec = before_final_call(source);
-  let scratch_bytes = arity * std::mem::size_of::<Value<'static>>();
+  let scratch_bytes = arity * ::std::mem::size_of::<Value<'static>>();
   let limit = exec
     .memory_usage()
     .checked_add(scratch_bytes)
@@ -473,7 +516,7 @@ fn assert_final_builtin_reservation_fails(
 #[test]
 fn allocating_builtins_reserve_before_building_results() {
   let large = "x".repeat(512);
-  let ptr = std::mem::size_of::<Value<'static>>();
+  let ptr = ::std::mem::size_of::<Value<'static>>();
   let cases = [
     (
       format!("(fn main () ->String (std::concat \"{large}\" \"{large}\"))"),
@@ -517,7 +560,7 @@ fn list_idx_returns_the_existing_value_without_cloning() {
   let large = "x".repeat(64 * 1024);
   let source = format!("(fn main () ->String (std::idx (std::list \"{large}\") 0))");
   let mut exec = before_final_call(&source);
-  let scratch_bytes = 2 * std::mem::size_of::<Value<'static>>();
+  let scratch_bytes = 2 * ::std::mem::size_of::<Value<'static>>();
   exec.set_memory_limit(Some(exec.memory_usage() + scratch_bytes));
   let gc_before = exec.gc_count();
 
@@ -539,7 +582,7 @@ fn builtin_argument_buffer_is_reserved_before_allocation() {
       .join(" ")
   );
   let mut exec = before_final_call(&source);
-  let scratch_bytes = 128 * std::mem::size_of::<Value<'static>>();
+  let scratch_bytes = 128 * ::std::mem::size_of::<Value<'static>>();
   exec.set_memory_limit(Some(exec.memory_usage() + scratch_bytes - 1));
   let gc_before = exec.gc_count();
 
@@ -551,7 +594,7 @@ fn builtin_argument_buffer_is_reserved_before_allocation() {
 #[test]
 fn range_reserves_result_buffer_before_allocation() {
   let mut exec = before_final_call("(fn main () ->(List Int) (std::range 0 10000))");
-  let value_bytes = std::mem::size_of::<Value<'static>>();
+  let value_bytes = ::std::mem::size_of::<Value<'static>>();
   let scratch_bytes = 2 * value_bytes;
   let result_vec_bytes = 10_000 * value_bytes;
   exec.set_memory_limit(Some(
@@ -584,7 +627,7 @@ fn string_slicing_uses_character_indices() {
 }
 
 /// End-to-end: the surface `(rand::rng seed "name")` returns an `Rng`
-/// wrapping a `Cell(Int)` whose contents match [`rand_rng`] directly.
+/// wrapping a `Cell(Int)` whose contents match the seed derivation directly.
 #[rstest]
 #[case::alpha(0, "alpha", -1438303955140652998)]
 #[case::beta(1, "beta", 6165243067257761546)]
@@ -614,6 +657,39 @@ fn rand_rng_surface(#[case] seed: i64, #[case] name: &str, #[case] expected: i64
     },
     other => panic!("expected Rng from rand::rng, got {:?}", other),
   }
+}
+
+#[test]
+fn host_builtins_can_construct_rng_values() {
+  let library = Library::default().with_builtin(Builtin::contextual_value(
+    "host",
+    "rng",
+    Some(1),
+    sig(
+      &[],
+      vec![Signature::Int],
+      None,
+      Signature::named("rand", "Rng"),
+    ),
+    |ctx, args| match args[0] {
+      Value::Int(seed) => super::rand::alloc_rng(ctx, seed),
+      other => Err(format!("expected Int, got {}", other.type_name())),
+    },
+  ));
+  let package = compile_executable_from_source(
+    "(fn main () ->Int (rand::roll! (host::rng 42) 20))",
+    ("main", "main"),
+    &library,
+  )
+  .unwrap_or_else(|e| panic!("compile failed: {e}"));
+  let mut execution = Interpreter::with_library(package, library)
+    .call_main()
+    .unwrap_or_else(|e| panic!("call_main failed: {e}"));
+
+  assert_eq!(
+    execution.run_until_done().unwrap(),
+    SLValue::Int(rand_roll(42, 20).0)
+  );
 }
 
 /// End-to-end: `(rand::roll! rng sides)` mutates the Cell<Int> `rng` in place

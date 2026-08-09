@@ -12,7 +12,8 @@ extern crate serde_derive;
 #[macro_use]
 extern crate pretty_assertions;
 
-mod builtins;
+/// Builtin host libraries and the APIs for composing them.
+pub mod builtins;
 mod closure;
 mod compiler;
 mod interpreter;
