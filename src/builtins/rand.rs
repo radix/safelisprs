@@ -2,15 +2,15 @@
 
 use blake3::Hasher;
 use gc_arena::{Gc, RefLock};
-use rand_chacha::rand_core::{RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
+use rand_core::{RngCore, SeedableRng};
 
 use crate::interpreter::{CellContents, HostCtx, SLVal, Value};
 use crate::types::Signature;
 
 use super::{sig, Builtin, CustomTypeSpec, Library};
 
-/// Construct the deterministic random-number builtin library.
+/// Construct the random-number builtin library.
 pub fn library() -> Library {
   Library::new()
     .with_type(CustomTypeSpec::struct_(
@@ -53,6 +53,61 @@ pub fn library() -> Library {
       ),
       roll,
     ))
+    // (rand::choice! rng list) -> element
+    //   Advances `rng` and returns an item selected from `list`.
+    //   Choosing from an empty list is an error and does not advance the RNG.
+    .with_builtin(Builtin::contextual_value(
+      "rand",
+      "choice!",
+      Some(2),
+      sig(
+        &[("A", &[])],
+        vec![
+          Signature::named("rand", "Rng"),
+          Signature::list(Signature::var("A")),
+        ],
+        None,
+        Signature::var("A"),
+      ),
+      choice,
+    ))
+}
+
+fn choice<'gc, 'call>(
+  ctx: &mut HostCtx<'gc, 'call>,
+  args: &[Value<'gc>],
+) -> Result<Value<'gc>, String> {
+  let (rng, list) = (args[0], args[1]);
+  let cell = rng_state_cell(ctx, rng, "rand::choice!")?;
+  let items = match &list {
+    Value::Heap(heap) => match &heap.value {
+      SLVal::List(items) => items,
+      _ => {
+        return Err(format!(
+          "rand::choice!: expected a List, got {}",
+          list.type_name()
+        ))
+      }
+    },
+    _ => {
+      return Err(format!(
+        "rand::choice!: expected a List, got {}",
+        list.type_name()
+      ))
+    }
+  };
+  if items.is_empty() {
+    return Err("rand::choice!: cannot choose from an empty list".to_string());
+  }
+  let sides = i64::try_from(items.len())
+    .map_err(|_| "rand::choice!: list is too long to choose from".to_string())?;
+  let seed = rng_seed(cell, "rand::choice!")?;
+  let (roll, next) = rand_roll(seed, sides);
+  Gc::write(ctx.mc(), cell)
+    .unlock()
+    .borrow_mut()
+    .set(Value::Int(next));
+  Ok(items[(roll - 1) as usize])
 }
 
 /// Construct a `rand::Rng` value initialized directly with `seed`.
@@ -121,7 +176,7 @@ fn roll<'gc, 'call>(
   args: &[Value<'gc>],
 ) -> Result<Value<'gc>, String> {
   let (rng, sides) = (args[0], args[1]);
-  let cell = rng_state_cell(ctx, rng)?;
+  let cell = rng_state_cell(ctx, rng, "rand::roll!")?;
   let sides = match sides {
     Value::Int(sides) => sides,
     other => {
@@ -137,15 +192,7 @@ fn roll<'gc, 'call>(
       sides
     ));
   }
-  let seed = match cell.borrow().value {
-    Value::Int(seed) => seed,
-    other => {
-      return Err(format!(
-        "rand::roll!: expected Cell to hold an Int, got {}",
-        other.type_name()
-      ))
-    }
-  };
+  let seed = rng_seed(cell, "rand::roll!")?;
   let (roll, next) = rand_roll(seed, sides);
   Gc::write(ctx.mc(), cell)
     .unlock()
@@ -157,19 +204,33 @@ fn roll<'gc, 'call>(
 fn rng_state_cell<'gc, 'call>(
   ctx: &HostCtx<'gc, 'call>,
   rng: Value<'gc>,
+  operation: &str,
 ) -> Result<Gc<'gc, RefLock<CellContents<'gc>>>, String> {
   let instance = ctx
     .struct_instance(&rng, "rand", "Rng")
-    .map_err(|error| format!("rand::roll!: {error}"))?;
+    .map_err(|error| format!("{operation}: {error}"))?;
   match instance.fields.as_slice() {
     [Value::Cell(cell)] => Ok(*cell),
     [other] => Err(format!(
-      "rand::roll!: expected Rng state to be a Cell, got {}",
+      "{operation}: expected Rng state to be a Cell, got {}",
       other.type_name()
     )),
     _ => Err(format!(
-      "rand::roll!: expected Rng to have 1 field, got {}",
+      "{operation}: expected Rng to have 1 field, got {}",
       instance.fields.len()
+    )),
+  }
+}
+
+fn rng_seed<'gc>(
+  cell: Gc<'gc, RefLock<CellContents<'gc>>>,
+  operation: &str,
+) -> Result<i64, String> {
+  match cell.borrow().value {
+    Value::Int(seed) => Ok(seed),
+    other => Err(format!(
+      "{operation}: expected Cell to hold an Int, got {}",
+      other.type_name()
     )),
   }
 }

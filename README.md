@@ -275,7 +275,7 @@ SafeLisp ships with a default host library containing these prelude functions:
 - strings and lists: `concat`, `list`, `len`, `idx`, `push`, `range`, `slice`
 - mutable cells: `cell`, `get`, `set!`
 - higher-order helpers: `map`
-- deterministic random values: `rand::rng`, `rand::roll!`
+- deterministic random values: `rand::rng`, `rand::roll!`, `rand::choice!`
 
 ## Features
 

@@ -1,4 +1,4 @@
-use super::rand::rand_roll;
+use super::rand::{rand_rng, rand_roll};
 use super::*;
 use crate::compiler::compile_executable_from_source;
 use crate::interpreter::{Execution, Interpreter, SLValue};
@@ -849,4 +849,60 @@ fn rand_roll_rejects_non_rng() {
 fn rand_rng_rejects_non_int_seed() {
   let err = eval_builtin_main("(fn main () ->Int (rand::rng \"x\" \"name\"))").unwrap_err();
   assert!(err.contains("expected `Int`"), "got: {}", err);
+}
+
+#[test]
+fn rand_choice_surface_chain_advances_rng_state() {
+  let seed = 42;
+  let name = "choice";
+  let mut state = rand_rng(seed, name);
+  let items = [10, 20, 30];
+  let expected = (0..8)
+    .map(|_| {
+      let (roll, next) = rand_roll(state, items.len() as i64);
+      state = next;
+      SLValue::Int(items[(roll - 1) as usize])
+    })
+    .collect::<Vec<_>>();
+  let source = format!(
+    "(fn main () ->(List Int)
+       (let rng (rand::rng {seed} \"{name}\"))
+       (let items (std::list 10 20 30))
+       (std::list
+         (rand::choice! rng items) (rand::choice! rng items)
+         (rand::choice! rng items) (rand::choice! rng items)
+         (rand::choice! rng items) (rand::choice! rng items)
+         (rand::choice! rng items) (rand::choice! rng items)))"
+  );
+
+  assert_eq!(eval_builtin_main(&source).unwrap(), SLValue::List(expected));
+}
+
+#[test]
+fn rand_choice_of_singleton_still_advances_rng_state() {
+  let seed = 7;
+  let name = "singleton";
+  let initial = rand_rng(seed, name);
+  let (_, next) = rand_roll(initial, 1);
+  let expected_roll = rand_roll(next, 20).0;
+  let source = format!(
+    "(fn main () ->(List Int)
+       (let rng (rand::rng {seed} \"{name}\"))
+       (std::list
+         (rand::choice! rng (std::list 99))
+         (rand::roll! rng 20)))"
+  );
+
+  assert_eq!(
+    eval_builtin_main(&source).unwrap(),
+    SLValue::List(vec![SLValue::Int(99), SLValue::Int(expected_roll)])
+  );
+}
+
+#[test]
+fn rand_choice_rejects_an_empty_list() {
+  let err =
+    eval_builtin_main("(fn main () ->Int (rand::choice! (rand::rng 0 \"empty\") (std::list)))")
+      .unwrap_err();
+  assert!(err.contains("empty list"), "got: {err}");
 }

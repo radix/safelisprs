@@ -4,6 +4,7 @@
 //! executable [`Package`], run it with [`Interpreter`], and extend the runtime
 //! with host-provided [`Builtin`] functions.
 #![deny(missing_docs)]
+#![deny(unsafe_code)]
 
 #[macro_use]
 extern crate serde_derive;
