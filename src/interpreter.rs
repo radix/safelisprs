@@ -1920,6 +1920,29 @@ impl<'gc, 'call> HostCtx<'gc, 'call> {
       .ok_or_else(|| format!("Struct not found: {module}::{name}"))
   }
 
+  /// Borrow `value` as an instance of the named struct type.
+  pub fn struct_instance<'value>(
+    &self,
+    value: &'value Value<'gc>,
+    module: &str,
+    name: &str,
+  ) -> Result<&'value StructInstance<'gc>, String> {
+    let struct_ = self.struct_type(module, name)?;
+    match value {
+      Value::Heap(value) => match &value.value {
+        SLVal::Struct(instance) if instance.struct_ == struct_ => Ok(instance),
+        _ => Err(format!(
+          "expected {module}::{name}, got {}",
+          value.value.type_name()
+        )),
+      },
+      other => Err(format!(
+        "expected {module}::{name}, got {}",
+        other.type_name()
+      )),
+    }
+  }
+
   /// Allocate a struct instance for a type declared in the current package.
   pub fn alloc_struct(
     &mut self,
@@ -1955,6 +1978,29 @@ impl<'gc, 'call> HostCtx<'gc, 'call> {
       .get_enum(enum_.0, enum_.1)
       .map(|_| enum_)
       .ok_or_else(|| format!("Enum not found: {module}::{name}"))
+  }
+
+  /// Borrow `value` as an instance of the named enum type.
+  pub fn enum_instance<'value>(
+    &self,
+    value: &'value Value<'gc>,
+    module: &str,
+    name: &str,
+  ) -> Result<&'value EnumInstance<'gc>, String> {
+    let enum_ = self.enum_type(module, name)?;
+    match value {
+      Value::Heap(value) => match &value.value {
+        SLVal::Enum(instance) if instance.enum_ == enum_ => Ok(instance),
+        _ => Err(format!(
+          "expected {module}::{name}, got {}",
+          value.value.type_name()
+        )),
+      },
+      other => Err(format!(
+        "expected {module}::{name}, got {}",
+        other.type_name()
+      )),
+    }
   }
 
   /// Allocate an enum instance for a type declared in the current package.

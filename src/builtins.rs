@@ -654,29 +654,18 @@ fn rng_state_cell<'gc, 'call>(
   ctx: &HostCtx<'gc, 'call>,
   rng: Value<'gc>,
 ) -> Result<Gc<'gc, RefLock<CellContents<'gc>>>, String> {
-  let rng_type = ctx.struct_type("rand", "Rng")?;
-  match rng {
-    Value::Heap(heap) => match &heap.value {
-      SLVal::Struct(instance) if instance.struct_ == rng_type => match instance.fields.as_slice() {
-        [Value::Cell(cell)] => Ok(*cell),
-        [other] => Err(format!(
-          "rand::roll!: expected Rng state to be a Cell, got {}",
-          other.type_name()
-        )),
-        _ => Err(format!(
-          "rand::roll!: expected Rng to have 1 field, got {}",
-          instance.fields.len()
-        )),
-      },
-      SLVal::Struct(_) => Err("rand::roll!: expected Rng, got Struct".to_string()),
-      _ => Err(format!(
-        "rand::roll!: expected Rng, got {}",
-        rng.type_name()
-      )),
-    },
-    other => Err(format!(
-      "rand::roll!: expected Rng, got {}",
+  let instance = ctx
+    .struct_instance(&rng, "rand", "Rng")
+    .map_err(|error| format!("rand::roll!: {error}"))?;
+  match instance.fields.as_slice() {
+    [Value::Cell(cell)] => Ok(*cell),
+    [other] => Err(format!(
+      "rand::roll!: expected Rng state to be a Cell, got {}",
       other.type_name()
+    )),
+    _ => Err(format!(
+      "rand::roll!: expected Rng to have 1 field, got {}",
+      instance.fields.len()
     )),
   }
 }

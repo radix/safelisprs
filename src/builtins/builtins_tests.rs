@@ -63,24 +63,7 @@ fn maybe_int_library() -> Library {
         Signature::Int,
       ),
       |ctx, args| {
-        let maybe_int = ctx.enum_type("host", "MaybeInt")?;
-        let instance = match &args[0] {
-          Value::Heap(value) => match &value.value {
-            SLVal::Enum(instance) if instance.enum_ == maybe_int => instance,
-            other => {
-              return Err(format!(
-                "expected host::MaybeInt, got {}",
-                other.type_name()
-              ))
-            }
-          },
-          other => {
-            return Err(format!(
-              "expected host::MaybeInt, got {}",
-              other.type_name()
-            ))
-          }
-        };
+        let instance = ctx.enum_instance(&args[0], "host", "MaybeInt")?;
         match (instance.variant, instance.fields.as_slice()) {
           (0, [Value::Int(value)]) => Ok(Value::Int(*value)),
           (1, []) => Ok(Value::Int(0)),
