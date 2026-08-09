@@ -19,6 +19,10 @@ pub enum Type {
   String,
   Bool,
   Void,
+  /// An expression that never produces a value because it returns from the
+  /// enclosing function. This is the bottom type and is compatible with every
+  /// ordinary expression type.
+  Diverges,
   Struct(QualifiedTypeName),
   Enum(QualifiedTypeName),
   Cell(Box<Type>),
@@ -236,6 +240,7 @@ struct Checker {
   types: HashMap<QualifiedTypeName, UserType>,
   field_accesses: HashMap<AstId, FieldAccessInfo>,
   matches: HashMap<AstId, MatchInfo>,
+  current_return: Option<Type>,
   next_var: usize,
   inference_vars: Vec<TvRef>,
 }
@@ -279,6 +284,7 @@ impl Checker {
       types: HashMap::new(),
       field_accesses: HashMap::new(),
       matches: HashMap::new(),
+      current_return: None,
       next_var: 0,
       inference_vars: Vec::new(),
     }
@@ -453,32 +459,37 @@ impl Checker {
     type_vars: TypeVars,
     top_level: bool,
   ) -> Result<(), TypeError> {
-    let checkpoint = self.inference_vars.len();
-    let mut seen = HashSet::new();
-    for ((name, annotation), ty) in function.params.iter().zip(&scheme.params) {
-      if annotation.is_none() && top_level {
-        return Err(TypeError::new(format!(
-          "parameter `{name}` requires a type annotation"
-        )));
+    let previous_return = self.current_return.replace(scheme.ret.clone());
+    let result = (|| {
+      let checkpoint = self.inference_vars.len();
+      let mut seen = HashSet::new();
+      for ((name, annotation), ty) in function.params.iter().zip(&scheme.params) {
+        if annotation.is_none() && top_level {
+          return Err(TypeError::new(format!(
+            "parameter `{name}` requires a type annotation"
+          )));
+        }
+        if !seen.insert(name.as_str()) {
+          return Err(TypeError::new(format!("duplicate parameter `{name}`")));
+        }
+        env.insert(name.binding, Binding::Mono(ty.clone()));
       }
-      if !seen.insert(name.as_str()) {
-        return Err(TypeError::new(format!("duplicate parameter `{name}`")));
-      }
-      env.insert(name.binding, Binding::Mono(ty.clone()));
-    }
 
-    let inferred = self.infer_sequence(&mut env, &type_vars, &function.code)?;
-    if !matches!(prune(&scheme.ret), Type::Void) {
-      self.unify(inferred, scheme.ret.clone()).map_err(|error| {
-        let span = function
-          .code
-          .last()
-          .map(|expression| expression.span.clone())
-          .unwrap_or_default();
-        error.at(span)
-      })?;
-    }
-    self.reject_unresolved(checkpoint)
+      let inferred = self.infer_sequence(&mut env, &type_vars, &function.code)?;
+      if !matches!(prune(&scheme.ret), Type::Void) {
+        self.unify(inferred, scheme.ret.clone()).map_err(|error| {
+          let span = function
+            .code
+            .last()
+            .map(|expression| expression.span.clone())
+            .unwrap_or_default();
+          error.at(span)
+        })?;
+      }
+      self.reject_unresolved(checkpoint)
+    })();
+    self.current_return = previous_return;
+    result
   }
 
   fn infer_sequence(
@@ -625,13 +636,54 @@ impl Checker {
         let mut else_env = env.clone();
         let then_type = self.infer(&mut then_env, type_vars, then_branch)?;
         let else_type = self.infer(&mut else_env, type_vars, else_branch)?;
-        self
-          .unify(then_type.clone(), else_type)
-          .map_err(|error| error.at(else_branch.span.clone()))?;
+        let result_type = match (prune(&then_type), prune(&else_type)) {
+          (Type::Diverges, other) => other,
+          (other, Type::Diverges) => other,
+          _ => {
+            self
+              .unify(then_type.clone(), else_type)
+              .map_err(|error| error.at(else_branch.span.clone()))?;
+            then_type
+          }
+        };
         *env = intersect_compatible_bindings(then_env, &else_env);
-        Ok(then_type)
+        Ok(result_type)
       }
       ASTKind::Block(body) => self.infer_sequence(env, type_vars, body),
+      ASTKind::Return(value) => {
+        let expected = self
+          .current_return
+          .clone()
+          .ok_or_else(|| TypeError::new("`return` is only allowed inside a function"))?;
+        let actual = match value {
+          Some(value) => self.infer(env, type_vars, value)?,
+          None => Type::Void,
+        };
+        self
+          .unify(actual, expected.clone())
+          .map_err(|error| error.context("return value must match the function return type"))?;
+        Ok(Type::Diverges)
+      }
+      ASTKind::And(operands) | ASTKind::Or(operands) => {
+        for operand in operands {
+          let operand_type = self.infer(env, type_vars, operand)?;
+          self
+            .unify(operand_type, Type::Bool)
+            .map_err(|error| error.at(operand.span.clone()))?;
+        }
+        Ok(Type::Bool)
+      }
+      ASTKind::For(name, iterable, body) => {
+        let item_type = self.fresh(Some(format!("item `{name}`")), Vec::new());
+        let iterable_type = self.infer(env, type_vars, iterable)?;
+        self
+          .unify(iterable_type, Type::List(Box::new(item_type.clone())))
+          .map_err(|error| error.at(iterable.span.clone()))?;
+        let mut body_env = env.clone();
+        body_env.insert(name.binding, Binding::Mono(item_type));
+        self.infer_sequence(&mut body_env, type_vars, body)?;
+        Ok(Type::Void)
+      }
       ASTKind::PartialApply(_, _) => Err(TypeError::new(
         "internal transformed AST reached the source typechecker",
       )),
@@ -834,13 +886,19 @@ impl Checker {
       }
 
       let arm_type = self.infer(&mut arm_env, type_vars, &arm.body)?;
-      if let Some(result) = &result {
-        self
-          .unify(arm_type, result.clone())
-          .map_err(|error| error.at(arm.body.span.clone()))?;
-      } else {
-        result = Some(arm_type);
-      }
+      result = match result {
+        None => Some(arm_type),
+        Some(previous) => match (prune(&previous), prune(&arm_type)) {
+          (Type::Diverges, other) => Some(other),
+          (other, Type::Diverges) => Some(other),
+          _ => {
+            self
+              .unify(arm_type, previous.clone())
+              .map_err(|error| error.at(arm.body.span.clone()))?;
+            Some(previous)
+          }
+        },
+      };
     }
 
     if !seen_default && seen_variants.len() != enum_.variants.len() {
@@ -1125,6 +1183,7 @@ impl Checker {
       | (Type::String, Type::String)
       | (Type::Bool, Type::Bool)
       | (Type::Void, Type::Void) => Ok(()),
+      (Type::Diverges, _) | (_, Type::Diverges) => Ok(()),
       (Type::Struct(a), Type::Struct(b)) if a == b => Ok(()),
       (Type::Enum(a), Type::Enum(b)) if a == b => Ok(()),
       (Type::Cell(a), Type::Cell(b)) | (Type::List(a), Type::List(b)) => self.unify(*a, *b),
@@ -1393,7 +1452,8 @@ fn types_equivalent(left: &Type, right: &Type) -> bool {
     | (Type::Float, Type::Float)
     | (Type::String, Type::String)
     | (Type::Bool, Type::Bool)
-    | (Type::Void, Type::Void) => true,
+    | (Type::Void, Type::Void)
+    | (Type::Diverges, Type::Diverges) => true,
     (Type::Struct(left), Type::Struct(right)) => left == right,
     (Type::Enum(left), Type::Enum(right)) => left == right,
     (Type::Cell(left), Type::Cell(right)) | (Type::List(left), Type::List(right)) => {
@@ -1755,6 +1815,7 @@ fn display_type(ty: &Type) -> String {
     Type::String => "String".to_string(),
     Type::Bool => "Bool".to_string(),
     Type::Void => "Void".to_string(),
+    Type::Diverges => "Never".to_string(),
     Type::Struct(name) => name.to_string(),
     Type::Enum(name) => name.to_string(),
     Type::Cell(item) => format!("(Cell {})", display_type(&item)),

@@ -151,6 +151,15 @@ pub(crate) enum ASTKind {
   /// last, and return the last. Lets a single-expression position (e.g. an `if`
   /// branch) evaluate multiple expressions for side effects.
   Block(Vec<AST>),
+  /// Return immediately from the enclosing function. An omitted expression
+  /// returns `Void`.
+  Return(Option<Box<AST>>),
+  /// Boolean conjunction with left-to-right short-circuiting.
+  And(Vec<AST>),
+  /// Boolean disjunction with left-to-right short-circuiting.
+  Or(Vec<AST>),
+  /// Iterate over a list, binding each item while evaluating the body.
+  For(ResolvedName, Box<AST>, Vec<AST>),
 }
 
 impl AST {
@@ -250,6 +259,18 @@ pub(crate) fn try_map_ast_children<E>(
       Box::new(map(else_branch)?),
     ),
     ASTKind::Block(body) => ASTKind::Block(body.iter().map(&mut map).collect::<Result<_, _>>()?),
+    ASTKind::Return(value) => {
+      ASTKind::Return(value.as_deref().map(&mut map).transpose()?.map(Box::new))
+    }
+    ASTKind::And(operands) => {
+      ASTKind::And(operands.iter().map(&mut map).collect::<Result<_, _>>()?)
+    }
+    ASTKind::Or(operands) => ASTKind::Or(operands.iter().map(&mut map).collect::<Result<_, _>>()?),
+    ASTKind::For(name, iterable, body) => ASTKind::For(
+      name.clone(),
+      Box::new(map(iterable)?),
+      body.iter().map(&mut map).collect::<Result<_, _>>()?,
+    ),
     ASTKind::Variable(_)
     | ASTKind::Int(_)
     | ASTKind::Float(_)
@@ -372,6 +393,23 @@ pub(crate) fn erase_bindings(asts: &[AST]) -> Vec<AST> {
         erase_ast(else_branch);
       }
       ASTKind::Block(body) => {
+        for expression in body {
+          erase_ast(expression);
+        }
+      }
+      ASTKind::Return(value) => {
+        if let Some(value) = value {
+          erase_ast(value);
+        }
+      }
+      ASTKind::And(operands) | ASTKind::Or(operands) => {
+        for operand in operands {
+          erase_ast(operand);
+        }
+      }
+      ASTKind::For(name, iterable, body) => {
+        erase_name(name);
+        erase_ast(iterable);
         for expression in body {
           erase_ast(expression);
         }
@@ -523,6 +561,11 @@ enum TokenKind {
   If,
   Else,
   Block,
+  Return,
+  And,
+  Or,
+  For,
+  In,
   Where,
   Sym(String),
   Bool(bool),
@@ -560,6 +603,11 @@ impl fmt::Display for TokenKind {
       TokenKind::If => write!(formatter, "if"),
       TokenKind::Else => write!(formatter, "else"),
       TokenKind::Block => write!(formatter, "block"),
+      TokenKind::Return => write!(formatter, "return"),
+      TokenKind::And => write!(formatter, "and"),
+      TokenKind::Or => write!(formatter, "or"),
+      TokenKind::For => write!(formatter, "for"),
+      TokenKind::In => write!(formatter, "in"),
       TokenKind::Where => write!(formatter, "where"),
       TokenKind::Sym(name) => write!(formatter, "{name}"),
       TokenKind::Bool(value) => write!(formatter, "{value}"),
@@ -800,6 +848,7 @@ impl<'a> Lexer<'a> {
             | TokenKind::If
             | TokenKind::Else
             | TokenKind::Block
+            | TokenKind::For
         ),
       });
     }
@@ -1020,6 +1069,11 @@ fn identifier_token_kind(text: &str) -> TokenKind {
     "if" => TokenKind::If,
     "else" => TokenKind::Else,
     "block" => TokenKind::Block,
+    "return" => TokenKind::Return,
+    "and" => TokenKind::And,
+    "or" => TokenKind::Or,
+    "for" => TokenKind::For,
+    "in" => TokenKind::In,
     "where" => TokenKind::Where,
     "true" => TokenKind::Bool(true),
     "false" => TokenKind::Bool(false),
@@ -1136,7 +1190,11 @@ impl Parser {
       | TokenKind::New
       | TokenKind::Match
       | TokenKind::If
-      | TokenKind::Block)
+      | TokenKind::Block
+      | TokenKind::Return
+      | TokenKind::And
+      | TokenKind::Or
+      | TokenKind::For)
         if layout_line_start && self.starts_layout_form(&kind) =>
       {
         self.parse_form_after_head(
@@ -1210,6 +1268,10 @@ impl Parser {
       TokenKind::Match => self.parse_match(start, mode),
       TokenKind::If => self.parse_if(start, mode),
       TokenKind::Block => self.parse_block(start, mode),
+      TokenKind::Return => self.parse_return(start, mode),
+      TokenKind::And => self.parse_boolean_form(start, mode, true),
+      TokenKind::Or => self.parse_boolean_form(start, mode, false),
+      TokenKind::For => self.parse_for(start, mode),
       TokenKind::Sym(name) => self.parse_fixed_call_after_head(start, head_span, name, mode),
       _ => unreachable!("caller only passes valid form heads"),
     }
@@ -1565,6 +1627,77 @@ impl Parser {
     Ok(AST::new(ASTKind::Block(expressions), span))
   }
 
+  fn parse_return(&mut self, start: usize, mode: FormMode) -> Result<AST, ParseError> {
+    let value = match mode {
+      FormMode::Paren if matches!(self.peek().kind, TokenKind::RParen) => None,
+      FormMode::Layout
+        if matches!(
+          self.peek().kind,
+          TokenKind::Newline | TokenKind::Dedent | TokenKind::Eof
+        ) =>
+      {
+        None
+      }
+      _ => Some(Box::new(self.parse_expr()?)),
+    };
+    let close = match mode {
+      FormMode::Paren => {
+        self.expect_form_end(FormEnd::RParen, "`return` accepts at most one expression")?
+      }
+      FormMode::Layout => self.expect_layout_line_end("`return` accepts at most one expression")?,
+    };
+    Ok(AST::new(ASTKind::Return(value), start..close.span.end))
+  }
+
+  fn parse_boolean_form(
+    &mut self,
+    start: usize,
+    mode: FormMode,
+    is_and: bool,
+  ) -> Result<AST, ParseError> {
+    let (operands, close) = match mode {
+      FormMode::Paren => self.parse_call_args(mode)?,
+      FormMode::Layout => {
+        let mut operands = Vec::new();
+        while !matches!(
+          self.peek().kind,
+          TokenKind::Newline | TokenKind::Dedent | TokenKind::Eof
+        ) {
+          operands.push(self.parse_expr()?);
+        }
+        let close = self.expect_layout_line_end("boolean operands must end with the line")?;
+        (operands, close)
+      }
+    };
+    if operands.len() < 2 {
+      let form = if is_and { "and" } else { "or" };
+      return Err(ParseError::new(
+        start..close.span.end,
+        format!("`{form}` requires at least two operands"),
+      ));
+    }
+    let kind = if is_and {
+      ASTKind::And(operands)
+    } else {
+      ASTKind::Or(operands)
+    };
+    Ok(AST::new(kind, start..close.span.end))
+  }
+
+  fn parse_for(&mut self, start: usize, mode: FormMode) -> Result<AST, ParseError> {
+    let variable = self.expect_symbol("`for` binding must be a symbol")?;
+    self.expect(TokenKind::In, "`for` requires `in` after its binding")?;
+    let iterable = self.parse_expr()?;
+    if mode == FormMode::Layout {
+      self.expect(TokenKind::Colon, "layout `for` requires `:` after its list")?;
+    }
+    let (body, close) = self.parse_nonempty_exprs_for_form(mode, "for")?;
+    Ok(AST::new(
+      ASTKind::For(variable.into(), Box::new(iterable), body),
+      start..close.span.end,
+    ))
+  }
+
   fn parse_fixed_call_after_head(
     &mut self,
     start: usize,
@@ -1875,7 +2008,7 @@ impl Parser {
     if !is_form_head_token(kind) {
       return false;
     }
-    matches!(kind, TokenKind::Block) || self.has_more_tokens_on_current_line()
+    matches!(kind, TokenKind::Block | TokenKind::Return) || self.has_more_tokens_on_current_line()
   }
 
   fn has_more_tokens_on_current_line(&self) -> bool {
@@ -1951,6 +2084,10 @@ fn is_form_head_token(kind: &TokenKind) -> bool {
       | TokenKind::Match
       | TokenKind::If
       | TokenKind::Block
+      | TokenKind::Return
+      | TokenKind::And
+      | TokenKind::Or
+      | TokenKind::For
   )
 }
 
@@ -1966,6 +2103,7 @@ fn layout_requires_indent_message(form: &'static str) -> &'static str {
     "if" => "`if` then branch must be indented",
     "else" => "`else` branch must be indented",
     "block" => "`block` layout body must be indented",
+    "for" => "`for` layout body must be indented",
     "call" => "layout call body must be indented",
     _ => "layout body must be indented",
   }

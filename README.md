@@ -99,8 +99,8 @@ assert!(error.contains("memory limit exceeded"));
 
 SafeLisp has a Lisp core with an indentation-based layout syntax for the common
 special forms. Function calls use parentheses, but special forms (`fn`, `if`,
-`else`, `match`, `let`, `struct`, `enum`, `new`, and `block`) can be written
-without outer parens.
+`else`, `match`, `let`, `struct`, `enum`, `new`, `block`, `return`, `and`,
+`or`, and `for`) can be written without outer parens.
 
 ### Functions
 
@@ -121,6 +121,40 @@ fn sum-to (n:Int) -> Int
 fn main () -> Int
   let x 21
   (double x)
+```
+
+Functions may also return early. `(return)` returns `Void`; `(return value)` returns a value.
+
+```lisp
+fn first-or-zero (xs:(List Int)) -> Int
+  for x in xs:
+    return x
+  0
+```
+
+### Boolean forms
+
+`and` and `or` accept only Boolean operands and evaluate them left to right,
+stopping as soon as the result is known. They are variadic and require at least
+two operands.
+
+```lisp
+fn should-send (enabled:Bool has-recipient:Bool) -> Bool
+  (and enabled has-recipient)
+```
+
+### List iteration
+
+`for x in xs` is iteration for side-effects. It evaluates to `Void`.
+
+```lisp
+fn visit-all (xs:(List Int))
+  for x in xs:
+    (host::visit x)
+
+fn visit-all-parenthesized (xs:(List Int))
+  (for x in xs
+    (host::visit x))
 ```
 
 Function values are first class. Builtins and user functions can be passed to

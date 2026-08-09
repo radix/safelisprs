@@ -1573,6 +1573,19 @@ impl<'gc> ExecRoot<'gc> {
         self.frames.pop();
         self.stack.push(result);
       }
+      Instruction::ReturnEarly => {
+        let stack_base = self.frame_stack_base()?;
+        if self.stack.len() <= stack_base {
+          return Err("early Return with an empty frame segment".to_string());
+        }
+        let result = self
+          .stack
+          .pop()
+          .ok_or_else(|| "early Return with an empty frame segment".to_string())?;
+        self.stack.truncate(stack_base);
+        self.frames.pop();
+        self.stack.push(result);
+      }
       Instruction::SetLocal(i) => {
         let val = self.pop()?;
         let frame = self
@@ -1642,6 +1655,98 @@ impl<'gc> ExecRoot<'gc> {
               other.error_description()
             ))
           }
+        }
+      }
+      Instruction::JumpBack(offset) => {
+        let frame = self
+          .frames
+          .last_mut()
+          .ok_or_else(|| "JumpBack with no frame".to_string())?;
+        let function_frame = match &mut frame.kind {
+          FrameKind::Function(function_frame) => function_frame,
+          FrameKind::Host(_) => return Err("JumpBack in host frame".to_string()),
+        };
+        function_frame.ip = function_frame
+          .ip
+          .checked_sub(offset as usize)
+          .ok_or_else(|| "JumpBack before start of function".to_string())?;
+      }
+      Instruction::ListNext {
+        list_local,
+        index_local,
+        item_local,
+        exit_offset,
+      } => {
+        let (list, index) = {
+          let frame = self
+            .frames
+            .last()
+            .ok_or_else(|| "ListNext with no frame".to_string())?;
+          let function_frame = match &frame.kind {
+            FrameKind::Function(function_frame) => function_frame,
+            FrameKind::Host(_) => return Err("ListNext in host frame".to_string()),
+          };
+          (
+            function_frame.locals[usize::from(list_local)],
+            function_frame.locals[usize::from(index_local)],
+          )
+        };
+        let index = match index {
+          Value::Int(index) if index >= 0 => {
+            usize::try_from(index).map_err(|_| "for-loop index does not fit usize".to_string())?
+          }
+          other => {
+            return Err(format!(
+              "for-loop index must be a non-negative Int, got {}",
+              other.error_description()
+            ))
+          }
+        };
+        let items = match &list {
+          Value::Heap(heap) => match &heap.value {
+            SLVal::List(items) => items,
+            _ => {
+              return Err(format!(
+                "for-loop iterable must be a list, got {}",
+                list.error_description()
+              ))
+            }
+          },
+          _ => {
+            return Err(format!(
+              "for-loop iterable must be a list, got {}",
+              list.error_description()
+            ))
+          }
+        };
+        if let Some(item) = items.get(index).copied() {
+          let next_index =
+            i64::try_from(index + 1).map_err(|_| "for-loop index overflow".to_string())?;
+          let frame = self
+            .frames
+            .last_mut()
+            .ok_or_else(|| "ListNext with no frame".to_string())?;
+          let function_frame = match &mut frame.kind {
+            FrameKind::Function(function_frame) => function_frame,
+            FrameKind::Host(_) => return Err("ListNext in host frame".to_string()),
+          };
+          function_frame.locals[usize::from(item_local)] = item;
+          function_frame.locals[usize::from(index_local)] = Value::Int(next_index);
+        } else if index == items.len() {
+          let frame = self
+            .frames
+            .last_mut()
+            .ok_or_else(|| "ListNext with no frame".to_string())?;
+          let function_frame = match &mut frame.kind {
+            FrameKind::Function(function_frame) => function_frame,
+            FrameKind::Host(_) => return Err("ListNext in host frame".to_string()),
+          };
+          function_frame.ip = function_frame.ip.wrapping_add(exit_offset as usize);
+        } else {
+          return Err(format!(
+            "for-loop index {index} is past list length {}",
+            items.len()
+          ));
         }
       }
     }

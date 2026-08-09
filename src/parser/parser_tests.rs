@@ -180,6 +180,94 @@ fn parses_parenless_layout_let() {
   assert_eq!(layout, parenthesized);
 }
 
+#[test]
+fn parses_return_forms() {
+  let asts = read_multiple("(return) (return 3)").unwrap();
+  assert!(matches!(asts[0].kind, ASTKind::Return(None)));
+  let ASTKind::Return(Some(value)) = &asts[1].kind else {
+    panic!("expected valued return");
+  };
+  assert_eq!(**value, AST::Int(3));
+}
+
+#[test]
+fn parses_boolean_special_forms() {
+  let asts = read_multiple("(and true false true) (or false true)").unwrap();
+  let ASTKind::And(operands) = &asts[0].kind else {
+    panic!("expected and form");
+  };
+  assert_eq!(operands.len(), 3);
+  let ASTKind::Or(operands) = &asts[1].kind else {
+    panic!("expected or form");
+  };
+  assert_eq!(operands.len(), 2);
+}
+
+#[test]
+fn boolean_special_forms_require_two_operands() {
+  assert_eq!(
+    read_multiple("(and)").unwrap_err(),
+    "line 1, column 1: `and` requires at least two operands"
+  );
+  assert_eq!(
+    read_multiple("(or)").unwrap_err(),
+    "line 1, column 1: `or` requires at least two operands"
+  );
+  assert_eq!(
+    read_multiple("(and true)").unwrap_err(),
+    "line 1, column 1: `and` requires at least two operands"
+  );
+  assert_eq!(
+    read_multiple("(or false)").unwrap_err(),
+    "line 1, column 1: `or` requires at least two operands"
+  );
+}
+
+#[test]
+fn parses_layout_boolean_forms() {
+  assert_eq!(
+    read_multiple("and true false true").unwrap(),
+    read_multiple("(and true false true)").unwrap()
+  );
+  assert_eq!(
+    read_multiple("or false true").unwrap(),
+    read_multiple("(or false true)").unwrap()
+  );
+}
+
+#[test]
+fn parses_layout_for_like_parenthesized_for() {
+  let layout = read_multiple(
+    "fn main ()
+  for x in (list 1 2 3):
+    (set! target x)",
+  )
+  .unwrap();
+  let parenthesized =
+    read_multiple("(fn main () (for x in (list 1 2 3) (set! target x)))").unwrap();
+
+  assert_eq!(layout, parenthesized);
+}
+
+#[test]
+fn parses_layout_return_with_and_without_value() {
+  let asts = read_multiple(
+    "fn valued () -> Int
+  return 3
+fn empty ()
+  return",
+  )
+  .unwrap();
+  let ASTKind::DefineFn(valued) = &asts[0].kind else {
+    panic!("expected function");
+  };
+  assert!(matches!(valued.code[0].kind, ASTKind::Return(Some(_))));
+  let ASTKind::DefineFn(empty) = &asts[1].kind else {
+    panic!("expected function");
+  };
+  assert!(matches!(empty.code[0].kind, ASTKind::Return(None)));
+}
+
 #[rstest]
 #[case(
   "let new 3",
@@ -228,6 +316,46 @@ fn parses_parenless_layout_let() {
   "a symbol",
   1,
   10
+)]
+#[case(
+  "let return 3",
+  "return",
+  Some("first argument to `let` must be a symbol"),
+  "a symbol",
+  1,
+  5
+)]
+#[case(
+  "let and 3",
+  "and",
+  Some("first argument to `let` must be a symbol"),
+  "a symbol",
+  1,
+  5
+)]
+#[case(
+  "let or 3",
+  "or",
+  Some("first argument to `let` must be a symbol"),
+  "a symbol",
+  1,
+  5
+)]
+#[case(
+  "let for 3",
+  "for",
+  Some("first argument to `let` must be a symbol"),
+  "a symbol",
+  1,
+  5
+)]
+#[case(
+  "let in 3",
+  "in",
+  Some("first argument to `let` must be a symbol"),
+  "a symbol",
+  1,
+  5
 )]
 fn syntax_tokens_cannot_be_used_as_names(
   #[case] source: &str,

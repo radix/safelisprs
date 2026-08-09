@@ -471,6 +471,35 @@ fn transform_ast(
       }
       Ok(ast.with_kind(ASTKind::Match(Box::new(scrutinee), transformed_arms)))
     }
+    ASTKind::For(name, iterable, body) => {
+      let iterable = transform_ast(
+        module_name,
+        iterable,
+        lexical_path,
+        environment,
+        locals,
+        captures,
+        lifted,
+        names,
+        recursive_bindings,
+        recursive_refs,
+      )?;
+      let mut body_locals = locals.clone();
+      body_locals.insert(name.binding);
+      let body = transform_sequence(
+        module_name,
+        body,
+        lexical_path,
+        environment,
+        &mut body_locals,
+        captures,
+        lifted,
+        names,
+        recursive_bindings,
+        recursive_refs,
+      )?;
+      Ok(ast.with_kind(ASTKind::For(name.clone(), Box::new(iterable), body)))
+    }
     _ => try_map_ast_children(ast, |child| {
       transform_ast(
         module_name,

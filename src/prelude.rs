@@ -254,6 +254,14 @@ impl Resolver<'_> {
         }
         Ok(ast.with_kind(ASTKind::Match(Box::new(scrutinee), resolved_arms)))
       }
+      ASTKind::For(name, iterable, body) => {
+        let iterable = self.resolve_expr(iterable, scope)?;
+        let name = self.fresh_name(name.as_str());
+        let mut body_scope = scope.clone();
+        body_scope.insert(name.name.clone(), name.binding);
+        let body = self.resolve_sequence(body, &mut body_scope)?;
+        Ok(ast.with_kind(ASTKind::For(name, Box::new(iterable), body)))
+      }
       _ => try_map_ast_children(ast, |child| self.resolve_expr(child, scope)),
     }
   }

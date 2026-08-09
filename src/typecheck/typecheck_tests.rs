@@ -19,6 +19,68 @@ fn polymorphic_identity_can_be_used_at_two_types() {
 }
 
 #[test]
+fn return_value_must_match_function_return_type() {
+  check("(fn main () ->Int (return 3))").unwrap();
+  check("(fn main () (return))").unwrap();
+  check("(fn main () ->Int (if true (return 1) \"ignored\") 2)").unwrap();
+
+  let error = check("(fn main () ->Int (return false))").unwrap_err();
+  assert!(
+    error.message.contains("Int") && error.message.contains("Bool"),
+    "{error}"
+  );
+
+  let error = check("(fn main () ->Int (return))").unwrap_err();
+  assert!(
+    error.message.contains("Int") && error.message.contains("Void"),
+    "{error}"
+  );
+
+  let error = check("(fn main () (return 3))").unwrap_err();
+  assert!(
+    error.message.contains("Void") && error.message.contains("Int"),
+    "{error}"
+  );
+}
+
+#[test]
+fn and_and_or_require_boolean_operands() {
+  check("(fn main () ->Bool (and true false true))").unwrap();
+  check("(fn main () ->Bool (or false true false))").unwrap();
+
+  let error = check("(fn main () ->Bool (and true 1))").unwrap_err();
+  assert!(
+    error.message.contains("Bool") && error.message.contains("Int"),
+    "{error}"
+  );
+  let error = check("(fn main () ->Bool (or false \"no\"))").unwrap_err();
+  assert!(
+    error.message.contains("Bool") && error.message.contains("String"),
+    "{error}"
+  );
+}
+
+#[test]
+fn for_requires_a_list_and_types_its_binding() {
+  check("(fn main () (for x in (std::list 1 2 3) (std::+ x 1)))").unwrap();
+
+  let error = check("(fn main () (for x in 3 x))").unwrap_err();
+  assert!(
+    error.message.contains("List") && error.message.contains("Int"),
+    "{error}"
+  );
+
+  let error = check("(fn main () (for x in (std::list 1) (std::concat x \"x\")))").unwrap_err();
+  assert!(error.message.contains("Concat"), "{error}");
+}
+
+#[test]
+fn for_binding_is_scoped_to_the_loop_body() {
+  let error = check("(fn main () ->Int (for x in (std::list 1) x) x)").unwrap_err();
+  assert!(error.message.contains("Unknown name `x`"), "{error}");
+}
+
+#[test]
 fn structs_typecheck_construction_and_field_access() {
   check(
     "(struct Foo x:Int y:(Cell Int))

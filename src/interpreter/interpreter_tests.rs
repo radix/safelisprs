@@ -102,6 +102,76 @@ fn std_concat_strings() {
 }
 
 #[test]
+fn return_unwinds_partially_evaluated_expressions() {
+  assert_eq!(
+    eval_main("(fn main () ->Int (std::+ 1 (return 42)))"),
+    SLValue::Int(42)
+  );
+}
+
+#[test]
+fn void_return_exits_before_later_expressions() {
+  let source = "
+    (fn stop (value:(Cell Int))
+      (return)
+      (std::set! value 1))
+    (fn main () ->Int
+      (let value (std::cell 0))
+      (stop value)
+      (std::get value))";
+  assert_eq!(eval_main(source), SLValue::Int(0));
+}
+
+#[test]
+fn and_and_or_short_circuit_left_to_right() {
+  let source = "
+    (fn main () ->Bool
+      (let touched (std::cell false))
+      (and false (block (std::set! touched true) true))
+      (or true (block (std::set! touched true) false))
+      (std::get touched))";
+  assert_eq!(eval_main(source), SLValue::Bool(false));
+}
+
+#[test]
+fn layout_for_iterates_lists_and_returns_void() {
+  let source = "fn add-all (total:(Cell Int) xs:(List Int))
+  for x in xs:
+    (set! total (+ (get total) x))
+fn main () -> Int
+  let total (cell 0)
+  (add-all total (list 1 2 3 4))
+  (get total)";
+  assert_eq!(eval_main(source), SLValue::Int(10));
+}
+
+#[test]
+fn for_evaluates_its_list_once_and_return_exits_the_loop() {
+  let source = "
+    (fn main () ->Int
+      (let evaluations (std::cell 0))
+      (for x in (block
+          (std::set! evaluations (std::+ (std::get evaluations) 1))
+          (std::list 7 8 9))
+        (if (std::== x 8)
+          (return (std::+ x (std::get evaluations)))
+          0))
+      99)";
+  assert_eq!(eval_main(source), SLValue::Int(9));
+}
+
+#[test]
+fn nested_function_can_capture_for_binding() {
+  let source = "
+    (fn main () ->Int
+      (for x in (std::list 11 12)
+        (fn current () ->Int x)
+        (return (current)))
+      0)";
+  assert_eq!(eval_main(source), SLValue::Int(11));
+}
+
+#[test]
 fn constructs_structs_and_reads_fields_without_parentheses() {
   let source = "
       (struct Foo

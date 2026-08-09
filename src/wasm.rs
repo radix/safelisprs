@@ -436,6 +436,16 @@ impl<'b> ModuleCompiler<'b> {
           self.discover_expr(expr)?;
         }
       }
+      ASTKind::Return(value) => {
+        if let Some(value) = value {
+          self.discover_expr(value)?;
+        }
+      }
+      ASTKind::And(operands) | ASTKind::Or(operands) => {
+        for operand in operands {
+          self.discover_expr(operand)?;
+        }
+      }
       ASTKind::CallFixed(ident, args) => {
         self.resolve_builtin_for_discovery(ident)?;
         self.type_index(Signature {
@@ -650,6 +660,16 @@ impl<'b> ModuleCompiler<'b> {
           self.count_let_locals(expr, locals, next_pair)?;
         }
       }
+      ASTKind::Return(value) => {
+        if let Some(value) = value {
+          self.count_let_locals(value, locals, next_pair)?;
+        }
+      }
+      ASTKind::And(operands) | ASTKind::Or(operands) => {
+        for operand in operands {
+          self.count_let_locals(operand, locals, next_pair)?;
+        }
+      }
       ASTKind::CallFixed(_, args) => {
         for arg in args {
           self.count_let_locals(arg, locals, next_pair)?;
@@ -803,6 +823,40 @@ impl<'b> ModuleCompiler<'b> {
           }
         }
       }
+      ASTKind::Return(value) => {
+        if let Some(value) = value {
+          self.compile_expr(
+            value,
+            locals,
+            next_pair,
+            num_params,
+            num_lets,
+            num_imports,
+            func,
+          )?;
+        } else {
+          self.emit_void(func);
+        }
+        func.instructions().return_();
+      }
+      ASTKind::And(operands) => self.compile_and(
+        operands,
+        locals,
+        next_pair,
+        num_params,
+        num_lets,
+        num_imports,
+        func,
+      )?,
+      ASTKind::Or(operands) => self.compile_or(
+        operands,
+        locals,
+        next_pair,
+        num_params,
+        num_lets,
+        num_imports,
+        func,
+      )?,
       ASTKind::CallFixed(ident, args) => self.compile_call_fixed(
         ident,
         args,
@@ -830,6 +884,130 @@ impl<'b> ModuleCompiler<'b> {
         ))
       }
     }
+    Ok(())
+  }
+
+  #[allow(clippy::too_many_arguments)]
+  fn compile_and(
+    &mut self,
+    operands: &[AST],
+    locals: &mut Vec<(BindingId, u32)>,
+    next_pair: &mut u32,
+    num_params: u32,
+    num_lets: u32,
+    num_imports: u32,
+    func: &mut Function,
+  ) -> Result<(), String> {
+    let Some((first, rest)) = operands.split_first() else {
+      func.instructions().i64_const(1);
+      func.instructions().i32_const(TAG_BOOL);
+      return Ok(());
+    };
+    if rest.is_empty() {
+      return self.compile_expr(
+        first,
+        locals,
+        next_pair,
+        num_params,
+        num_lets,
+        num_imports,
+        func,
+      );
+    }
+
+    self.compile_expr(
+      first,
+      locals,
+      next_pair,
+      num_params,
+      num_lets,
+      num_imports,
+      func,
+    )?;
+    func.instructions().drop();
+    func.instructions().i64_const(0);
+    func.instructions().i64_ne();
+    let block_type = BlockType::FunctionType(
+      self
+        .if_block_type
+        .expect("boolean block type allocated in discovery"),
+    );
+    func.instructions().if_(block_type);
+    self.compile_and(
+      rest,
+      locals,
+      next_pair,
+      num_params,
+      num_lets,
+      num_imports,
+      func,
+    )?;
+    func.instructions().else_();
+    func.instructions().i64_const(0);
+    func.instructions().i32_const(TAG_BOOL);
+    func.instructions().end();
+    Ok(())
+  }
+
+  #[allow(clippy::too_many_arguments)]
+  fn compile_or(
+    &mut self,
+    operands: &[AST],
+    locals: &mut Vec<(BindingId, u32)>,
+    next_pair: &mut u32,
+    num_params: u32,
+    num_lets: u32,
+    num_imports: u32,
+    func: &mut Function,
+  ) -> Result<(), String> {
+    let Some((first, rest)) = operands.split_first() else {
+      func.instructions().i64_const(0);
+      func.instructions().i32_const(TAG_BOOL);
+      return Ok(());
+    };
+    if rest.is_empty() {
+      return self.compile_expr(
+        first,
+        locals,
+        next_pair,
+        num_params,
+        num_lets,
+        num_imports,
+        func,
+      );
+    }
+
+    self.compile_expr(
+      first,
+      locals,
+      next_pair,
+      num_params,
+      num_lets,
+      num_imports,
+      func,
+    )?;
+    func.instructions().drop();
+    func.instructions().i64_const(0);
+    func.instructions().i64_ne();
+    let block_type = BlockType::FunctionType(
+      self
+        .if_block_type
+        .expect("boolean block type allocated in discovery"),
+    );
+    func.instructions().if_(block_type);
+    func.instructions().i64_const(1);
+    func.instructions().i32_const(TAG_BOOL);
+    func.instructions().else_();
+    self.compile_or(
+      rest,
+      locals,
+      next_pair,
+      num_params,
+      num_lets,
+      num_imports,
+      func,
+    )?;
+    func.instructions().end();
     Ok(())
   }
 

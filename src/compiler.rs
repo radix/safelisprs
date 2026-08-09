@@ -78,6 +78,9 @@ pub(crate) enum Instruction<CallType, StructType> {
   CallDynamic(u16),
   /// Exit the current function, returning the TOS to the caller
   Return,
+  /// Exit the current function from within an expression. Unlike the ordinary
+  /// epilogue return, this discards any partially-evaluated enclosing operands.
+  ReturnEarly,
   /// Push a reference to a function
   MakeFunctionRef(CallType),
   /// Partially apply some arguments to a function.
@@ -93,6 +96,15 @@ pub(crate) enum Instruction<CallType, StructType> {
   /// Pop the TOS; if it is false, add `offset` to the instruction pointer.
   /// See [`Instruction::Jump`] for the relative-offset semantics.
   JumpIfFalse(u32),
+  /// Subtract an offset from the instruction pointer.
+  JumpBack(u32),
+  /// Advance one list iteration or jump forward when the list is exhausted.
+  ListNext {
+    list_local: u16,
+    index_local: u16,
+    item_local: u16,
+    exit_offset: u32,
+  },
 }
 
 pub(crate) type LinkedFunction = Function<(u32, u32), (u32, u32)>;
@@ -327,9 +339,22 @@ fn link_instruction(
     Instruction::GetEnumField(field) => Instruction::GetEnumField(field),
     Instruction::Pop => Instruction::Pop,
     Instruction::Return => Instruction::Return,
+    Instruction::ReturnEarly => Instruction::ReturnEarly,
     Instruction::PartialApply(size) => Instruction::PartialApply(size),
     Instruction::Jump(target) => Instruction::Jump(target),
     Instruction::JumpIfFalse(target) => Instruction::JumpIfFalse(target),
+    Instruction::JumpBack(target) => Instruction::JumpBack(target),
+    Instruction::ListNext {
+      list_local,
+      index_local,
+      item_local,
+      exit_offset,
+    } => Instruction::ListNext {
+      list_local,
+      index_local,
+      item_local,
+      exit_offset,
+    },
   })
 }
 
@@ -541,6 +566,10 @@ impl<'module, 'types> FunctionCompiler<'module, 'types> {
         *target = offset;
         Ok(())
       }
+      Instruction::ListNext { exit_offset, .. } => {
+        *exit_offset = offset;
+        Ok(())
+      }
       instruction => Err(format!(
         "cannot patch non-jump instruction at {position}: {instruction:?}"
       )),
@@ -562,6 +591,63 @@ impl<'module, 'types> FunctionCompiler<'module, 'types> {
     let synthetic = BindingId::synthetic(u32::from(index));
     self.locals.insert(synthetic, index);
     Ok(index)
+  }
+
+  fn emit_jump_back(&mut self, target: usize) -> Result<(), String> {
+    let offset = self
+      .instructions
+      .len()
+      .checked_add(1)
+      .and_then(|next| next.checked_sub(target))
+      .ok_or_else(|| format!("backward jump target {target} is invalid"))?;
+    let offset = u32::try_from(offset).map_err(|_| "backward jump is too large".to_string())?;
+    self.emit(Instruction::JumpBack(offset));
+    Ok(())
+  }
+
+  fn compile_and(&mut self, operands: &[AST]) -> Result<(), String> {
+    let Some((last, leading)) = operands.split_last() else {
+      self.emit(Instruction::PushBool(true));
+      return Ok(());
+    };
+
+    let mut false_jumps = Vec::with_capacity(leading.len());
+    for operand in leading {
+      self.compile_expr(operand)?;
+      false_jumps.push(self.emit(Instruction::JumpIfFalse(0)));
+    }
+    self.compile_expr(last)?;
+    if false_jumps.is_empty() {
+      return Ok(());
+    }
+    let end_jump = self.emit(Instruction::Jump(0));
+    for jump in false_jumps {
+      self.patch_jump_to_here(jump)?;
+    }
+    self.emit(Instruction::PushBool(false));
+    self.patch_jump_to_here(end_jump)?;
+    Ok(())
+  }
+
+  fn compile_or(&mut self, operands: &[AST]) -> Result<(), String> {
+    let Some((last, leading)) = operands.split_last() else {
+      self.emit(Instruction::PushBool(false));
+      return Ok(());
+    };
+
+    let mut end_jumps = Vec::with_capacity(leading.len());
+    for operand in leading {
+      self.compile_expr(operand)?;
+      let next_jump = self.emit(Instruction::JumpIfFalse(0));
+      self.emit(Instruction::PushBool(true));
+      end_jumps.push(self.emit(Instruction::Jump(0)));
+      self.patch_jump_to_here(next_jump)?;
+    }
+    self.compile_expr(last)?;
+    for jump in end_jumps {
+      self.patch_jump_to_here(jump)?;
+    }
+    Ok(())
   }
 
   /// Compile `ast` into instructions.
@@ -711,6 +797,39 @@ impl<'module, 'types> FunctionCompiler<'module, 'types> {
       }
       ASTKind::Block(body) => {
         self.compile_body(body, false)?;
+      }
+      ASTKind::Return(value) => {
+        if let Some(value) = value {
+          self.compile_expr(value)?;
+        } else {
+          self.emit(Instruction::PushVoid);
+        }
+        self.emit(Instruction::ReturnEarly);
+      }
+      ASTKind::And(operands) => self.compile_and(operands)?,
+      ASTKind::Or(operands) => self.compile_or(operands)?,
+      ASTKind::For(name, iterable, body) => {
+        let list_local = self.alloc_temp_local()?;
+        let index_local = self.alloc_temp_local()?;
+        let item_local = self.ensure_local(name)?;
+        self.compile_expr(iterable)?;
+        self.emit(Instruction::SetLocal(list_local));
+        self.emit(Instruction::PushInt(0));
+        self.emit(Instruction::SetLocal(index_local));
+        let loop_start = self.instructions.len();
+        let next = self.emit(Instruction::ListNext {
+          list_local,
+          index_local,
+          item_local,
+          exit_offset: 0,
+        });
+        for expression in body {
+          self.compile_expr(expression)?;
+          self.emit(Instruction::Pop);
+        }
+        self.emit_jump_back(loop_start)?;
+        self.patch_jump_to_here(next)?;
+        self.emit(Instruction::PushVoid);
       }
       ASTKind::Variable(name) => {
         let local_index = self

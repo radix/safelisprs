@@ -242,6 +242,12 @@ fn main () -> Int
 )]
 #[case::block_returns_last("(fn main () ->Int (block 1 2 3))", Val::Int(3))]
 #[case::block_in_if_else("(fn main () ->Int (if false 0 (block (let a 1) 42)))", Val::Int(42))]
+#[case::return_unwinds_expression("(fn main () ->Int (std::+ 1 (return 42)))", Val::Int(42))]
+#[case::and_short_circuits_return(
+  "(fn main () ->Bool (and false (return true)))",
+  Val::Bool(false)
+)]
+#[case::or_short_circuits_return("(fn main () ->Bool (or true (return false)))", Val::Bool(true))]
 fn both_backends_match_expected(#[case] source: &str, #[case] expected: Val) {
   assert_eq!(eval_interpreter(source), expected, "interpreter: {source}");
   #[cfg(feature = "wasm-tests")]
