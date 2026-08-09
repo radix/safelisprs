@@ -239,7 +239,7 @@ fn parses_layout_boolean_forms() {
 fn parses_layout_for_like_parenthesized_for() {
   let layout = read_multiple(
     "fn main ()
-  for x in (list 1 2 3):
+  for x in (list 1 2 3)
     (set! target x)",
   )
   .unwrap();

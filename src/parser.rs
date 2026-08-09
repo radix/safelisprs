@@ -1688,9 +1688,6 @@ impl Parser {
     let variable = self.expect_symbol("`for` binding must be a symbol")?;
     self.expect(TokenKind::In, "`for` requires `in` after its binding")?;
     let iterable = self.parse_expr()?;
-    if mode == FormMode::Layout {
-      self.expect(TokenKind::Colon, "layout `for` requires `:` after its list")?;
-    }
     let (body, close) = self.parse_nonempty_exprs_for_form(mode, "for")?;
     Ok(AST::new(
       ASTKind::For(variable.into(), Box::new(iterable), body),

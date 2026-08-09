@@ -76,7 +76,7 @@ as strings, lists, closures, and interpreter stack/frame vectors.
 
 ```rust
 let source = r#"
-fn grow (s:String n:Int) -> String
+fn grow (s: String n: Int) -> String
   if (== n 0)
     s
   else
@@ -109,10 +109,10 @@ function body may contain multiple expressions, and the final expression is the
 return value.
 
 ```lisp
-fn double (x:Int) -> Int
+fn double (x: Int) -> Int
   (+ x x)
 
-fn sum-to (n:Int) -> Int
+fn sum-to (n: Int) -> Int
   if (== n 0)
     0
   else
@@ -126,8 +126,8 @@ fn main () -> Int
 Functions may also return early. `(return)` returns `Void`; `(return value)` returns a value.
 
 ```lisp
-fn first-or-zero (xs:(List Int)) -> Int
-  for x in xs:
+fn first-or-zero (xs: (List Int)) -> Int
+  for x in xs
     return x
   0
 ```
@@ -139,7 +139,7 @@ stopping as soon as the result is known. They are variadic and require at least
 two operands.
 
 ```lisp
-fn should-send (enabled:Bool has-recipient:Bool) -> Bool
+fn should-send (enabled: Bool has-recipient: Bool) -> Bool
   (and enabled has-recipient)
 ```
 
@@ -148,11 +148,11 @@ fn should-send (enabled:Bool has-recipient:Bool) -> Bool
 `for x in xs` is iteration for side-effects. It evaluates to `Void`.
 
 ```lisp
-fn visit-all (xs:(List Int))
-  for x in xs:
+fn visit-all (xs: (List Int))
+  for x in xs
     (host::visit x)
 
-fn visit-all-parenthesized (xs:(List Int))
+fn visit-all-parenthesized (xs: (List Int))
   (for x in xs
     (host::visit x))
 ```
@@ -161,7 +161,7 @@ Function values are first class. Builtins and user functions can be passed to
 higher-order functions:
 
 ```lisp
-fn inc (x:Int) -> Int
+fn inc (x: Int) -> Int
   (+ x 1)
 
 fn main () -> (List Int)
@@ -174,10 +174,10 @@ Programs can define structs:
 
 ```lisp
 struct Point
-  x:Int
-  y:Int
+  x: Int
+  y: Int
 
-fn length-ish (pt:Point) -> Int
+fn length-ish (pt: Point) -> Int
   (+ pt.x pt.y)
 
 fn origin () -> Point
@@ -194,10 +194,10 @@ their declared names.
 
 ```lisp
 enum MaybeInt
-  (Some value:Int)
+  (Some value: Int)
   (None)
 
-fn get-or-zero (maybe:MaybeInt) -> Int
+fn get-or-zero (maybe: MaybeInt) -> Int
   match maybe
     (Some value) => # this has to be `value`, not some other name
       let bumped (+ value 1)

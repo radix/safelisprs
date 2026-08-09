@@ -136,7 +136,7 @@ fn and_and_or_short_circuit_left_to_right() {
 #[test]
 fn layout_for_iterates_lists_and_returns_void() {
   let source = "fn add-all (total:(Cell Int) xs:(List Int))
-  for x in xs:
+  for x in xs
     (set! total (+ (get total) x))
 fn main () -> Int
   let total (cell 0)
