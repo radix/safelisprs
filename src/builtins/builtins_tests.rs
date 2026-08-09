@@ -26,6 +26,416 @@ fn eval_builtin_main(source: &str) -> Result<SLValue, String> {
   exec.run_until_done()
 }
 
+fn maybe_int_library() -> Library {
+  Library::new()
+    .with_type(CustomTypeSpec::enum_(
+      "host",
+      "MaybeInt",
+      vec![("Some", vec![("value", Signature::Int)]), ("None", vec![])],
+    ))
+    .with_builtin(Builtin::contextual_value(
+      "host",
+      "some",
+      Some(1),
+      sig(
+        &[],
+        vec![Signature::Int],
+        None,
+        Signature::named("host", "MaybeInt"),
+      ),
+      |ctx, args| ctx.alloc_enum("host", "MaybeInt", "Some", vec![args[0]]),
+    ))
+    .with_builtin(Builtin::contextual_value(
+      "host",
+      "none",
+      Some(0),
+      sig(&[], vec![], None, Signature::named("host", "MaybeInt")),
+      |ctx, _args| ctx.alloc_enum("host", "MaybeInt", "None", vec![]),
+    ))
+    .with_builtin(Builtin::contextual_value(
+      "host",
+      "get-or-zero",
+      Some(1),
+      sig(
+        &[],
+        vec![Signature::named("host", "MaybeInt")],
+        None,
+        Signature::Int,
+      ),
+      |ctx, args| {
+        let maybe_int = ctx.enum_type("host", "MaybeInt")?;
+        let instance = match &args[0] {
+          Value::Heap(value) => match &value.value {
+            SLVal::Enum(instance) if instance.enum_ == maybe_int => instance,
+            other => {
+              return Err(format!(
+                "expected host::MaybeInt, got {}",
+                other.type_name()
+              ))
+            }
+          },
+          other => {
+            return Err(format!(
+              "expected host::MaybeInt, got {}",
+              other.type_name()
+            ))
+          }
+        };
+        match (instance.variant, instance.fields.as_slice()) {
+          (0, [Value::Int(value)]) => Ok(Value::Int(*value)),
+          (1, []) => Ok(Value::Int(0)),
+          _ => Err("invalid host::MaybeInt value".to_string()),
+        }
+      },
+    ))
+}
+
+#[test]
+fn host_defined_enums_can_be_constructed_by_builtins_and_matched() {
+  let library = maybe_int_library();
+  let package = compile_executable_from_source(
+    "(fn main (use_some:Bool) ->Int
+       (let maybe
+         (if use_some (host::some 42) (host::none)))
+       (match maybe
+         (Some value) => value
+         (None) => 0))",
+    ("main", "main"),
+    &library,
+  )
+  .unwrap_or_else(|e| panic!("compile failed: {e}"));
+  let mut some = Interpreter::with_library(package.clone(), library.clone())
+    .call_main_with(vec![SLValue::Bool(true)])
+    .unwrap_or_else(|e| panic!("call_main_with failed: {e}"));
+  let mut none = Interpreter::with_library(package, library)
+    .call_main_with(vec![SLValue::Bool(false)])
+    .unwrap_or_else(|e| panic!("call_main_with failed: {e}"));
+
+  assert_eq!(some.run_until_done().unwrap(), SLValue::Int(42));
+  assert_eq!(none.run_until_done().unwrap(), SLValue::Int(0));
+}
+
+#[test]
+fn builtins_can_consume_host_defined_enums() {
+  let library = maybe_int_library();
+  let package = compile_executable_from_source(
+    "(fn main (use_some:Bool) ->Int
+       (host::get-or-zero
+         (if use_some (host::some 42) (host::none))))",
+    ("main", "main"),
+    &library,
+  )
+  .unwrap_or_else(|e| panic!("compile failed: {e}"));
+  let mut some = Interpreter::with_library(package.clone(), library.clone())
+    .call_main_with(vec![SLValue::Bool(true)])
+    .unwrap_or_else(|e| panic!("call_main_with failed: {e}"));
+  let mut none = Interpreter::with_library(package, library)
+    .call_main_with(vec![SLValue::Bool(false)])
+    .unwrap_or_else(|e| panic!("call_main_with failed: {e}"));
+
+  assert_eq!(some.run_until_done().unwrap(), SLValue::Int(42));
+  assert_eq!(none.run_until_done().unwrap(), SLValue::Int(0));
+}
+
+#[test]
+fn host_allocators_reject_the_wrong_custom_type_kind() {
+  let library = Library::new()
+    .with_type(CustomTypeSpec::enum_(
+      "host",
+      "MaybeInt",
+      vec![("Some", vec![("value", Signature::Int)])],
+    ))
+    .with_builtin(Builtin::contextual_value(
+      "host",
+      "bad",
+      Some(1),
+      sig(
+        &[],
+        vec![Signature::Int],
+        None,
+        Signature::named("host", "MaybeInt"),
+      ),
+      |ctx, args| ctx.alloc_struct("host", "MaybeInt", vec![args[0]]),
+    ))
+    .with_type(CustomTypeSpec::struct_(
+      "host",
+      "Box",
+      vec![("value", Signature::Int)],
+    ))
+    .with_builtin(Builtin::contextual_value(
+      "host",
+      "bad-enum",
+      Some(1),
+      sig(
+        &[],
+        vec![Signature::Int],
+        None,
+        Signature::named("host", "Box"),
+      ),
+      |ctx, args| ctx.alloc_enum("host", "Box", "Box", vec![args[0]]),
+    ));
+  let package = compile_executable_from_source(
+    "(fn main () ->host::MaybeInt (host::bad 42))",
+    ("main", "main"),
+    &library,
+  )
+  .unwrap_or_else(|e| panic!("compile failed: {e}"));
+  let mut exec = Interpreter::with_library(package, library.clone())
+    .call_main()
+    .unwrap_or_else(|e| panic!("call_main failed: {e}"));
+
+  let error = exec.run_until_done().unwrap_err();
+  assert!(
+    error.contains("Struct not found: host::MaybeInt"),
+    "{error}"
+  );
+
+  let package = compile_executable_from_source(
+    "(fn main () ->host::Box (host::bad-enum 42))",
+    ("main", "main"),
+    &library,
+  )
+  .unwrap_or_else(|e| panic!("compile failed: {e}"));
+  let mut exec = Interpreter::with_library(package, library)
+    .call_main()
+    .unwrap_or_else(|e| panic!("call_main failed: {e}"));
+
+  let error = exec.run_until_done().unwrap_err();
+  assert!(error.contains("Enum not found: host::Box"), "{error}");
+}
+
+#[test]
+fn custom_interpreter_builtins_are_public_api() {
+  let builtins = Library::new().with_builtin(Builtin::unary(
+    "main",
+    "add2",
+    sig(&[], vec![Signature::Int], None, Signature::Int),
+    |value| match value {
+      Value::Int(n) => Ok(Value::Int(n + 2)),
+      other => Err(format!("expected Int, got {}", other.type_name())),
+    },
+  ));
+  let package =
+    compile_executable_from_source("(fn main () ->Int (add2 3))", ("main", "main"), &builtins)
+      .unwrap_or_else(|e| panic!("compile failed: {e}"));
+  let mut exec = Interpreter::with_library(package, builtins)
+    .call_main()
+    .unwrap_or_else(|e| panic!("call_main failed: {e}"));
+
+  assert_eq!(exec.run_until_done().unwrap(), SLValue::Int(5));
+}
+
+#[test]
+fn libraries_can_be_composed_with_custom_types() {
+  let types = Library::new().with_type(CustomTypeSpec::struct_(
+    "box",
+    "Box",
+    vec![("value", Signature::Int)],
+  ));
+  let funcs = Library::new()
+    .with_builtin(Builtin::contextual_value(
+      "box",
+      "box",
+      Some(1),
+      sig(
+        &[],
+        vec![Signature::Int],
+        None,
+        Signature::named("box", "Box"),
+      ),
+      |ctx, args| ctx.alloc_struct("box", "Box", vec![args[0]]),
+    ))
+    .with_builtin(Builtin::unary(
+      "box",
+      "unbox",
+      sig(
+        &[],
+        vec![Signature::named("box", "Box")],
+        None,
+        Signature::Int,
+      ),
+      |value| match value {
+        Value::Heap(heap) => match &heap.value {
+          SLVal::Struct(instance) => Ok(instance.fields[0]),
+          other => Err(format!("expected Box, got {}", other.type_name())),
+        },
+        other => Err(format!("expected Box, got {}", other.type_name())),
+      },
+    ))
+    .with_prelude("box", "box")
+    .with_prelude("box", "unbox");
+  let library = types.merge(funcs);
+  let package = compile_executable_from_source(
+    "(fn main () ->Int (unbox (box 40)))",
+    ("main", "main"),
+    &library,
+  )
+  .unwrap_or_else(|e| panic!("compile failed: {e}"));
+  let mut exec = Interpreter::with_library(package, library)
+    .call_main()
+    .unwrap_or_else(|e| panic!("call_main failed: {e}"));
+
+  assert_eq!(exec.run_until_done().unwrap(), SLValue::Int(40));
+}
+
+#[test]
+fn custom_types_are_distinct_across_modules() {
+  let library = Library::new()
+    .with_type(CustomTypeSpec::struct_(
+      "left",
+      "Box",
+      vec![("value", Signature::Int)],
+    ))
+    .with_type(CustomTypeSpec::struct_(
+      "right",
+      "Box",
+      vec![("value", Signature::String)],
+    ))
+    .with_builtin(Builtin::contextual_value(
+      "right",
+      "box",
+      Some(1),
+      sig(
+        &[],
+        vec![Signature::String],
+        None,
+        Signature::named("right", "Box"),
+      ),
+      |ctx, args| ctx.alloc_struct("right", "Box", vec![args[0]]),
+    ))
+    .with_builtin(Builtin::unary(
+      "left",
+      "unbox",
+      sig(
+        &[],
+        vec![Signature::named("left", "Box")],
+        None,
+        Signature::Int,
+      ),
+      |value| match value {
+        Value::Heap(heap) => match &heap.value {
+          SLVal::Struct(instance) => Ok(instance.fields[0]),
+          other => Err(format!("expected Box, got {}", other.type_name())),
+        },
+        other => Err(format!("expected Box, got {}", other.type_name())),
+      },
+    ));
+
+  let err = compile_executable_from_source(
+    "(fn main () ->Int (left::unbox (right::box \"nope\")))",
+    ("main", "main"),
+    &library,
+  )
+  .unwrap_err();
+
+  assert!(
+    err.contains("expected `left::Box`, got `right::Box`"),
+    "{err}"
+  );
+}
+
+#[test]
+fn bare_custom_type_annotations_must_be_unambiguous() {
+  let types = Library::new()
+    .with_type(CustomTypeSpec::struct_(
+      "left",
+      "Box",
+      vec![("value", Signature::Int)],
+    ))
+    .with_type(CustomTypeSpec::struct_(
+      "right",
+      "Box",
+      vec![("value", Signature::Int)],
+    ));
+
+  let err =
+    compile_executable_from_source("(fn main () ->Box 1)", ("main", "main"), &types).unwrap_err();
+
+  assert!(err.contains("ambiguous type `Box`"), "{err}");
+  assert!(err.contains("left::Box"), "{err}");
+  assert!(err.contains("right::Box"), "{err}");
+
+  let library = types.with_builtin(Builtin::contextual_value(
+    "left",
+    "box",
+    Some(1),
+    sig(
+      &[],
+      vec![Signature::Int],
+      None,
+      Signature::named("left", "Box"),
+    ),
+    |ctx, args| ctx.alloc_struct("left", "Box", vec![args[0]]),
+  ));
+  compile_executable_from_source(
+    "(fn main () -> left::Box (left::box 1))",
+    ("main", "main"),
+    &library,
+  )
+  .unwrap();
+}
+
+#[test]
+fn call_main_with_args_is_public_api() {
+  let package = compile_executable_from_source(
+    "(fn main (a:Int b:Int) ->Int (+ a b))",
+    ("main", "main"),
+    &Library::default(),
+  )
+  .unwrap_or_else(|e| panic!("compile failed: {e}"));
+  let mut exec = Interpreter::new(package)
+    .call_main_with(vec![SLValue::Int(2), SLValue::Int(5)])
+    .unwrap_or_else(|e| panic!("call_main_with failed: {e}"));
+
+  assert_eq!(exec.run_until_done().unwrap(), SLValue::Int(7));
+}
+
+#[test]
+fn call_main_with_checks_arity() {
+  let package = compile_executable_from_source(
+    "(fn main (a:Int) ->Int a)",
+    ("main", "main"),
+    &Library::default(),
+  )
+  .unwrap_or_else(|e| panic!("compile failed: {e}"));
+  let err = match Interpreter::new(package).call_main_with(vec![]) {
+    Ok(_) => panic!("expected call_main_with to reject missing args"),
+    Err(err) => err,
+  };
+
+  assert!(
+    err.contains("expects 1 arg(s) but was called with 0"),
+    "unexpected error: {err}"
+  );
+}
+
+#[test]
+fn call_value_with_args_is_public_api() {
+  let package = compile_executable_from_source(
+    "
+      (fn main () ->(Fn (Int) -> Int)
+        (let base 10)
+        (fn add-base (x:Int) ->Int (+ base x))
+        add-base)
+    ",
+    ("main", "main"),
+    &Library::default(),
+  )
+  .unwrap_or_else(|e| panic!("compile failed: {e}"));
+  let interp = Interpreter::new(package);
+  let mut exec = interp
+    .call_main()
+    .unwrap_or_else(|e| panic!("call_main failed: {e}"));
+  let callable = exec
+    .run_until_done()
+    .unwrap_or_else(|e| panic!("run failed: {e}"));
+  let mut exec = interp
+    .call_value(callable, vec![SLValue::Int(7)])
+    .unwrap_or_else(|e| panic!("call_value failed: {e}"));
+
+  assert_eq!(exec.run_until_done().unwrap(), SLValue::Int(17));
+}
+
 /// Compile `source`, execute every instruction before `main`'s final
 /// expression call, and leave that call ready to step. This lets tests build
 /// large operands without a limit, then install a limit immediately before

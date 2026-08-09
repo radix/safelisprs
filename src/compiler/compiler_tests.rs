@@ -173,6 +173,7 @@ fn linked_struct_bytecode_uses_indices() {
     package.modules[0].types,
     vec![TypeDef {
       name: "Foo".to_string(),
+      kind: TypeDefKind::Struct,
       constructors: vec![ConstructorDef {
         name: "Foo".to_string(),
         fields: vec!["x".to_string(), "y".to_string()],
@@ -207,6 +208,7 @@ fn linked_enum_bytecode_uses_indices() {
     package.modules[0].types,
     vec![TypeDef {
       name: "Foo".to_string(),
+      kind: TypeDefKind::Enum,
       constructors: vec![
         ConstructorDef {
           name: "Var1".to_string(),

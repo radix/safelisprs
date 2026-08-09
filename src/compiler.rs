@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::builtins::{CustomTypeSpec, Library};
+use crate::builtins::{CustomTypeKind, CustomTypeSpec, Library};
 use crate::closure::transform_closures_in_module;
 use crate::parser::{self, ASTKind, BindingId, Identifier, MatchPattern, ResolvedName, AST};
 use crate::prelude::resolve_module_names;
@@ -104,12 +104,19 @@ type CompiledInstruction = Instruction<(String, String), (String, String)>;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct TypeDef {
   name: String,
+  kind: TypeDefKind,
   pub(crate) constructors: Vec<ConstructorDef>,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum TypeDefKind {
+  Struct,
+  Enum,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct ConstructorDef {
-  name: String,
+  pub(crate) name: String,
   pub(crate) fields: Vec<String>,
 }
 
@@ -192,11 +199,14 @@ impl Package {
   pub(crate) fn get_struct(&self, module: u32, struct_: u32) -> Option<&ConstructorDef> {
     self
       .get_type(module, struct_)
+      .filter(|type_| type_.kind == TypeDefKind::Struct)
       .and_then(|type_| type_.constructors.first())
   }
 
   pub(crate) fn get_enum(&self, module: u32, enum_: u32) -> Option<&TypeDef> {
-    self.get_type(module, enum_)
+    self
+      .get_type(module, enum_)
+      .filter(|type_| type_.kind == TypeDefKind::Enum)
   }
 }
 
@@ -370,6 +380,7 @@ impl<'types> ModuleCompiler<'types> {
           type_indices.insert(struct_.name.clone(), type_defs.len());
           type_defs.push(TypeDef {
             name: struct_.name.clone(),
+            kind: TypeDefKind::Struct,
             constructors: vec![ConstructorDef {
               name: struct_.name.clone(),
               fields: struct_
@@ -384,6 +395,7 @@ impl<'types> ModuleCompiler<'types> {
           type_indices.insert(enum_.name.clone(), type_defs.len());
           type_defs.push(TypeDef {
             name: enum_.name.clone(),
+            kind: TypeDefKind::Enum,
             constructors: enum_
               .variants
               .iter()
@@ -760,16 +772,30 @@ fn compile_modules_from_source(
 }
 
 fn type_def_from_custom(type_: &CustomTypeSpec) -> TypeDef {
-  TypeDef {
-    name: type_.name.to_string(),
-    constructors: vec![ConstructorDef {
+  match &type_.kind {
+    CustomTypeKind::Struct { fields } => TypeDef {
       name: type_.name.to_string(),
-      fields: type_
-        .fields
+      kind: TypeDefKind::Struct,
+      constructors: vec![ConstructorDef {
+        name: type_.name.to_string(),
+        fields: fields.iter().map(|field| field.name.to_string()).collect(),
+      }],
+    },
+    CustomTypeKind::Enum { variants } => TypeDef {
+      name: type_.name.to_string(),
+      kind: TypeDefKind::Enum,
+      constructors: variants
         .iter()
-        .map(|field| field.name.to_string())
+        .map(|variant| ConstructorDef {
+          name: variant.name.to_string(),
+          fields: variant
+            .fields
+            .iter()
+            .map(|field| field.name.to_string())
+            .collect(),
+        })
         .collect(),
-    }],
+    },
   }
 }
 
@@ -778,25 +804,27 @@ fn inject_library_types(
   library: &Library,
 ) -> Result<CompiledModules, String> {
   for type_ in library.types() {
+    let type_module = type_.module;
+    let type_name = type_.name;
     let module = modules
       .iter_mut()
-      .find(|module| module.name == type_.module)
+      .find(|module| module.name == type_module)
       .map(|module| &mut module.types);
     let module = match module {
       Some(types) => types,
       None => {
         modules.push(CompiledModule {
-          name: type_.module.to_string(),
+          name: type_module.to_string(),
           functions: vec![],
           types: vec![],
         });
         &mut modules.last_mut().unwrap().types
       }
     };
-    if module.iter().any(|existing| existing.name == type_.name) {
+    if module.iter().any(|existing| existing.name == type_name) {
       return Err(format!(
         "Library type {}.{} collides with an existing type",
-        type_.module, type_.name
+        type_module, type_name
       ));
     }
     module.push(type_def_from_custom(type_));

@@ -1909,9 +1909,14 @@ impl<'gc, 'call> HostCtx<'gc, 'call> {
 
   /// Resolve a struct type by module/name in the currently executing package.
   pub fn struct_type(&self, module: &str, name: &str) -> Result<(u32, u32), String> {
-    self
+    let struct_ = self
       .package
       .find_type(module, name)
+      .ok_or_else(|| format!("Struct not found: {module}::{name}"))?;
+    self
+      .package
+      .get_struct(struct_.0, struct_.1)
+      .map(|_| struct_)
       .ok_or_else(|| format!("Struct not found: {module}::{name}"))
   }
 
@@ -1937,6 +1942,57 @@ impl<'gc, 'call> HostCtx<'gc, 'call> {
       ));
     }
     Ok(self.alloc_heap(SLVal::Struct(StructInstance { struct_, fields })))
+  }
+
+  /// Resolve an enum type by module/name in the currently executing package.
+  pub fn enum_type(&self, module: &str, name: &str) -> Result<(u32, u32), String> {
+    let enum_ = self
+      .package
+      .find_type(module, name)
+      .ok_or_else(|| format!("Enum not found: {module}::{name}"))?;
+    self
+      .package
+      .get_enum(enum_.0, enum_.1)
+      .map(|_| enum_)
+      .ok_or_else(|| format!("Enum not found: {module}::{name}"))
+  }
+
+  /// Allocate an enum instance for a type declared in the current package.
+  pub fn alloc_enum(
+    &mut self,
+    module: &str,
+    name: &str,
+    variant: &str,
+    fields: Vec<Value<'gc>>,
+  ) -> Result<Value<'gc>, String> {
+    let enum_ = self.enum_type(module, name)?;
+    let enum_def = self
+      .package
+      .get_enum(enum_.0, enum_.1)
+      .ok_or_else(|| format!("Enum not found: {module}::{name}"))?;
+    let (variant_index, variant_def) = enum_def
+      .constructors
+      .iter()
+      .enumerate()
+      .find(|(_, candidate)| candidate.name == variant)
+      .ok_or_else(|| format!("Variant not found: {module}::{name}::{variant}"))?;
+    if fields.len() != variant_def.fields.len() {
+      return Err(format!(
+        "{}::{}::{} expects {} field(s) but got {}",
+        module,
+        name,
+        variant,
+        variant_def.fields.len(),
+        fields.len()
+      ));
+    }
+    let variant = u16::try_from(variant_index)
+      .map_err(|_| format!("Enum {module}::{name} has too many variants"))?;
+    Ok(self.alloc_heap(SLVal::Enum(EnumInstance {
+      enum_,
+      variant,
+      fields,
+    })))
   }
 
   /// Push a value onto the execution's value stack.

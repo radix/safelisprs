@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::rc::Rc;
 
-use crate::builtins::{BuiltinSignature, CustomTypeSpec, Library, Trait};
+use crate::builtins::{BuiltinSignature, CustomTypeKind, CustomTypeSpec, Library, Trait};
 use crate::parser::{
   source_position, ASTKind, AstId, BindingId, Enum as EnumAst, EnumVariant, Function, Identifier,
   MatchArm, MatchPattern, ResolvedName, Span, Struct as StructAst, TypeAst, TypeNameAst, AST,
@@ -289,17 +289,30 @@ impl Checker {
     if self.types.contains_key(&name) {
       return Err(TypeError::new(format!("duplicate type `{name}`")));
     }
-    self.types.insert(
-      name,
-      UserType::Struct(StructAst {
+    let user_type = match &type_.kind {
+      CustomTypeKind::Struct { fields } => UserType::Struct(StructAst {
         name: type_.name.to_string(),
-        fields: type_
-          .fields
+        fields: fields
           .iter()
           .map(|field| (field.name.to_string(), type_ast_from_signature(&field.ty)))
           .collect(),
       }),
-    );
+      CustomTypeKind::Enum { variants } => UserType::Enum(EnumAst {
+        name: type_.name.to_string(),
+        variants: variants
+          .iter()
+          .map(|variant| EnumVariant {
+            name: variant.name.to_string(),
+            fields: variant
+              .fields
+              .iter()
+              .map(|field| (field.name.to_string(), type_ast_from_signature(&field.ty)))
+              .collect(),
+          })
+          .collect(),
+      }),
+    };
+    self.types.insert(name, user_type);
     Ok(())
   }
 

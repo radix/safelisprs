@@ -50,13 +50,37 @@ pub struct BuiltinSpec {
   pub signature: BuiltinSignature,
 }
 
-/// A field declared by a library-owned struct type.
+/// A field declared by a library-owned type constructor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CustomFieldSpec {
   /// Field name.
   pub name: &'static str,
   /// Field type.
   pub ty: Signature,
+}
+
+/// A variant declared by a library-owned enum type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustomVariantSpec {
+  /// Variant name.
+  pub name: &'static str,
+  /// Variant fields, in declaration order.
+  pub fields: Vec<CustomFieldSpec>,
+}
+
+/// The declaration kind of a custom SafeLisp type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CustomTypeKind {
+  /// A struct type.
+  Struct {
+    /// Struct fields, in declaration order.
+    fields: Vec<CustomFieldSpec>,
+  },
+  /// An enum type.
+  Enum {
+    /// Enum variants, in declaration order.
+    variants: Vec<CustomVariantSpec>,
+  },
 }
 
 /// A custom SafeLisp type supplied by a host library.
@@ -66,8 +90,8 @@ pub struct CustomTypeSpec {
   pub module: &'static str,
   /// Type name.
   pub name: &'static str,
-  /// Struct fields, in declaration order.
-  pub fields: Vec<CustomFieldSpec>,
+  /// Whether the type is a struct or enum and its constructors.
+  pub kind: CustomTypeKind,
 }
 
 impl CustomTypeSpec {
@@ -80,12 +104,39 @@ impl CustomTypeSpec {
     Self {
       module,
       name,
-      fields: fields
-        .into_iter()
-        .map(|(name, ty)| CustomFieldSpec { name, ty })
-        .collect(),
+      kind: CustomTypeKind::Struct {
+        fields: custom_fields(fields),
+      },
     }
   }
+
+  /// Construct a library-owned enum type.
+  pub fn enum_(
+    module: &'static str,
+    name: &'static str,
+    variants: Vec<(&'static str, Vec<(&'static str, Signature)>)>,
+  ) -> Self {
+    Self {
+      module,
+      name,
+      kind: CustomTypeKind::Enum {
+        variants: variants
+          .into_iter()
+          .map(|(name, fields)| CustomVariantSpec {
+            name,
+            fields: custom_fields(fields),
+          })
+          .collect(),
+      },
+    }
+  }
+}
+
+fn custom_fields(fields: Vec<(&'static str, Signature)>) -> Vec<CustomFieldSpec> {
+  fields
+    .into_iter()
+    .map(|(name, ty)| CustomFieldSpec { name, ty })
+    .collect()
 }
 
 /// Construct a [`BuiltinSignature`] from borrowed type-variable metadata.

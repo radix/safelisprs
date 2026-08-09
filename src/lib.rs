@@ -25,7 +25,8 @@ mod types;
 pub mod wasm;
 
 pub use builtins::{
-  sig, Builtin, BuiltinSignature, BuiltinSpec, CustomFieldSpec, CustomTypeSpec, Library, Trait,
+  sig, Builtin, BuiltinSignature, BuiltinSpec, CustomFieldSpec, CustomTypeKind, CustomTypeSpec,
+  CustomVariantSpec, Library, Trait,
 };
 pub use compiler::{compile_executable_from_source, Package};
 pub use interpreter::{
