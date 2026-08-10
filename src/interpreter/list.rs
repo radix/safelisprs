@@ -221,6 +221,35 @@ impl<'gc, T: Clone + Collect<'gc>> List<'gc, T> {
   }
 
   pub fn concat(&self, mc: &Mutation<'gc>, other: &Self) -> Self {
+    if self.is_empty() {
+      return other.clone();
+    }
+    if other.is_empty() {
+      return self.clone();
+    }
+
+    // Fast path: when both lists share the same memory tracker, link the two
+    // existing root nodes under a single new branch.
+    let trackers_compatible = match (&self.tracker, &other.tracker) {
+      (None, None) => true,
+      (Some(a), Some(b)) => std::rc::Rc::ptr_eq(a, b),
+      _ => false,
+    };
+
+    if trackers_compatible {
+      let node = Node::new(
+        mc,
+        NodeKind::Branch(vec![self.node, other.node]),
+        self.tracker.clone(),
+      );
+      return List {
+        node,
+        len: self.len + other.len,
+        tracker: self.tracker.clone(),
+      };
+    }
+
+    // Fallback to appending when we aren't in the same tracker.
     let mut result = self.clone();
     for value in other.iter() {
       result = result.append(mc, value);
@@ -410,8 +439,7 @@ impl<'gc, T: Clone + Collect<'gc>> Node<'gc, T> {
         for (i, child) in nodes.iter().enumerate() {
           let child_len = child.len();
           if idx < cur + child_len {
-            let (new_child, item) =
-              Node::remove(*child, mc, idx - cur, tracker.clone())?;
+            let (new_child, item) = Node::remove(*child, mc, idx - cur, tracker.clone())?;
             let mut new_nodes = nodes.to_vec();
             if new_child.len() == 0 {
               new_nodes.remove(i);
@@ -636,9 +664,67 @@ mod test {
 
       assert_eq!(left.iter().collect::<Vec<_>>(), vec![1, 2]);
       assert_eq!(right.iter().collect::<Vec<_>>(), vec![3, 4]);
-     assert_eq!(combined.iter().collect::<Vec<_>>(), vec![1, 2, 3, 4]);
-   });
- }
+      assert_eq!(combined.iter().collect::<Vec<_>>(), vec![1, 2, 3, 4]);
+    });
+  }
+
+  #[test]
+  fn concat_links_existing_roots_under_one_branch() {
+    let tracker = Rc::new(super::super::MemoryTracker::new());
+    let arena_tracker = tracker.clone();
+    let arena = Arena::<Rootable![List<'_, usize>]>::new(|mc| {
+      let left = List::from_vec_tracked(mc, (0..1_000).collect(), arena_tracker.clone());
+      let right = List::from_vec_tracked(mc, (1_000..2_000).collect(), arena_tracker.clone());
+      left.concat(mc, &right)
+    });
+
+    // Each 1_000-element list is 16 leaves + 2 branches + 1 root (19 nodes).
+    // The fast path adds a single new root branch linking both trees, rather
+    // than copying the 1_000 right-hand values into new nodes.
+    assert_eq!(arena.metrics().total_gc_count(), 39);
+    arena.mutate(|_, list| {
+      assert_eq!(list.len(), 2_000);
+      assert!(list.iter().eq(0..2_000));
+    });
+  }
+
+  #[test]
+  fn concat_fast_path_supports_subsequent_append() {
+    rootless_mutate(|mc| {
+      let left = List::from_vec(mc, (0..64).collect::<Vec<_>>());
+      let right = List::from_vec(mc, (64..128).collect::<Vec<_>>());
+      let combined = left.concat(mc, &right);
+
+      // Both root leaves are full (CHUNK_MAX), so appending must spill into a
+      // third leaf child of the concat branch.
+      let combined = combined.append(mc, 128);
+      assert_eq!(combined.len(), 129);
+      assert!(combined.iter().eq(0..129));
+
+      // Keep appending past BRANCH_MAX children to force a height increase.
+      let mut combined = combined;
+      for i in 129..1_000 {
+        combined = combined.append(mc, i);
+      }
+      assert_eq!(combined.len(), 1_000);
+      assert!(combined.iter().eq(0..1_000));
+    });
+  }
+
+  #[test]
+  fn concat_with_mismatched_trackers_falls_back_to_copying() {
+    let tracker_a = Rc::new(super::super::MemoryTracker::new());
+    let tracker_b = Rc::new(super::super::MemoryTracker::new());
+    let arena = Arena::<Rootable![List<'_, usize>]>::new(|mc| {
+      let left = List::from_vec_tracked(mc, vec![1, 2, 3], tracker_a.clone());
+      let right = List::from_vec_tracked(mc, vec![4, 5, 6], tracker_b.clone());
+      left.concat(mc, &right)
+    });
+    arena.mutate(|_, list| {
+      assert_eq!(list.len(), 6);
+      assert!(list.iter().eq(vec![1, 2, 3, 4, 5, 6]));
+    });
+  }
 
   #[test]
   fn remove_returns_item_and_new_list() {
