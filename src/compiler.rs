@@ -58,7 +58,9 @@ pub(crate) enum Instruction<CallType, StructType> {
   NewStruct(StructType),
   /// Pop all variant fields and allocate a heap-backed enum instance.
   NewEnum(StructType, u16),
-  /// Pop a struct value and push the field at this declaration-order offset.
+  /// Pop `n` values and allocate a heap-backed anonymous tuple instance.
+  NewTuple(u16),
+  /// Pop a struct or tuple value and push the field at this positional offset.
   GetField(u16),
   /// Pop an enum value and push whether it has this variant index.
   // GetEnumVariant would be more flexible but less performant...
@@ -335,6 +337,7 @@ fn link_instruction(
     Instruction::PushBool(b) => Instruction::PushBool(b),
     Instruction::PushVoid => Instruction::PushVoid,
     Instruction::GetField(field) => Instruction::GetField(field),
+    Instruction::NewTuple(count) => Instruction::NewTuple(count),
     Instruction::IsEnumVariant(variant) => Instruction::IsEnumVariant(variant),
     Instruction::GetEnumField(field) => Instruction::GetEnumField(field),
     Instruction::Pop => Instruction::Pop,
@@ -726,6 +729,12 @@ impl<'module, 'types> FunctionCompiler<'module, 'types> {
           (self.module.module_name.clone(), name.clone()),
           variant_index,
         ));
+      }
+      ASTKind::NewTuple(elements) => {
+        for element in elements {
+          self.compile_expr(element)?;
+        }
+        self.emit(Instruction::NewTuple(elements.len() as u16));
       }
       ASTKind::FieldAccess(receiver, _) => {
         let field_index = self

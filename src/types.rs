@@ -64,6 +64,8 @@ pub enum Signature {
   Cell(Box<Signature>),
   /// A list containing values of the given type.
   List(Box<Signature>),
+  /// An anonymous tuple of two or more values, in positional order.
+  Tuple(Vec<Signature>),
   /// A callable type with fixed parameters and a return type.
   Fn {
     /// Parameter types accepted by the callable.
@@ -91,6 +93,11 @@ impl Signature {
   /// Construct a list type containing `item`.
   pub fn list(item: Signature) -> Self {
     Self::List(Box::new(item))
+  }
+
+  /// Construct a tuple type from its element types.
+  pub fn tuple(elements: Vec<Signature>) -> Self {
+    Self::Tuple(elements)
   }
 
   /// Construct a function type from parameter and return types.

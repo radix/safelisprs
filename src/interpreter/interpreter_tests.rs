@@ -2285,3 +2285,65 @@ fn memory_limit_catches_map_result_allocation_after_pause() {
     "unexpected error: {err}"
   );
 }
+
+#[test]
+fn tuple_construct_and_index() {
+  let source = "
+    (fn foo () -> (Tuple Int String)
+      (Tuple 3 \"foo\"))
+    (fn main () -> Int
+      (let result (foo))
+      result.0)
+  ";
+  assert_eq!(eval_main(source), SLValue::Int(3));
+}
+
+#[test]
+fn tuple_index_second_element() {
+  let source = "
+    (fn main () -> String
+      (let t (Tuple 1 \"two\" 3))
+      t.1)
+  ";
+  assert_eq!(eval_main(source), SLValue::String("two".to_string()));
+}
+
+#[test]
+fn tuple_round_trips_through_slvalue() {
+  let source = "
+    (fn main () -> (Tuple Int Bool String)
+      (Tuple 7 true \"hi\"))
+  ";
+  assert_eq!(
+    eval_main(source),
+    SLValue::Tuple(vec![
+      SLValue::Int(7),
+      SLValue::Bool(true),
+      SLValue::String("hi".to_string())
+    ])
+  );
+}
+
+#[test]
+fn tuple_nested_and_chained_access() {
+  let source = "
+    (fn main () -> Int
+      (let t (Tuple (Tuple 1 2) 3))
+      t.0.1)
+  ";
+  assert_eq!(eval_main(source), SLValue::Int(2));
+}
+
+#[test]
+fn tuple_out_of_range_index_is_a_runtime_error() {
+  let source = "
+    (fn main () -> Int
+      (let t (Tuple 1 2))
+      t.5)
+  ";
+  let err = eval_main_err(source);
+  assert!(
+    err.contains("tuple index 5 out of range"),
+    "unexpected error: {err}"
+  );
+}

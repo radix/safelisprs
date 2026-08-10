@@ -235,6 +235,7 @@ fn external_bytes_of<'gc>(value: &SLVal<'gc>) -> usize {
     SLVal::Partial(p) => p.args.capacity() * std::mem::size_of::<Value<'gc>>(),
     SLVal::Struct(s) => s.fields.capacity() * std::mem::size_of::<Value<'gc>>(),
     SLVal::Enum(e) => e.fields.capacity() * std::mem::size_of::<Value<'gc>>(),
+    SLVal::Tuple(t) => t.capacity() * std::mem::size_of::<Value<'gc>>(),
   }
 }
 
@@ -536,6 +537,13 @@ impl<'gc> ExecRoot<'gc> {
           }),
         )
       }
+      SLValue::Tuple(elements) => {
+        let sub = elements
+          .iter()
+          .map(|value| self.import_value(mc, value))
+          .collect();
+        self.alloc_heap(mc, SLVal::Tuple(sub))
+      }
     }
   }
 }
@@ -633,6 +641,8 @@ pub enum SLVal<'gc> {
   Struct(StructInstance<'gc>),
   /// A user-defined enum instance.
   Enum(EnumInstance<'gc>),
+  /// An anonymous tuple of two or more values, in positional order.
+  Tuple(Vec<Value<'gc>>),
 }
 
 /// A partially applied SafeLisp function.
@@ -716,6 +726,8 @@ pub enum SLValue {
     /// Variant field values in definition order.
     fields: Vec<SLValue>,
   },
+  /// An anonymous tuple of two or more values, in positional order.
+  Tuple(Vec<SLValue>),
 }
 
 impl<'gc> Value<'gc> {
@@ -774,6 +786,7 @@ impl<'gc> SLVal<'gc> {
       SLVal::List(_) => "List",
       SLVal::Struct(_) => "Struct",
       SLVal::Enum(_) => "Enum",
+      SLVal::Tuple(_) => "Tuple",
     }
   }
 
@@ -795,6 +808,9 @@ impl<'gc> SLVal<'gc> {
         variant: e.variant,
         fields: e.fields.iter().map(|value| value.to_value()).collect(),
       },
+      SLVal::Tuple(elements) => {
+        SLValue::Tuple(elements.iter().map(|value| value.to_value()).collect())
+      }
     }
   }
 }
@@ -1500,6 +1516,29 @@ impl<'gc> ExecRoot<'gc> {
         );
         self.stack.push(value);
       }
+      Instruction::NewTuple(count) => {
+        let count = count as usize;
+        let field_bytes = count
+          .checked_mul(std::mem::size_of::<Value<'gc>>())
+          .ok_or_else(|| "tuple element buffer size overflow".to_string())?;
+        let mut elements_reservation = self.reserve_memory(mc, field_bytes)?;
+        let mut elements = Vec::new();
+        elements
+          .try_reserve_exact(count)
+          .map_err(|_| format!("failed to allocate tuple element buffer for {count} elements"))?;
+        let actual_bytes = elements
+          .capacity()
+          .checked_mul(std::mem::size_of::<Value<'gc>>())
+          .ok_or_else(|| "tuple element buffer capacity overflow".to_string())?;
+        self.reconcile_reservation(mc, &mut elements_reservation, actual_bytes)?;
+        for _ in 0..count {
+          elements.push(self.pop()?);
+        }
+        elements.reverse();
+        drop(elements_reservation);
+        let value = self.alloc_heap(mc, SLVal::Tuple(elements));
+        self.stack.push(value);
+      }
       Instruction::GetField(field) => {
         let receiver = self.pop()?;
         let value = match receiver {
@@ -1510,16 +1549,22 @@ impl<'gc> ExecRoot<'gc> {
                 field, instance.struct_.0, instance.struct_.1
               )
             })?,
+            SLVal::Tuple(elements) => *elements.get(field as usize).ok_or_else(|| {
+              format!(
+                "tuple index {field} out of range (tuple has {} elements)",
+                elements.len()
+              )
+            })?,
             _ => {
               return Err(format!(
-                "field access expected a struct, got {}",
+                "field access expected a struct or tuple, got {}",
                 receiver.type_name()
               ))
             }
           },
           _ => {
             return Err(format!(
-              "field access expected a struct, got {}",
+              "field access expected a struct or tuple, got {}",
               receiver.type_name()
             ))
           }
@@ -2186,6 +2231,33 @@ impl<'gc, 'call> HostCtx<'gc, 'call> {
       variant,
       fields,
     })))
+  }
+
+  /// Borrow `value` as an anonymous tuple, returning its elements in
+  /// positional order. Returns an error if `value` is not a tuple.
+  pub fn tuple_instance<'value>(
+    &self,
+    value: &'value Value<'gc>,
+  ) -> Result<&'value [Value<'gc>], String> {
+    match value {
+      Value::Heap(value) => match &value.value {
+        SLVal::Tuple(elements) => Ok(elements),
+        _ => Err(format!("expected a tuple, got {}", value.value.type_name())),
+      },
+      other => Err(format!("expected a tuple, got {}", other.type_name())),
+    }
+  }
+
+  /// Allocate an anonymous tuple from its element values, in positional order.
+  /// Requires at least two elements.
+  pub fn alloc_tuple(&mut self, elements: Vec<Value<'gc>>) -> Result<Value<'gc>, String> {
+    if elements.len() < 2 {
+      return Err(format!(
+        "tuple requires at least two elements, got {}",
+        elements.len()
+      ));
+    }
+    Ok(self.alloc_heap(SLVal::Tuple(elements)))
   }
 
   /// Push a value onto the execution's value stack.

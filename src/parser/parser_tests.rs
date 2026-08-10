@@ -773,3 +773,28 @@ fn source_positions_count_characters_instead_of_utf8_bytes() {
   assert_eq!(source_position("ééx", 4), (1, 3));
   assert_eq!(source_position("é\n  x", 5), (2, 3));
 }
+
+#[test]
+fn bare_tuple_head_parses_as_new_tuple() {
+  let result = read_multiple("(Tuple 3 \"foo\")").unwrap();
+  assert_eq!(
+    result,
+    vec![AST::NewTuple(vec![
+      AST::Int(3),
+      AST::String("foo".to_string())
+    ])],
+  );
+}
+
+#[test]
+fn qualified_tuple_head_is_not_the_tuple_constructor() {
+  // `module::Tuple` is an ordinary qualified call, not the tuple constructor.
+  let result = read_multiple("(std::Tuple 1 2)").unwrap();
+  assert_eq!(
+    result,
+    vec![AST::CallFixed(
+      Identifier::Qualified("std".to_string(), "Tuple".to_string()),
+      vec![AST::Int(1), AST::Int(2)],
+    )],
+  );
+}

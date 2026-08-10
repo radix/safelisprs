@@ -599,3 +599,99 @@ fn outer_context_does_not_replace_an_inner_error_span() {
     "{error}"
   );
 }
+
+#[test]
+fn tuple_typechecks_construction_and_field_access() {
+  check(
+    "(fn foo () -> (Tuple Int String)
+       (Tuple 3 \"foo\"))
+       (fn main () -> Int
+         (let result (foo))
+         result.0)",
+  )
+  .unwrap();
+}
+
+#[test]
+fn tuple_records_receiver_kind_for_field_access() {
+  let source = "
+    (fn main () -> String
+      (let t (Tuple 1 \"two\"))
+      t.1)";
+  let asts = read_multiple(source).unwrap();
+  let asts = resolve_module_names("main", &asts, &[], &[]).unwrap();
+  let checked = typecheck(asts, &Library::default()).unwrap();
+  let asts = checked.asts();
+  let info = checked.type_info();
+
+  let ASTKind::DefineFn(main) = &asts[0].kind else {
+    panic!("expected main function");
+  };
+  let field_access = &main.code[1];
+  let ASTKind::FieldAccess(_, _) = &field_access.kind else {
+    panic!("expected field access");
+  };
+  let field = info.field_access(field_access.id()).unwrap();
+  assert_eq!(field.receiver_type(), "Tuple");
+  assert_eq!(field.field_index(), 1);
+}
+
+#[test]
+fn tuple_requires_at_least_two_elements() {
+  let error = check("(fn main () -> (Tuple Int) (Tuple 1))").unwrap_err();
+  assert!(error.message.contains("at least two"), "{error}");
+}
+
+#[test]
+fn tuple_type_requires_at_least_two_arguments() {
+  check("(fn main () -> (Tuple Int Int) (Tuple 1 2))").unwrap();
+  let error = check("(fn main () -> (Tuple Int) (Tuple 1 2))").unwrap_err();
+  assert!(error.message.contains("at least two"), "{error}");
+}
+
+#[test]
+fn tuple_field_access_rejects_non_numeric_index() {
+  let error = check(
+    "(fn main () -> Int
+       (let t (Tuple 1 2))
+       t.x)",
+  )
+  .unwrap_err();
+  assert!(error.message.contains("numeric index"), "{error}");
+}
+
+#[test]
+fn tuple_field_access_rejects_out_of_range_index() {
+  let error = check(
+    "(fn main () -> Int
+       (let t (Tuple 1 2))
+       t.5)",
+  )
+  .unwrap_err();
+  assert!(error.message.contains("out of range"), "{error}");
+}
+
+#[test]
+fn tuple_field_access_rejects_non_tuple_receiver() {
+  let error = check(
+    "(fn main () -> Int
+       (let n (std::len (std::list 1 2)))
+       n.0)",
+  )
+  .unwrap_err();
+  assert!(
+    error
+      .message
+      .contains("field access expected a struct or tuple"),
+    "{error}"
+  );
+}
+
+#[test]
+fn reserved_type_constructor_name_cannot_be_redefined() {
+  let error = check("(struct Tuple a:Int b:Int)").unwrap_err();
+  assert!(
+    error.message.contains("reserved type constructor name"),
+    "{error}"
+  );
+}

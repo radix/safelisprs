@@ -223,6 +223,25 @@ fn main () -> Int
   (get-or-zero (answer))
 ```
 
+### Tuples
+
+Anonymous tuples bundle two or more values of possibly different types. A tuple
+type is written `(Tuple T1 T2 ...)`, a value is constructed with `(Tuple v1 v2
+...)`, and elements are accessed positionally with `.0`, `.1`, and so on.
+
+```lisp
+fn foo () -> (Tuple Int String)
+  (Tuple 3 "foo")
+
+fn main () -> Int
+  let result (foo)
+  result.0
+```
+
+Tuples require at least two elements. They are first-class values: they can be
+returned from functions, stored in lists, and passed to or returned from host
+builtins.
+
 ### Cells
 
 Variables and struct fields are immutable. In the default language and library,

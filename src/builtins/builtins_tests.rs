@@ -907,3 +907,72 @@ fn rand_choice_rejects_an_empty_list() {
       .unwrap_err();
   assert!(err.contains("empty list"), "got: {err}");
 }
+
+#[test]
+fn host_builtins_can_receive_and_return_tuples() {
+  let library = Library::new()
+    .with_builtin(Builtin::contextual_value(
+      "host",
+      "swap",
+      Some(1),
+      sig(
+        &[],
+        vec![Signature::tuple(vec![Signature::Int, Signature::String])],
+        None,
+        Signature::tuple(vec![Signature::String, Signature::Int]),
+      ),
+      |ctx, args| {
+        let elements = ctx.tuple_instance(&args[0])?;
+        let Value::Int(n) = elements[0] else {
+          return Err("expected Int as first tuple element".to_string());
+        };
+        // Reorder the elements: String first, Int second.
+        ctx.alloc_tuple(vec![elements[1], Value::Int(n)])
+      },
+    ))
+    .with_builtin(Builtin::contextual_value(
+      "host",
+      "first",
+      Some(1),
+      sig(
+        &[],
+        vec![Signature::tuple(vec![Signature::Int, Signature::Int])],
+        None,
+        Signature::Int,
+      ),
+      |ctx, args| {
+        let elements = ctx.tuple_instance(&args[0])?;
+        match elements[0] {
+          Value::Int(n) => Ok(Value::Int(n)),
+          _ => Err("expected Int as first tuple element".to_string()),
+        }
+      },
+    ));
+
+  let package = compile_executable_from_source(
+    "(fn main () -> (Tuple String Int)
+       (host::swap (Tuple 7 \"hi\")))",
+    ("main", "main"),
+    &library,
+  )
+  .unwrap_or_else(|e| panic!("compile failed: {e}"));
+  let mut exec = Interpreter::with_library(package, library.clone())
+    .call_main()
+    .unwrap_or_else(|e| panic!("call_main failed: {e}"));
+  assert_eq!(
+    exec.run_until_done().unwrap(),
+    SLValue::Tuple(vec![SLValue::String("hi".to_string()), SLValue::Int(7)]),
+  );
+
+  let package = compile_executable_from_source(
+    "(fn main () -> Int
+       (host::first (Tuple 9 2)))",
+    ("main", "main"),
+    &library,
+  )
+  .unwrap_or_else(|e| panic!("compile failed: {e}"));
+  let mut exec = Interpreter::with_library(package, library)
+    .call_main()
+    .unwrap_or_else(|e| panic!("call_main failed: {e}"));
+  assert_eq!(exec.run_until_done().unwrap(), SLValue::Int(9));
+}

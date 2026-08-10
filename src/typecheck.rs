@@ -27,6 +27,8 @@ pub enum Type {
   Enum(QualifiedTypeName),
   Cell(Box<Type>),
   List(Box<Type>),
+  /// An anonymous tuple of two or more values, in positional order.
+  Tuple(Vec<Type>),
   Fn {
     params: Vec<Type>,
     rest: Option<Box<Type>>,
@@ -164,9 +166,18 @@ pub struct TypecheckInfo {
   matches: HashMap<AstId, MatchInfo>,
 }
 
+/// The kind of aggregate value whose field is being accessed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReceiverKind {
+  /// A user-defined struct, identified by its qualified type name.
+  Struct(QualifiedTypeName),
+  /// An anonymous tuple.
+  Tuple,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FieldAccessInfo {
-  receiver_type: QualifiedTypeName,
+  receiver: ReceiverKind,
   field_index: u16,
 }
 
@@ -207,7 +218,10 @@ impl TypecheckInfo {
 impl FieldAccessInfo {
   #[cfg(test)]
   fn receiver_type(&self) -> &str {
-    self.receiver_type.name()
+    match &self.receiver {
+      ReceiverKind::Struct(name) => name.name(),
+      ReceiverKind::Tuple => "Tuple",
+    }
   }
 
   pub fn field_index(&self) -> u16 {
@@ -270,6 +284,12 @@ impl Checker {
   }
 
   fn insert_custom_type(&mut self, type_: &CustomTypeSpec) -> Result<(), TypeError> {
+    if is_reserved_type_constructor(type_.name) {
+      return Err(TypeError::new(format!(
+        "`{}` is a reserved type constructor name",
+        type_.name
+      )));
+    }
     let name = QualifiedTypeName::new(type_.module, type_.name);
     if self.types.contains_key(&name) {
       return Err(TypeError::new(format!("duplicate type `{name}`")));
@@ -308,6 +328,12 @@ impl Checker {
         ASTKind::DefineEnum(enum_) => (&enum_.name, UserType::Enum(enum_.clone())),
         _ => continue,
       };
+      if is_reserved_type_constructor(name) {
+        return Err(
+          TypeError::new(format!("`{name}` is a reserved type constructor name"))
+            .at(ast.span.clone()),
+        );
+      }
       let type_name = QualifiedTypeName::source(name.clone());
       if self.types.contains_key(&type_name) {
         return Err(TypeError::new(format!("duplicate type `{type_name}`")).at(ast.span.clone()));
@@ -613,6 +639,22 @@ impl Checker {
       ASTKind::NewStruct(name, fields) => self.infer_new_struct(env, type_vars, name, fields),
       ASTKind::NewEnum(name, variant, fields) => {
         self.infer_new_enum(env, type_vars, name, variant, fields)
+      }
+      ASTKind::NewTuple(elements) => {
+        if elements.len() < 2 {
+          return Err(
+            TypeError::new(format!(
+              "tuple constructor requires at least two elements, got {}",
+              elements.len()
+            ))
+            .at(ast.span.clone()),
+          );
+        }
+        let mut types = Vec::with_capacity(elements.len());
+        for element in elements {
+          types.push(self.infer(env, type_vars, element)?);
+        }
+        Ok(Type::Tuple(types))
       }
       ASTKind::FieldAccess(receiver, field) => {
         let receiver = self.infer(env, type_vars, receiver)?;
@@ -958,14 +1000,37 @@ impl Checker {
         self.field_accesses.insert(
           access,
           FieldAccessInfo {
-            receiver_type: name,
+            receiver: ReceiverKind::Struct(name),
             field_index,
           },
         );
         Ok(field_type)
       }
+      Type::Tuple(elements) => {
+        let index: usize = field.parse().map_err(|_| {
+          TypeError::new(format!(
+            "tuple field access requires a numeric index, got `{field}`"
+          ))
+        })?;
+        let field_index =
+          u16::try_from(index).map_err(|_| TypeError::new("tuple index too large"))?;
+        let element_type = elements.get(index).cloned().ok_or_else(|| {
+          TypeError::new(format!(
+            "tuple index {index} out of range (tuple has {} elements)",
+            elements.len()
+          ))
+        })?;
+        self.field_accesses.insert(
+          access,
+          FieldAccessInfo {
+            receiver: ReceiverKind::Tuple,
+            field_index,
+          },
+        );
+        Ok(element_type)
+      }
       other => Err(TypeError::new(format!(
-        "field access expected a struct, got `{}`",
+        "field access expected a struct or tuple, got `{}`",
         display_type(&other)
       ))),
     }
@@ -1216,6 +1281,19 @@ impl Checker {
       (Type::Struct(a), Type::Struct(b)) if a == b => Ok(()),
       (Type::Enum(a), Type::Enum(b)) if a == b => Ok(()),
       (Type::Cell(a), Type::Cell(b)) | (Type::List(a), Type::List(b)) => self.unify(*a, *b),
+      (Type::Tuple(a), Type::Tuple(b)) => {
+        if a.len() != b.len() {
+          return Err(TypeError::new(format!(
+            "expected a tuple of {} elements, got one of {} elements",
+            a.len(),
+            b.len()
+          )));
+        }
+        for (a, b) in a.into_iter().zip(b) {
+          self.unify(a, b)?;
+        }
+        Ok(())
+      }
       (
         Type::Fn {
           params: a_params,
@@ -1488,6 +1566,13 @@ fn types_equivalent(left: &Type, right: &Type) -> bool {
     (Type::Cell(left), Type::Cell(right)) | (Type::List(left), Type::List(right)) => {
       types_equivalent(&left, &right)
     }
+    (Type::Tuple(left), Type::Tuple(right)) => {
+      left.len() == right.len()
+        && left
+          .iter()
+          .zip(&right)
+          .all(|(left, right)| types_equivalent(left, right))
+    }
     (
       Type::Fn {
         params: left_params,
@@ -1517,6 +1602,12 @@ fn types_equivalent(left: &Type, right: &Type) -> bool {
   }
 }
 
+/// Names that are built-in type constructors and cannot be reused for
+/// user-defined or library-defined types.
+fn is_reserved_type_constructor(name: &str) -> bool {
+  matches!(name, "List" | "Cell" | "Fn" | "Tuple")
+}
+
 fn resolve_type(
   ast: &TypeAst,
   vars: &TypeVars,
@@ -1531,7 +1622,7 @@ fn resolve_type(
           "String" => return Ok(Type::String),
           "Bool" => return Ok(Type::Bool),
           "Void" => return Ok(Type::Void),
-          "List" | "Cell" | "Fn" => {
+          "List" | "Cell" | "Fn" | "Tuple" => {
             return Err(TypeError::new(format!(
               "type constructor `{name}` requires arguments"
             )))
@@ -1556,15 +1647,30 @@ fn resolve_type(
         TypeNameAst::Qualified(_) => Err(TypeError::new(format!("unknown type `{name}`"))),
       }
     }
-    TypeAst::Apply(name, args) => match (name.as_str(), args.as_slice()) {
-      ("List", [item]) => Ok(Type::List(Box::new(resolve_type(item, vars, types)?))),
-      ("Cell", [item]) => Ok(Type::Cell(Box::new(resolve_type(item, vars, types)?))),
-      ("List" | "Cell", _) => Err(TypeError::new(format!(
-        "type constructor `{name}` expects one argument, got {}",
-        args.len()
-      ))),
-      _ => Err(TypeError::new(format!("unknown type constructor `{name}`"))),
-    },
+    TypeAst::Apply(name, args) => {
+      if name == "Tuple" {
+        if args.len() < 2 {
+          return Err(TypeError::new(format!(
+            "type constructor `Tuple` expects at least two arguments, got {}",
+            args.len()
+          )));
+        }
+        let mut elements = Vec::with_capacity(args.len());
+        for arg in args {
+          elements.push(resolve_type(arg, vars, types)?);
+        }
+        return Ok(Type::Tuple(elements));
+      }
+      match (name.as_str(), args.as_slice()) {
+        ("List", [item]) => Ok(Type::List(Box::new(resolve_type(item, vars, types)?))),
+        ("Cell", [item]) => Ok(Type::Cell(Box::new(resolve_type(item, vars, types)?))),
+        ("List" | "Cell", _) => Err(TypeError::new(format!(
+          "type constructor `{name}` expects one argument, got {}",
+          args.len()
+        ))),
+        _ => Err(TypeError::new(format!("unknown type constructor `{name}`"))),
+      }
+    }
     TypeAst::Fn(params, rest, ret) => Ok(Type::Fn {
       params: params
         .iter()
@@ -1588,7 +1694,7 @@ fn collect_type_vars(
     TypeAst::Named(type_name) => match type_name {
       TypeNameAst::Bare(name) => match name.as_str() {
         "Int" | "Float" | "String" | "Bool" | "Void" => {}
-        "List" | "Cell" | "Fn" => {
+        "List" | "Cell" | "Fn" | "Tuple" => {
           return Err(TypeError::new(format!(
             "type constructor `{name}` requires arguments"
           )))
@@ -1610,18 +1716,31 @@ fn collect_type_vars(
         }
       }
     },
-    TypeAst::Apply(name, args) => {
-      if !matches!(name.as_str(), "List" | "Cell") {
+    TypeAst::Apply(name, args) => match name.as_str() {
+      "List" | "Cell" => {
+        if args.len() != 1 {
+          return Err(TypeError::new(format!(
+            "type constructor `{name}` expects one argument, got {}",
+            args.len()
+          )));
+        }
+        collect_type_vars(&args[0], names, types)?;
+      }
+      "Tuple" => {
+        if args.len() < 2 {
+          return Err(TypeError::new(format!(
+            "type constructor `Tuple` expects at least two arguments, got {}",
+            args.len()
+          )));
+        }
+        for arg in args {
+          collect_type_vars(arg, names, types)?;
+        }
+      }
+      _ => {
         return Err(TypeError::new(format!("unknown type constructor `{name}`")));
       }
-      if args.len() != 1 {
-        return Err(TypeError::new(format!(
-          "type constructor `{name}` expects one argument, got {}",
-          args.len()
-        )));
-      }
-      collect_type_vars(&args[0], names, types)?;
-    }
+    },
     TypeAst::Fn(params, rest, ret) => {
       for param in params {
         collect_type_vars(param, names, types)?;
@@ -1728,6 +1847,10 @@ fn type_ast_from_signature(ty: &Signature) -> TypeAst {
     Signature::List(item) => {
       TypeAst::Apply("List".to_string(), vec![type_ast_from_signature(item)])
     }
+    Signature::Tuple(elements) => TypeAst::Apply(
+      "Tuple".to_string(),
+      elements.iter().map(type_ast_from_signature).collect(),
+    ),
     Signature::Fn { params, ret } => TypeAst::Fn(
       params.iter().map(type_ast_from_signature).collect(),
       None,
@@ -1755,6 +1878,13 @@ fn type_from_signature(
     Signature::List(item) => Ok(Type::List(Box::new(type_from_signature(
       item, vars, types,
     )?))),
+    Signature::Tuple(elements) => {
+      let mut types_out = Vec::with_capacity(elements.len());
+      for element in elements {
+        types_out.push(type_from_signature(element, vars, types)?);
+      }
+      Ok(Type::Tuple(types_out))
+    }
     Signature::Fn { params, ret } => Ok(Type::fixed_fn(
       params
         .iter()
@@ -1789,6 +1919,12 @@ fn replace_quantified(ty: &Type, replacements: &HashMap<usize, Type>) -> Type {
   match prune(ty) {
     Type::Cell(item) => Type::Cell(Box::new(replace_quantified(&item, replacements))),
     Type::List(item) => Type::List(Box::new(replace_quantified(&item, replacements))),
+    Type::Tuple(elements) => Type::Tuple(
+      elements
+        .iter()
+        .map(|element| replace_quantified(element, replacements))
+        .collect(),
+    ),
     Type::Fn { params, rest, ret } => Type::Fn {
       params: params
         .iter()
@@ -1828,6 +1964,7 @@ fn occurs(needle: &TvRef, ty: &Type) -> bool {
   match prune(ty) {
     Type::Var(var) => Rc::ptr_eq(needle, &var),
     Type::Cell(item) | Type::List(item) => occurs(needle, &item),
+    Type::Tuple(elements) => elements.iter().any(|element| occurs(needle, element)),
     Type::Fn { params, rest, ret } => {
       params.iter().any(|param| occurs(needle, param))
         || rest.as_ref().is_some_and(|rest| occurs(needle, rest))
@@ -1849,6 +1986,14 @@ fn display_type(ty: &Type) -> String {
     Type::Enum(name) => name.to_string(),
     Type::Cell(item) => format!("(Cell {})", display_type(&item)),
     Type::List(item) => format!("(List {})", display_type(&item)),
+    Type::Tuple(elements) => {
+      let parts = elements
+        .iter()
+        .map(display_type)
+        .collect::<Vec<_>>()
+        .join(" ");
+      format!("(Tuple {parts})")
+    }
     Type::Fn { params, rest, ret } => {
       let mut params = params.iter().map(display_type).collect::<Vec<_>>();
       if let Some(rest) = rest {

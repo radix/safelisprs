@@ -140,6 +140,8 @@ pub(crate) enum ASTKind {
   Bool(bool),
   NewStruct(String, Vec<(String, AST)>),
   NewEnum(String, String, Vec<(String, AST)>),
+  /// Construct an anonymous tuple from positional element expressions.
+  NewTuple(Vec<AST>),
   FieldAccess(Box<AST>, String),
   Match(Box<AST>, Vec<MatchArm>),
 
@@ -241,6 +243,9 @@ pub(crate) fn try_map_ast_children<E>(
         .map(|(field, expression)| Ok((field.clone(), map(expression)?)))
         .collect::<Result<_, _>>()?,
     ),
+    ASTKind::NewTuple(elements) => {
+      ASTKind::NewTuple(elements.iter().map(&mut map).collect::<Result<_, _>>()?)
+    }
     ASTKind::FieldAccess(receiver, field) => {
       ASTKind::FieldAccess(Box::new(map(receiver)?), field.clone())
     }
@@ -335,6 +340,10 @@ impl AST {
   fn FieldAccess(receiver: AST, field: String) -> Self {
     Self::synthetic(ASTKind::FieldAccess(Box::new(receiver), field))
   }
+
+  pub(crate) fn NewTuple(elements: Vec<AST>) -> Self {
+    Self::synthetic(ASTKind::NewTuple(elements))
+  }
 }
 
 #[cfg(test)]
@@ -382,6 +391,11 @@ pub(crate) fn erase_bindings(asts: &[AST]) -> Vec<AST> {
       }
       ASTKind::NewEnum(_, _, fields) => {
         for (_, expression) in fields {
+          erase_ast(expression);
+        }
+      }
+      ASTKind::NewTuple(elements) => {
+        for expression in elements {
           erase_ast(expression);
         }
       }
@@ -1753,6 +1767,9 @@ impl Parser {
     let qualified = self.parse_qualified_identifier(name.clone(), head_span.clone())?;
     let (args, close) = self.parse_call_args(mode)?;
     let span = start..close.span.end;
+    if qualified.is_none() && name == "Tuple" {
+      return Ok(AST::new(ASTKind::NewTuple(args), span));
+    }
     if let Some(((module, name), _)) = qualified {
       Ok(AST::new(
         ASTKind::CallFixed(Identifier::Qualified(module, name), args),
