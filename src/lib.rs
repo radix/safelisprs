@@ -22,9 +22,6 @@ mod parser;
 mod prelude;
 mod typecheck;
 mod types;
-#[cfg(feature = "wasm")]
-/// WebAssembly compilation support for SafeLisp programs.
-pub mod wasm;
 
 pub use builtins::{
   sig, Builtin, BuiltinSignature, BuiltinSpec, CustomFieldSpec, CustomTypeKind, CustomTypeSpec,

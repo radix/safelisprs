@@ -11,8 +11,6 @@ authors = ["Christopher Armstrong <radix@twistedmatrix.com>"]
 
 [features]
 default = []
-wasm = ["dep:wasm-encoder"]
-wasm-tests = ["wasm", "dep:wasmtime"]
 
 [dependencies]
 serde = "1.0"
@@ -22,8 +20,6 @@ gc-arena = "0.6"
 blake3 = {version = "1", default-features = false}
 rand_chacha = {version = "0.9", default-features = false}
 rand_core = {version = "0.9", default-features = false}
-wasm-encoder = {version = "0.252.0", optional = true}
-wasmtime = {version = "46.0.1", default-features = false, features = ["cranelift", "runtime", "wat"], optional = true}
 
 [dev-dependencies]
 pretty_assertions = "1.2.1"

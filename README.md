@@ -290,13 +290,3 @@ Language & Library features:
   function types
 - Random numbers: Create namespaced, deterministic RNGs.
 - Garbage Collection: provided by the `gc-arena` rust crate.
-
-## TODO
-
-- [ ] finish the WASM backend
-
-
-## About WASM
-
-WASM is not a priority since the point is to implement my own VM, but there is a
-partially implemented WASM compiler for the language.

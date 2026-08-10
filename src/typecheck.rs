@@ -226,15 +226,6 @@ pub fn typecheck(asts: Vec<AST>, library: &Library) -> Result<CheckedModule, Typ
   Ok(CheckedModule { asts, type_info })
 }
 
-#[cfg(feature = "wasm")]
-pub fn typecheck_named<'a>(
-  asts: Vec<AST>,
-  builtins: impl IntoIterator<Item = (&'a str, &'a str, &'a BuiltinSignature)>,
-) -> Result<CheckedModule, TypeError> {
-  let type_info = Checker::new_from_builtins(builtins)?.check(&asts)?;
-  Ok(CheckedModule { asts, type_info })
-}
-
 struct Checker {
   schemes: HashMap<(String, String), FnScheme>,
   types: HashMap<QualifiedTypeName, UserType>,
@@ -260,20 +251,6 @@ impl Checker {
         ),
         scheme,
       );
-    }
-    Ok(checker)
-  }
-
-  #[cfg(feature = "wasm")]
-  fn new_from_builtins<'a>(
-    builtins: impl IntoIterator<Item = (&'a str, &'a str, &'a BuiltinSignature)>,
-  ) -> Result<Self, TypeError> {
-    let mut checker = Self::empty();
-    for (module, name, signature) in builtins {
-      let scheme = checker.scheme_from_builtin(signature)?;
-      checker
-        .schemes
-        .insert((module.to_string(), name.to_string()), scheme);
     }
     Ok(checker)
   }
