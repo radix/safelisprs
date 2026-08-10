@@ -23,6 +23,80 @@ fn resolve_with_bindings(source: &str) -> Vec<AST> {
   .unwrap()
 }
 
+fn resolve_err(source: &str) -> String {
+  resolve_module_names(
+    "main",
+    &read_multiple(source).unwrap(),
+    &[("std", "+")],
+    &[],
+  )
+  .unwrap_err()
+}
+
+#[test]
+fn let_cannot_rebind_an_in_scope_name() {
+  let err = resolve_err("(fn main () (let a 1) (let a 2))");
+  assert!(err.contains("already in scope"), "got: {err}");
+}
+
+#[test]
+fn let_cannot_shadow_a_parameter() {
+  let err = resolve_err("(fn main (p:Int) (let p 1))");
+  assert!(err.contains("already in scope"), "got: {err}");
+}
+
+#[test]
+fn shd_rejects_an_unbound_name() {
+  let err = resolve_err("(fn main () (shd y 1))");
+  assert!(err.contains("not bound in the local scope"), "got: {err}");
+}
+
+#[test]
+fn shd_rejects_a_module_level_function() {
+  let err = resolve_err("(fn x () 1) (fn main () (shd x 3))");
+  assert!(err.contains("not bound in the local scope"), "got: {err}");
+}
+
+#[test]
+fn shd_accepts_a_local_nested_function_binding() {
+  // A nested `fn` is a local binding, so `shd`-ing it (even to a different
+  // type) resolves successfully.
+  resolve_with_bindings("(fn main () (fn x () 1) (shd x 3))");
+}
+
+#[test]
+fn shd_accepts_a_local_let_binding() {
+  resolve_with_bindings("(fn main () (let x 1) (shd x 2))");
+}
+
+#[test]
+fn let_in_nested_fn_shadows_enclosing_binding() {
+  // A `let` inside a nested function may shadow a binding from an enclosing
+  // function: it mints a fresh binding rather than reusing the outer one, so
+  // the outer variable is not captured.
+  resolve_with_bindings("(fn outer () (let a 1) (fn inner () (let a 2) a))");
+}
+
+#[test]
+fn shd_of_enclosing_binding_is_rejected() {
+  // `shd` may only reassign current-function locals; reassigning a binding
+  // from an enclosing function would require a capture, which `shd` never
+  // creates.
+  let err = resolve_err("(fn outer () (let a 1) (fn inner () (shd a 2)))");
+  assert!(err.contains("not bound in the local scope"), "got: {err}");
+}
+
+#[test]
+fn let_shadows_a_module_level_function() {
+  // A `let` may shadow a same-module top-level function name: the function
+  // binding is not a current-function local, so the `let` mints a fresh
+  // binding instead of erroring.
+  resolve_with_bindings(
+    "(fn transform (x:Int) ->Int (std::+ x x))
+     (fn main () ->Int (let transform identity) transform)",
+  );
+}
+
 #[test]
 fn rewrites_bare_fixed_call_to_qualified_call() {
   assert_eq!(
@@ -119,7 +193,10 @@ fn binding_in_only_one_if_branch_does_not_shadow_after_if() {
 }
 
 #[test]
-fn binding_in_both_if_branches_shadows_after_if() {
+fn let_in_both_if_branches_does_not_escape_after_if() {
+  // `let` inside an `if` branch is branch-local: even when both branches bind
+  // the same name, the binding does not escape the conditional. The trailing
+  // `+` therefore resolves to the prelude, not to either branch binding.
   assert_eq!(
     resolve("(fn main () (if true (let + 1) (let + 2)) +)")[0],
     AST::DefineFn(Function {
@@ -130,16 +207,10 @@ fn binding_in_both_if_branches_shadows_after_if() {
       code: vec![
         AST::synthetic(ASTKind::If(
           Box::new(AST::synthetic(ASTKind::Bool(true))),
-          Box::new(AST::synthetic(ASTKind::Block(vec![
-            AST::Let("+".to_string(), Box::new(AST::Int(1))),
-            AST::Let("+".to_string(), Box::new(AST::Variable("+".to_string())),),
-          ]))),
-          Box::new(AST::synthetic(ASTKind::Block(vec![
-            AST::Let("+".to_string(), Box::new(AST::Int(2))),
-            AST::Let("+".to_string(), Box::new(AST::Variable("+".to_string())),),
-          ]))),
+          Box::new(AST::Let("+".to_string(), Box::new(AST::Int(1)))),
+          Box::new(AST::Let("+".to_string(), Box::new(AST::Int(2)))),
         )),
-        AST::Variable("+".to_string()),
+        AST::FunctionRef("std".to_string(), "+".to_string()),
       ],
     })
   );
@@ -203,53 +274,40 @@ fn mutual_recursion_references_the_sibling_binding() {
 }
 
 #[test]
-fn if_branch_bindings_share_one_joined_identity() {
-  let asts = resolve_with_bindings("(fn main () ->Int (if true (let x 1) (let x 2)) x)");
+fn shd_in_if_branches_reuses_one_binding() {
+  // `shd` reuses the existing binding rather than introducing a fresh one, so a
+  // `shd` in each branch of an `if` shares a single binding identity with the
+  // outer `let` and with the reference after the conditional.
+  let asts = resolve_with_bindings("(fn main () ->Int (let x 0) (if true (shd x 1) (shd x 2)) x)");
   let ASTKind::DefineFn(main) = &asts[0].kind else {
     panic!("expected main");
   };
-  let ASTKind::If(_, then_branch, else_branch) = &main.code[0].kind else {
+  let ASTKind::Let(outer, _, _) = &main.code[0].kind else {
+    panic!("expected outer let");
+  };
+  let ASTKind::If(_, then_branch, else_branch) = &main.code[1].kind else {
     panic!("expected if");
   };
-  let ASTKind::Block(then_body) = &then_branch.kind else {
-    panic!("expected joined then branch");
+  let ASTKind::Let(then_name, _, _) = &then_branch.kind else {
+    panic!("expected shd in then branch");
   };
-  let ASTKind::Block(else_body) = &else_branch.kind else {
-    panic!("expected joined else branch");
+  let ASTKind::Let(else_name, _, _) = &else_branch.kind else {
+    panic!("expected shd in else branch");
   };
-  let ASTKind::Let(then_name, _, _) = &then_body[0].kind else {
-    panic!("expected source then binding");
+  let ASTKind::Variable(use_) = &main.code[2].kind else {
+    panic!("expected reference after if");
   };
-  let ASTKind::Let(then_join, _, then_source) = &then_body[1].kind else {
-    panic!("expected then join binding");
-  };
-  let ASTKind::Let(else_name, _, _) = &else_body[0].kind else {
-    panic!("expected source else binding");
-  };
-  let ASTKind::Let(else_join, _, else_source) = &else_body[1].kind else {
-    panic!("expected else join binding");
-  };
-  let ASTKind::Variable(then_source) = &then_source.kind else {
-    panic!("expected then source reference");
-  };
-  let ASTKind::Variable(else_source) = &else_source.kind else {
-    panic!("expected else source reference");
-  };
-  let ASTKind::Variable(use_) = &main.code[1].kind else {
-    panic!("expected joined reference");
-  };
-  assert_ne!(then_name.binding, else_name.binding);
-  assert_eq!(then_source.binding, then_name.binding);
-  assert_eq!(else_source.binding, else_name.binding);
-  assert_eq!(then_join.binding, else_join.binding);
-  assert_eq!(then_join.binding, use_.binding);
-  assert_ne!(then_join.binding, then_name.binding);
-  assert_ne!(then_join.binding, else_name.binding);
+  assert_eq!(outer.binding, then_name.binding);
+  assert_eq!(outer.binding, else_name.binding);
+  assert_eq!(outer.binding, use_.binding);
 }
 
 #[test]
-fn repeated_lets_receive_distinct_bindings() {
-  let asts = resolve_with_bindings("(fn main () ->Int (let x 1) (let x 2) x)");
+fn shd_reuses_existing_binding() {
+  // A `shd` reassigns the existing binding in place: the `let` and the `shd`
+  // share one binding identity, which is also what the later reference resolves
+  // to.
+  let asts = resolve_with_bindings("(fn main () ->Int (let x 1) (shd x 2) x)");
   let ASTKind::DefineFn(main) = &asts[0].kind else {
     panic!("expected main");
   };
@@ -257,12 +315,12 @@ fn repeated_lets_receive_distinct_bindings() {
     panic!("expected first binding");
   };
   let ASTKind::Let(second, _, _) = &main.code[1].kind else {
-    panic!("expected second binding");
+    panic!("expected shd binding");
   };
   let ASTKind::Variable(use_) = &main.code[2].kind else {
     panic!("expected reference");
   };
-  assert_ne!(first.binding, second.binding);
+  assert_eq!(first.binding, second.binding);
   assert_eq!(second.binding, use_.binding);
 }
 

@@ -246,6 +246,63 @@ fn main () -> Int
   (next) # returns 3
 ```
 
+### Variable Bindings: `let` and `shd`
+
+`let` introduces a new binding. Once a name is bound in the current function,
+`let` cannot bind it again — use `shd` to shadow an existing binding instead.
+
+```lisp
+fn main () -> Int
+  let x 1
+  shd x 2
+  x  # 2
+```
+
+Don't mistake this for actual mutation. For example, if a closure captures a
+value and then the outer scope reassigns the name with `shd`, the closure still
+sees the original captured value. In other words, `shd` does not allow
+observable mutation through closures.
+
+```lisp
+fn main () -> Int
+  let a 1
+  fn inner () -> Int
+    a  # sees the captured value 1, not 2
+  shd a 2
+  (inner)
+```
+
+This returns 1, but if you move the `shd a 2` to before the `fn inner`, it will
+instead return 2. See the section on `cell` to see how we allow explicit
+mutation.
+
+`shd` may also change a binding's type, to facilitate common patterns like:
+
+```lisp
+fn main () -> Creature
+  let creature (load-file "creature.json")
+  shd creature (parse-json creature)
+  creature
+```
+
+`shd` can be used to reassign a variable even inside `for`, `if`, and `match`:
+
+```lisp
+fn find-three ()
+  let found false
+  for x in (range 0 10)
+    if (== x 3)
+      (shd found true)
+    else
+      (puts "searching..." x)
+      false
+```
+
+Inside `if` and `match`, a `shd` can only change the type of a variable as long
+as every branch agrees on the resulting type; the binding then keeps that type
+after the conditional. Inside a `for` loop, `shd` cannot change types.
+
+
 ### Builtin Host Functions
 
 Host functions are registered in a `Library`. Their signatures participate in

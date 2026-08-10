@@ -125,6 +125,9 @@ impl PartialEq for AST {
 #[derive(Debug, PartialEq, Clone)]
 pub(crate) enum ASTKind {
   Let(ResolvedName, Option<TypeAst>, Box<AST>),
+  /// Reassign an already-bound local name. Like `let`, but the name must
+  /// already be bound in the current local scope.
+  Shd(ResolvedName, Option<TypeAst>, Box<AST>),
   DefineFn(Function),
   DefineStruct(Struct),
   DefineEnum(Enum),
@@ -201,6 +204,9 @@ pub(crate) fn try_map_ast_children<E>(
   let kind = match &ast.kind {
     ASTKind::Let(name, annotation, expression) => {
       ASTKind::Let(name.clone(), annotation.clone(), Box::new(map(expression)?))
+    }
+    ASTKind::Shd(name, annotation, expression) => {
+      ASTKind::Shd(name.clone(), annotation.clone(), Box::new(map(expression)?))
     }
     ASTKind::DefineFn(function) => {
       let mut function = function.clone();
@@ -337,7 +343,7 @@ pub(crate) fn erase_bindings(asts: &[AST]) -> Vec<AST> {
 
   fn erase_ast(ast: &mut AST) {
     match &mut ast.kind {
-      ASTKind::Let(name, _, expression) => {
+      ASTKind::Let(name, _, expression) | ASTKind::Shd(name, _, expression) => {
         erase_name(name);
         erase_ast(expression);
       }
@@ -553,6 +559,7 @@ enum TokenKind {
   Indent,
   Dedent,
   Let,
+  Shd,
   Fn,
   Struct,
   Enum,
@@ -595,6 +602,7 @@ impl fmt::Display for TokenKind {
       TokenKind::Indent => write!(formatter, "indent"),
       TokenKind::Dedent => write!(formatter, "dedent"),
       TokenKind::Let => write!(formatter, "let"),
+      TokenKind::Shd => write!(formatter, "shd"),
       TokenKind::Fn => write!(formatter, "fn"),
       TokenKind::Struct => write!(formatter, "struct"),
       TokenKind::Enum => write!(formatter, "enum"),
@@ -1061,6 +1069,7 @@ impl<'a> Lexer<'a> {
 fn identifier_token_kind(text: &str) -> TokenKind {
   match text {
     "let" => TokenKind::Let,
+    "shd" => TokenKind::Shd,
     "fn" => TokenKind::Fn,
     "struct" => TokenKind::Struct,
     "enum" => TokenKind::Enum,
@@ -1184,6 +1193,7 @@ impl Parser {
     match token.kind {
       TokenKind::LParen => self.parse_list(token.span.start, FormMode::Paren),
       kind @ (TokenKind::Let
+      | TokenKind::Shd
       | TokenKind::Fn
       | TokenKind::Struct
       | TokenKind::Enum
@@ -1261,6 +1271,7 @@ impl Parser {
     } = head;
     match kind {
       TokenKind::Let => self.parse_let(start, mode),
+      TokenKind::Shd => self.parse_shd(start, mode),
       TokenKind::Fn => self.parse_fn(start, mode),
       TokenKind::Struct => self.parse_struct(start, mode),
       TokenKind::Enum => self.parse_enum(start, mode),
@@ -1294,6 +1305,27 @@ impl Parser {
     let span = start..close.span.end;
     Ok(AST::new(
       ASTKind::Let(variable.into(), annotation, Box::new(expression)),
+      span,
+    ))
+  }
+
+  fn parse_shd(&mut self, start: usize, mode: FormMode) -> Result<AST, ParseError> {
+    let variable = self.expect_symbol("first argument to `shd` must be a symbol")?;
+    let annotation = if self.check_token(TokenKind::Colon).is_some() {
+      Some(self.parse_type()?)
+    } else {
+      None
+    };
+    let expression = self.parse_expr()?;
+    let close = match mode {
+      FormMode::Paren => {
+        self.expect_form_end(FormEnd::RParen, "`shd` must have exactly two arguments")?
+      }
+      FormMode::Layout => self.expect_layout_line_end("`shd` must have exactly two arguments")?,
+    };
+    let span = start..close.span.end;
+    Ok(AST::new(
+      ASTKind::Shd(variable.into(), annotation, Box::new(expression)),
       span,
     ))
   }
@@ -2074,6 +2106,7 @@ fn is_form_head_token(kind: &TokenKind) -> bool {
   matches!(
     kind,
     TokenKind::Let
+      | TokenKind::Shd
       | TokenKind::Fn
       | TokenKind::Struct
       | TokenKind::Enum

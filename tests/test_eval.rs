@@ -32,7 +32,7 @@ fn eval_interpreter(source: &str) -> SLValue {
   "(fn main () ->Int (let a 1) (let b 2) (std::+ a b))",
   SLValue::Int(3)
 )]
-#[case::let_shadows_earlier_binding("(fn main () ->Int (let a 1) (let a 2) a)", SLValue::Int(2))]
+#[case::shd_rebinds_earlier_binding("(fn main () ->Int (let a 1) (shd a 2) a)", SLValue::Int(2))]
 #[case::if_selects_then_branch("(fn main () ->Int (if true 42 0))", SLValue::Int(42))]
 #[case::if_selects_else_branch("(fn main () ->Int (if false 42 0))", SLValue::Int(0))]
 #[case::if_with_condition_from_call("(fn main () ->Int (if (std::== 1 1) 7 8))", SLValue::Int(7))]
@@ -60,20 +60,20 @@ fn main () -> Int
   "(fn main () ->Int (let a 10) (if true a 0))",
   SLValue::Int(10)
 )]
-#[case::binding_created_in_both_if_branches(
-  "(fn main () ->Int (if true (let a 10) (let a 20)) a)",
+#[case::shd_in_both_if_branches_then_path(
+  "(fn main () ->Int (let a 0) (if true (shd a 10) (shd a 20)) a)",
   SLValue::Int(10)
 )]
-#[case::binding_created_in_both_if_branches_else_path(
-  "(fn main () ->Int (if false (let a 10) (let a 20)) a)",
+#[case::shd_in_both_if_branches_else_path(
+  "(fn main () ->Int (let a 0) (if false (shd a 10) (shd a 20)) a)",
   SLValue::Int(20)
 )]
-#[case::if_join_selects_shadowing_binding(
-  "(fn main () ->Int (let a 5) (if true (let a 10) a) a)",
+#[case::shd_in_if_then_branch_propagates(
+  "(fn main () ->Int (let a 5) (if true (shd a 10) a) a)",
   SLValue::Int(10)
 )]
-#[case::if_join_keeps_existing_binding(
-  "(fn main () ->Int (let a 5) (if false (let a 10) a) a)",
+#[case::shd_in_if_else_branch_keeps_value(
+  "(fn main () ->Int (let a 5) (if false (shd a 10) a) a)",
   SLValue::Int(5)
 )]
 #[case::calls_same_module_function(
@@ -143,6 +143,27 @@ fn main () -> Int
 #[case::or_short_circuits_return(
   "(fn main () ->Bool (or true (return false)))",
   SLValue::Bool(true)
+)]
+#[case::shd_rebinds_value("(fn main () ->Int (let a 1) (shd a 2) a)", SLValue::Int(2))]
+#[case::shd_can_change_type(
+  "(fn main () ->Int (let a 1) (shd a true) (if a 99 0))",
+  SLValue::Int(99)
+)]
+#[case::shd_in_if_both_branches_same_type(
+  "(fn main () ->Int (let x 1) (if (std::== x 1) (shd x true) (shd x false)) (if x 99 0))",
+  SLValue::Int(99)
+)]
+#[case::shd_in_if_one_branch_same_type_propagates(
+  "(fn main () ->Int (let x 1) (if true (shd x 5) 0) x)",
+  SLValue::Int(5)
+)]
+#[case::shd_in_for_accumulates_outer_binding(
+  "(fn main () ->Int (let s 0) (for n in (std::list 1 2 3) (shd s (std::+ s n))) s)",
+  SLValue::Int(6)
+)]
+#[case::let_in_if_branch_does_not_escape(
+  "(fn main () ->Int (let a 0) (if true (block (let b 10) (shd a b)) (shd a 20)) a)",
+  SLValue::Int(10)
 )]
 fn interpreter_matches_expected(#[case] source: &str, #[case] expected: SLValue) {
   assert_eq!(eval_interpreter(source), expected, "interpreter: {source}");

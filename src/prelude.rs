@@ -18,6 +18,7 @@ pub fn resolve_module_names(
     module_symbols: module_symbols.iter().copied().collect(),
     next_binding: 0,
     module_functions: HashSet::new(),
+    locals: HashSet::new(),
   };
   resolver.resolve_module(asts)
 }
@@ -28,6 +29,7 @@ struct Resolver<'a> {
   module_symbols: HashSet<&'a str>,
   next_binding: u32,
   module_functions: HashSet<BindingId>,
+  locals: HashSet<BindingId>,
 }
 
 type Scope = HashMap<String, BindingId>;
@@ -63,6 +65,7 @@ impl Resolver<'_> {
   fn fresh_name(&mut self, name: &str) -> ResolvedName {
     let binding = BindingId::resolved(self.next_binding);
     self.next_binding += 1;
+    self.locals.insert(binding);
     ResolvedName::resolved(name, binding)
   }
 
@@ -75,6 +78,13 @@ impl Resolver<'_> {
     let mut scope = outer_scope.clone();
     scope.insert(name.name.clone(), name.binding);
 
+    // `locals` tracks bindings minted within the *current* function. Reset it
+    // at the function boundary so that `let`/`shd` checks only see locals of
+    // this function: a `let` may shadow bindings from enclosing functions or
+    // module-level functions, while `shd` may only reassign current-function
+    // locals (never creating a capture of an outer binding).
+    let prev_locals = std::mem::take(&mut self.locals);
+
     let mut params = Vec::with_capacity(function.params.len());
     for (param, annotation) in &function.params {
       let param = self.fresh_name(param.as_str());
@@ -82,12 +92,16 @@ impl Resolver<'_> {
       params.push((param, annotation.clone()));
     }
 
+    let code_result = self.resolve_sequence(&function.code, &mut scope);
+    self.locals = prev_locals;
+    let code = code_result?;
+
     Ok(Function {
       name,
       params,
       return_type: function.return_type.clone(),
       bounds: function.bounds.clone(),
-      code: self.resolve_sequence(&function.code, &mut scope)?,
+      code,
     })
   }
 
@@ -131,10 +145,33 @@ impl Resolver<'_> {
   fn resolve_expr(&mut self, ast: &AST, scope: &mut Scope) -> Result<AST, String> {
     match &ast.kind {
       ASTKind::Let(name, annotation, expr) => {
+        if let Some(binding) = scope.get(name.as_str()) {
+          if self.locals.contains(binding) {
+            return Err(format!(
+              "`let` cannot bind `{name}` because it is already in scope; use `shd` to reassign an existing binding"
+            ));
+          }
+        }
         let expr = self.resolve_expr(expr, scope)?;
         let name = self.fresh_name(name.as_str());
         scope.insert(name.name.clone(), name.binding);
         Ok(ast.with_kind(ASTKind::Let(name, annotation.clone(), Box::new(expr))))
+      }
+      ASTKind::Shd(name, annotation, expr) => {
+        let binding = match scope.get(name.as_str()) {
+          Some(binding) if self.locals.contains(binding) => *binding,
+          _ => {
+            return Err(format!(
+              "`shd` cannot reassign `{name}` because it is not bound in the local scope"
+            ))
+          }
+        };
+        let expr = self.resolve_expr(expr, scope)?;
+        Ok(ast.with_kind(ASTKind::Let(
+          ResolvedName::resolved(name.as_str(), binding),
+          annotation.clone(),
+          Box::new(expr),
+        )))
       }
       ASTKind::DefineFn(function) => {
         let name = self.fresh_name(function.name.as_str());
@@ -194,34 +231,14 @@ impl Resolver<'_> {
       }
       ASTKind::If(cond, then, els) => {
         let cond = self.resolve_expr(cond, scope)?;
-        let baseline = scope.clone();
-        let mut then_scope = baseline.clone();
-        let mut else_scope = baseline.clone();
-        let mut then = self.resolve_expr(then, &mut then_scope)?;
-        let mut els = self.resolve_expr(els, &mut else_scope)?;
-        let mut joined = Scope::new();
-        for (name, then_binding) in &then_scope {
-          let Some(else_binding) = else_scope.get(name) else {
-            continue;
-          };
-          if then_binding == else_binding {
-            joined.insert(name.clone(), *then_binding);
-            continue;
-          }
-          let joined_name = self.fresh_name(name);
-          append_binding_copy(
-            &mut then,
-            ResolvedName::resolved(name, *then_binding),
-            joined_name.clone(),
-          );
-          append_binding_copy(
-            &mut els,
-            ResolvedName::resolved(name, *else_binding),
-            joined_name.clone(),
-          );
-          joined.insert(name.clone(), joined_name.binding);
-        }
-        *scope = joined;
+        // Branches are resolved in cloned scopes and then discarded: names
+        // introduced with `let` inside a branch stay branch-local, and `shd`
+        // reuses existing bindings (whose scope mappings are already present),
+        // so the outer scope is unchanged by either branch.
+        let mut then_scope = scope.clone();
+        let then = self.resolve_expr(then, &mut then_scope)?;
+        let mut else_scope = scope.clone();
+        let els = self.resolve_expr(els, &mut else_scope)?;
         Ok(ast.with_kind(ASTKind::If(Box::new(cond), Box::new(then), Box::new(els))))
       }
       ASTKind::Block(body) => {
@@ -311,20 +328,6 @@ fn nested_function_group_end(expressions: &[AST], start: usize) -> usize {
     end += 1;
   }
   end
-}
-
-fn append_binding_copy(branch: &mut AST, source: ResolvedName, joined: ResolvedName) {
-  let span = branch.span.clone();
-  let original = branch.clone();
-  let copy = AST::new(
-    ASTKind::Let(
-      joined,
-      None,
-      Box::new(AST::new(ASTKind::Variable(source), span.clone())),
-    ),
-    span.clone(),
-  );
-  *branch = AST::new(ASTKind::Block(vec![original, copy]), span);
 }
 
 #[cfg(test)]

@@ -232,6 +232,7 @@ struct Checker {
   field_accesses: HashMap<AstId, FieldAccessInfo>,
   matches: HashMap<AstId, MatchInfo>,
   current_return: Option<Type>,
+  loop_depth: usize,
   next_var: usize,
   inference_vars: Vec<TvRef>,
 }
@@ -262,6 +263,7 @@ impl Checker {
       field_accesses: HashMap::new(),
       matches: HashMap::new(),
       current_return: None,
+      loop_depth: 0,
       next_var: 0,
       inference_vars: Vec::new(),
     }
@@ -437,6 +439,8 @@ impl Checker {
     top_level: bool,
   ) -> Result<(), TypeError> {
     let previous_return = self.current_return.replace(scheme.ret.clone());
+    let previous_loop_depth = self.loop_depth;
+    self.loop_depth = 0;
     let result = (|| {
       let checkpoint = self.inference_vars.len();
       let mut seen = HashSet::new();
@@ -466,6 +470,7 @@ impl Checker {
       self.reject_unresolved(checkpoint)
     })();
     self.current_return = previous_return;
+    self.loop_depth = previous_loop_depth;
     result
   }
 
@@ -556,7 +561,7 @@ impl Checker {
       ASTKind::Bool(_) => Ok(Type::Bool),
       ASTKind::Variable(name) => self.resolve_bare(env, name),
       ASTKind::FunctionRef(module, name) => self.resolve_scheme(module, name),
-      ASTKind::Let(name, annotation, expression) => {
+      ASTKind::Let(name, annotation, expression) | ASTKind::Shd(name, annotation, expression) => {
         let inferred = self.infer(env, type_vars, expression)?;
         if let Some(annotation) = annotation {
           let expected = self.resolve_type(annotation, type_vars)?;
@@ -572,6 +577,18 @@ impl Checker {
         } else {
           Binding::Mono(inferred.clone())
         };
+        // `shd` can't change the type of a variable inside of a loop, both
+        // because it may run 0 or more times, and because the lines of code in
+        // the loop *before* the shd could see either of two types!
+        if self.loop_depth > 0 {
+          if let Some(existing) = env.get(&name.binding) {
+            if !bindings_compatible(&binding, existing) {
+              return Err(TypeError::new(
+                "`shd` inside a `for` loop may not change a binding's type",
+              ));
+            }
+          }
+        }
         env.insert(name.binding, binding);
         Ok(inferred)
       }
@@ -658,7 +675,17 @@ impl Checker {
           .map_err(|error| error.at(iterable.span.clone()))?;
         let mut body_env = env.clone();
         body_env.insert(name.binding, Binding::Mono(item_type));
-        self.infer_sequence(&mut body_env, type_vars, body)?;
+        self.loop_depth += 1;
+        let body_result = self.infer_sequence(&mut body_env, type_vars, body);
+        self.loop_depth -= 1;
+        body_result?;
+        // A loop runs zero or more times, so a binding that is `shd`-reassigned
+        // inside the body must keep a type compatible with its pre-loop type to
+        // remain usable afterward; intersect the body env back into the outer
+        // env so the loop variable and branch-local lets are dropped after the
+        // loop while same-type `shd` bindings survive.
+        let merged = intersect_compatible_bindings(body_env, env);
+        *env = merged;
         Ok(Type::Void)
       }
       ASTKind::PartialApply(_, _) => Err(TypeError::new(
@@ -788,6 +815,11 @@ impl Checker {
     let mut seen_default = false;
     let mut result: Option<Type> = None;
     let mut arm_infos = Vec::with_capacity(arms.len());
+    // Collect each arm's environment so we can intersect them afterward: a
+    // binding survives after the match only if every arm gives it a compatible
+    // type. This mirrors `if` and makes `shd` inside an arm (including type
+    // changes, when all arms agree) sound.
+    let mut arm_envs: Vec<Env> = Vec::with_capacity(arms.len());
 
     for (arm_index, arm) in arms.iter().enumerate() {
       let mut arm_env = env.clone();
@@ -863,6 +895,7 @@ impl Checker {
       }
 
       let arm_type = self.infer(&mut arm_env, type_vars, &arm.body)?;
+      arm_envs.push(arm_env);
       result = match result {
         None => Some(arm_type),
         Some(previous) => match (prune(&previous), prune(&arm_type)) {
@@ -877,6 +910,11 @@ impl Checker {
         },
       };
     }
+
+    *env = arm_envs
+      .into_iter()
+      .reduce(|acc, next| intersect_compatible_bindings(acc, &next))
+      .unwrap_or_default();
 
     if !seen_default && seen_variants.len() != enum_.variants.len() {
       return Err(TypeError::new(format!(

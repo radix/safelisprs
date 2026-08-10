@@ -256,6 +256,122 @@ fn match_pattern_names_must_be_variant_fields() {
 }
 
 #[test]
+fn shd_can_change_type_in_a_sequence() {
+  check("(fn main () ->Int (let x 1) (shd x true) (if x 1 0))").unwrap();
+}
+
+#[test]
+fn shd_in_if_both_branches_same_type_is_usable_after() {
+  check(
+    "(fn main () ->Int
+       (let x 1)
+       (if true (shd x true) (shd x false))
+       (if x 1 0))",
+  )
+  .unwrap();
+}
+
+#[test]
+fn shd_in_if_one_branch_same_type_is_usable_after() {
+  check(
+    "(fn main () ->Int
+       (let x 1)
+       (if true (shd x 5) 0)
+       x)",
+  )
+  .unwrap();
+}
+
+#[test]
+fn shd_in_if_one_branch_type_change_drops_binding() {
+  let error = check(
+    "(fn main () ->Int
+       (let x 1)
+       (if true (block (shd x true) 0) 0)
+       x)",
+  )
+  .unwrap_err();
+  assert!(error.message.contains("Unknown name"), "{error}");
+}
+
+#[test]
+fn shd_in_for_same_type_is_usable_after() {
+  check(
+    "(fn main () ->Int
+       (let x 0)
+       (for n in (std::list 1 2 3) (shd x n))
+       x)",
+  )
+  .unwrap();
+}
+
+#[test]
+fn shd_in_for_type_change_is_rejected() {
+  let error = check(
+    "(fn main () ->Int
+       (let x 1)
+       (for n in (std::list 1) (shd x true))
+       x)",
+  )
+  .unwrap_err();
+  assert!(
+    error.message.contains("may not change a binding's type"),
+    "{error}"
+  );
+}
+
+#[test]
+fn shd_in_match_all_arms_same_type_is_usable_after() {
+  check(
+    "(enum E
+       (A)
+       (B))
+     (fn main (e:E) ->Int
+       (let x 1)
+       (match e
+         (A) => (shd x 10)
+         (B) => (shd x 20))
+       x)",
+  )
+  .unwrap();
+}
+
+#[test]
+fn shd_in_match_all_arms_type_change_is_usable_after() {
+  check(
+    "(enum E
+       (A)
+       (B))
+     (fn main (e:E) ->Int
+       (let x 1)
+       (match e
+         (A) => (shd x true)
+         (B) => (shd x false))
+       (if x 1 0))",
+  )
+  .unwrap();
+}
+
+#[test]
+fn shd_in_match_with_default_arms_must_agree() {
+  // The default arm does not `shd` x, so x keeps its original type there while
+  // the variant arm changes it; the binding must therefore be dropped after.
+  let error = check(
+    "(enum E
+       (A)
+       (B))
+     (fn main (e:E) ->Int
+       (let x 1)
+       (match e
+         (A) => (block (shd x true) 0)
+         _ => 0)
+       x)",
+  )
+  .unwrap_err();
+  assert!(error.message.contains("Unknown name"), "{error}");
+}
+
+#[test]
 fn missing_bound_is_rejected() {
   let error = check("(fn double (a:A) ->A (std::+ a a))").unwrap_err();
   assert!(error.message.contains("requires trait `Add`"), "{error}");
