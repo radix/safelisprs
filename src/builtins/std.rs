@@ -199,27 +199,25 @@ fn map_start<'gc, 'call>(ctx: &mut HostCtx<'gc, 'call>, args: &[Value<'gc>]) -> 
       ))
     }
   }
+  let results = ctx.empty_list();
+  let results = ctx.alloc_heap(SLVal::List(results));
   ctx.push(list);
   ctx.push(func);
   ctx.push(Value::Int(0)); // index we're currently working on
-  ctx.push(Value::Int(0)); // number of results we've accumulated
+  ctx.push(results);
   Ok(())
 }
 
 fn pop_map_state<'gc, 'call>(
   ctx: &mut HostCtx<'gc, 'call>,
-) -> Result<(Value<'gc>, Value<'gc>, usize, usize), String> {
-  let result_count = match ctx.pop()? {
-    Value::Int(value) if value >= 0 => {
-      usize::try_from(value).map_err(|_| "std::map: result count does not fit usize".to_string())?
-    }
-    other => {
-      return Err(format!(
-        "std::map: expected result count Int, got {}",
-        other.type_name()
-      ))
-    }
-  };
+) -> Result<(Value<'gc>, Value<'gc>, usize, Value<'gc>), String> {
+  let results = ctx.pop()?;
+  if !matches!(results, Value::Heap(heap) if matches!(&heap.value, SLVal::List(_))) {
+    return Err(format!(
+      "std::map: expected result List, got {}",
+      results.type_name()
+    ));
+  }
   let index = match ctx.pop()? {
     Value::Int(value) if value >= 0 => {
       usize::try_from(value).map_err(|_| "std::map: index does not fit usize".to_string())?
@@ -233,7 +231,7 @@ fn pop_map_state<'gc, 'call>(
   };
   let func = ctx.pop()?;
   let source_list = ctx.pop()?;
-  Ok((source_list, func, index, result_count))
+  Ok((source_list, func, index, results))
 }
 
 fn push_map_state<'gc, 'call>(
@@ -241,16 +239,39 @@ fn push_map_state<'gc, 'call>(
   source_list: Value<'gc>,
   func: Value<'gc>,
   index: usize,
-  result_count: usize,
+  results: Value<'gc>,
 ) -> Result<(), String> {
   let index = i64::try_from(index).map_err(|_| "std::map: index overflow".to_string())?;
-  let result_count =
-    i64::try_from(result_count).map_err(|_| "std::map: result count overflow".to_string())?;
   ctx.push(source_list);
   ctx.push(func);
   ctx.push(Value::Int(index));
-  ctx.push(Value::Int(result_count));
+  ctx.push(results);
   Ok(())
+}
+
+fn append_map_result<'gc, 'call>(
+  ctx: &mut HostCtx<'gc, 'call>,
+  results: Value<'gc>,
+  value: Value<'gc>,
+) -> Result<Value<'gc>, String> {
+  let appended = match results {
+    Value::Heap(heap) => match &heap.value {
+      SLVal::List(items) => items.append(ctx.mc(), value),
+      _ => {
+        return Err(format!(
+          "std::map: expected result List, got {}",
+          results.type_name()
+        ))
+      }
+    },
+    _ => {
+      return Err(format!(
+        "std::map: expected result List, got {}",
+        results.type_name()
+      ))
+    }
+  };
+  Ok(ctx.alloc_heap(SLVal::List(appended)))
 }
 
 fn map_resume<'gc, 'call>(
@@ -258,19 +279,20 @@ fn map_resume<'gc, 'call>(
   pending_result: Option<Value<'gc>>,
 ) -> Result<HostPoll<'gc>, String> {
   if let Some(callback_result) = pending_result {
-    let (source_list, func, index, result_count) = pop_map_state(ctx)?;
-    let next_index = index + 1;
-    let next_result_count = result_count + 1;
-    ctx.push(callback_result);
-    push_map_state(ctx, source_list, func, next_index, next_result_count)?;
+    let (source_list, func, index, results) = pop_map_state(ctx)?;
+    let next_index = index
+      .checked_add(1)
+      .ok_or_else(|| "std::map: index overflow".to_string())?;
+    let results = append_map_result(ctx, results, callback_result)?;
+    push_map_state(ctx, source_list, func, next_index, results)?;
     return Ok(HostPoll::Pending);
   }
 
-  let (source_list, func, index, result_count) = pop_map_state(ctx)?;
+  let (source_list, func, index, results) = pop_map_state(ctx)?;
   let (len, item) = match &source_list {
     Value::Heap(heap) => match &heap.value {
       SLVal::List(items) => {
-        let item = items.get(index).copied();
+        let item = items.get(index);
         (items.len(), item)
       }
       _ => {
@@ -289,17 +311,11 @@ fn map_resume<'gc, 'call>(
   };
 
   if index == len {
-    let (mut results, _reservation) = reserved_vec(ctx, result_count, "map")?;
-    for _ in 0..result_count {
-      results.push(ctx.pop()?);
-    }
-    results.reverse();
-    let result = ctx.alloc_heap(SLVal::List(results));
-    Ok(HostPoll::Ready(result))
+    Ok(HostPoll::Ready(results))
   } else {
     let item = item
       .ok_or_else(|| format!("std::map: index {index} out of range for list of length {len}"))?;
-    push_map_state(ctx, source_list, func, index, result_count)?;
+    push_map_state(ctx, source_list, func, index, results)?;
     ctx.call(func, &[item])?;
     Ok(HostPoll::Pending)
   }
@@ -356,10 +372,8 @@ fn concat<'gc, 'call>(
           .len()
           .checked_add(y.len())
           .ok_or_else(|| "concat: list length overflow".to_string())?;
-        let (mut combined, _reservation) = reserved_vec(ctx, len, "concat")?;
-        combined.extend(x.iter().copied());
-        combined.extend(y.iter().copied());
-        Ok(SLVal::List(combined))
+        let _reservation = reserve_value_slots(ctx, len, "concat")?;
+        Ok(SLVal::List(x.concat(ctx.mc(), y)))
       }
       _ => Err(format!(
         "Couldn't concat {} and {}",
@@ -381,7 +395,7 @@ fn list<'gc, 'call>(
 ) -> Result<SLVal<'gc>, String> {
   let (mut items, _reservation) = reserved_vec(ctx, args.len(), "list")?;
   items.extend_from_slice(args);
-  Ok(SLVal::List(items))
+  Ok(SLVal::List(ctx.list_from_vec(items)))
 }
 
 fn cell<'gc, 'call>(
@@ -447,7 +461,9 @@ fn idx<'gc, 'call>(
             index, len
           ))
         } else {
-          Ok(items[normalized as usize])
+          items
+            .get(normalized as usize)
+            .ok_or_else(|| "idx: normalized index is out of range".to_string())
         }
       }
       _ => Err(format!(
@@ -476,10 +492,8 @@ fn push<'gc, 'call>(
           .len()
           .checked_add(1)
           .ok_or_else(|| "push: list length overflow".to_string())?;
-        let (mut new, _reservation) = reserved_vec(ctx, len, "push")?;
-        new.extend(items.iter().copied());
-        new.push(value);
-        Ok(SLVal::List(new))
+        let _reservation = reserve_value_slots(ctx, len, "push")?;
+        Ok(SLVal::List(items.append(ctx.mc(), value)))
       }
       _ => Err(format!("push: expected a List, got {}", list.type_name())),
     },
@@ -495,7 +509,7 @@ fn range<'gc, 'call>(
   match (start, stop) {
     (Value::Int(start), Value::Int(stop)) => {
       if stop <= start {
-        Ok(SLVal::List(vec![]))
+        Ok(SLVal::List(ctx.empty_list()))
       } else {
         let len = usize::try_from(i128::from(stop) - i128::from(start))
           .map_err(|_| "range: result is too large for this platform".to_string())?;
@@ -503,7 +517,7 @@ fn range<'gc, 'call>(
         for value in start..stop {
           values.push(Value::Int(value));
         }
-        Ok(SLVal::List(values))
+        Ok(SLVal::List(ctx.list_from_vec(values)))
       }
     }
     _ => Err(format!(
@@ -526,12 +540,12 @@ fn slice<'gc, 'call>(
         let start = norm_index(*start, len).clamp(0, len);
         let stop = norm_index(*stop, len).clamp(0, len);
         if start >= stop {
-          Ok(SLVal::List(vec![]))
+          Ok(SLVal::List(ctx.empty_list()))
         } else {
-          let slice = &items[start as usize..stop as usize];
-          let (mut result, _reservation) = reserved_vec(ctx, slice.len(), "slice")?;
-          result.extend(slice.iter().copied());
-          Ok(SLVal::List(result))
+          let result_len = (stop - start) as usize;
+          let (mut result, _reservation) = reserved_vec(ctx, result_len, "slice")?;
+          result.extend(items.iter().skip(start as usize).take(result_len));
+          Ok(SLVal::List(ctx.list_from_vec(result)))
         }
       }
       SLVal::String(string) => {
@@ -605,6 +619,17 @@ fn reserved_vec<T>(
     .ok_or_else(|| format!("{operation}: allocation capacity overflow"))?;
   ctx.reconcile_reservation(&mut reservation, actual_bytes)?;
   Ok((values, reservation))
+}
+
+fn reserve_value_slots(
+  ctx: &HostCtx<'_, '_>,
+  len: usize,
+  operation: &str,
+) -> Result<MemoryReservation, String> {
+  let requested_bytes = len
+    .checked_mul(::std::mem::size_of::<Value<'static>>())
+    .ok_or_else(|| format!("{operation}: allocation size overflow"))?;
+  ctx.reserve_memory(requested_bytes)
 }
 
 fn reserved_string(

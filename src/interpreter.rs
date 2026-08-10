@@ -9,6 +9,8 @@ use crate::compiler::{Callable, Instruction, LinkedFunction as Function, Package
 
 pub mod list;
 
+use list::List as PersistentList;
+
 /// Per-execution memory accounting. Shared between the `Execution` (which owns
 /// the canonical `Rc`) and every `Accounted` box allocated in that execution's
 /// arena (each carries a cloned `Rc`). Holds the running external-bytes count
@@ -220,15 +222,16 @@ impl Drop for MemoryCharge {
 /// `Accounted` charges the tracker at allocation and releases at sweep:
 ///
 /// - `String`: the `String`'s heap buffer (`capacity()`, not `len`).
-/// - `List`/`Partial`: the `Vec`'s backing array
-///   (`capacity() * size_of::<Value>()`).
+/// - `Partial`: the `Vec`'s backing array (`capacity() * size_of::<Value>()`).
+/// - `List`: zero here; persistent-list nodes account their own shared `Vec`
+///   backings so structurally shared nodes are charged exactly once.
 ///
 /// Only *directly owned* storage is counted; pointed-to `Gc` boxes are
 /// accounted by their own `Accounted` wrappers, so there's no double-counting.
 fn external_bytes_of<'gc>(value: &SLVal<'gc>) -> usize {
   match value {
     SLVal::String(s) => s.capacity(),
-    SLVal::List(items) => items.capacity() * std::mem::size_of::<Value<'gc>>(),
+    SLVal::List(_) => 0,
     SLVal::Partial(p) => p.args.capacity() * std::mem::size_of::<Value<'gc>>(),
     SLVal::Struct(s) => s.fields.capacity() * std::mem::size_of::<Value<'gc>>(),
     SLVal::Enum(e) => e.fields.capacity() * std::mem::size_of::<Value<'gc>>(),
@@ -238,8 +241,8 @@ fn external_bytes_of<'gc>(value: &SLVal<'gc>) -> usize {
 /// A garbage-collected SafeLisp value wrapped with per-execution memory
 /// accounting. The `value: SLVal` is the actual payload; `charge` holds the
 /// byte count of the Rust-heap storage `value` directly owns (string bytes,
-/// list/partial `Vec` backings) and releases it to the per-execution
-/// the execution's memory tracker on `Drop`.
+/// partial `Vec` backings) and releases it to the execution's memory tracker
+/// on `Drop`.
 ///
 /// `Accounted` is `!Clone` by design: every runtime value must be created via
 /// `ExecRoot::alloc_heap`, which charges the tracker. The `charge` field is
@@ -452,6 +455,18 @@ struct ExecRoot<'gc> {
 }
 
 impl<'gc> ExecRoot<'gc> {
+  fn new_list(&self, mc: &'gc Mutation<'gc>) -> PersistentList<'gc, Value<'gc>> {
+    PersistentList::new_tracked(mc, self.tracker.clone())
+  }
+
+  fn list_from_vec(
+    &self,
+    mc: &'gc Mutation<'gc>,
+    values: Vec<Value<'gc>>,
+  ) -> PersistentList<'gc, Value<'gc>> {
+    PersistentList::from_vec_tracked(mc, values, self.tracker.clone())
+  }
+
   /// The single chokepoint for creating heap-backed values. Wraps the
   /// `SLVal` in `Accounted` (charging the tracker for any directly-owned
   /// external Rust-heap storage) and boxes it via `Gc::new`.
@@ -487,7 +502,8 @@ impl<'gc> ExecRoot<'gc> {
       }
       SLValue::List(items) => {
         let sub: Vec<Value<'gc>> = items.iter().map(|i| self.import_value(mc, i)).collect();
-        self.alloc_heap(mc, SLVal::List(sub))
+        let list = self.list_from_vec(mc, sub);
+        self.alloc_heap(mc, SLVal::List(list))
       }
       SLValue::Struct { struct_, fields } => {
         let sub = fields
@@ -612,7 +628,7 @@ pub enum SLVal<'gc> {
   /// A partially applied function and its captured arguments.
   Partial(Partial<'gc>),
   /// A heap-backed list.
-  List(Vec<Value<'gc>>),
+  List(PersistentList<'gc, Value<'gc>>),
   /// A user-defined struct instance.
   Struct(StructInstance<'gc>),
   /// A user-defined enum instance.
@@ -679,7 +695,10 @@ pub enum SLValue {
   },
   /// A mutable cell value represented by its current contents.
   Cell(Box<SLValue>),
-  /// A list of values.
+  /// A list of values. This is stored as a Vec even though SafeLisp represents
+  /// these internally as an efficient "persistent" data structure. We'd have to
+  /// make that List data structure have a non-GC variant in order to maintain
+  /// that efficiency here...
   List(Vec<SLValue>),
   /// A user-defined struct instance.
   Struct {
@@ -946,10 +965,10 @@ impl Execution {
 
   /// The current live memory in bytes: gc-arena's `total_gc_allocation` (the
   /// `GcBox` layouts) plus this execution's `external_bytes` (Rust-heap
-  /// storage owned by `SLVal` payloads — String bytes, List/Partial `Vec`
-  /// backings, interpreter vectors, and temporary reservations). This is the
-  /// value the optional memory limit is compared against on every `step` and
-  /// before guest-sized host allocations.
+  /// storage owned by `SLVal` payloads and persistent-list nodes — string
+  /// bytes, list-node and partial `Vec` backings, interpreter vectors, and
+  /// temporary reservations). This is the value the optional memory limit is
+  /// compared against on every `step` and before guest-sized host allocations.
   pub fn memory_usage(&self) -> usize {
     self.arena.metrics().total_gc_allocation() + self.tracker.external_bytes()
   }
@@ -1131,10 +1150,10 @@ impl<'gc> ExecRoot<'gc> {
   /// no limit is set, but *always* drains the pending positive external-allocation
   /// debt into `Metrics::adjust_debt` so incremental collection stays paced to
   /// external (non-`Gc`-box) allocation — gc-arena otherwise can't see
-  /// String/List backing storage and wouldn't collect soon enough to keep large
-  /// external heaps bounded. Only positive debt is applied (see
-  /// [`MemoryTracker::drain_pacing_debt`]) to avoid a stale negative delta
-  /// suppressing a fresh GC cycle after `collect_debt` resets.
+  /// string and persistent-list-node backing storage and wouldn't collect
+  /// soon enough to keep large external heaps bounded. Only positive debt is
+  /// applied (see [`MemoryTracker::drain_pacing_debt`]) to avoid a stale
+  /// negative delta suppressing a fresh GC cycle after `collect_debt` resets.
   fn check_memory_limit(&self, mc: &Mutation<'gc>) -> Result<(), String> {
     // Drain accumulated positive pacing debt into the arena's allocation debt
     // so incremental collection runs sooner when external heaps grow. Releases
@@ -1721,7 +1740,7 @@ impl<'gc> ExecRoot<'gc> {
             ))
           }
         };
-        if let Some(item) = items.get(index).copied() {
+        if let Some(item) = items.get(index) {
           let next_index =
             i64::try_from(index + 1).map_err(|_| "for-loop index overflow".to_string())?;
           let frame = self
@@ -2012,6 +2031,17 @@ impl<'gc, 'call> HostCtx<'gc, 'call> {
   /// tracker for the payload's direct Rust-heap storage.
   pub fn alloc_heap(&mut self, value: SLVal<'gc>) -> Value<'gc> {
     self.root.alloc_heap(self.mc, value)
+  }
+
+  /// Construct an empty persistent list tracked by this execution.
+  pub fn empty_list(&self) -> PersistentList<'gc, Value<'gc>> {
+    self.root.new_list(self.mc)
+  }
+
+  /// Construct a persistent list from owned values, tracking each shared
+  /// node's external allocation against this execution's memory limit.
+  pub fn list_from_vec(&self, values: Vec<Value<'gc>>) -> PersistentList<'gc, Value<'gc>> {
+    self.root.list_from_vec(self.mc, values)
   }
 
   /// Resolve a struct type by module/name in the currently executing package.

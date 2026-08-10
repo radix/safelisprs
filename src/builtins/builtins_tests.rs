@@ -819,6 +819,18 @@ fn map_with_local_closure() {
 }
 
 #[test]
+fn map_builds_large_persistent_list_in_order() {
+  let result = eval_builtin_main(
+    "(fn main () ->(List Int)
+       (fn id (x:Int) ->Int x)
+       (std::map (std::range 0 1000) id))",
+  )
+  .unwrap();
+  let expected = (0..1_000).map(SLValue::Int).collect();
+  assert_eq!(result, SLValue::List(expected));
+}
+
+#[test]
 fn map_non_list_errors() {
   let err = eval_builtin_main(
     "(fn main () ->Int

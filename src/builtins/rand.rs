@@ -107,7 +107,9 @@ fn choice<'gc, 'call>(
     .unlock()
     .borrow_mut()
     .set(Value::Int(next));
-  Ok(items[(roll - 1) as usize])
+  items
+    .get((roll - 1) as usize)
+    .ok_or_else(|| "rand::choice!: generated index is out of range".to_string())
 }
 
 /// Construct a `rand::Rng` value initialized directly with `seed`.
