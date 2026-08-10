@@ -88,6 +88,51 @@ impl<'gc, T: Clone + Collect<'gc>> List<'gc, T> {
     Self::from_vec_with_tracker(mc, values, Some(tracker))
   }
 
+  pub(super) fn try_from_iter_tracked<I>(
+    mc: &Mutation<'gc>,
+    values: I,
+    tracker: SharedTracker,
+  ) -> Result<List<'gc, T>, String>
+  where
+    I: IntoIterator<Item = T>,
+  {
+    let mut values = values.into_iter();
+    let prefix_len = values.size_hint().0;
+    let mut list = if prefix_len == 0 {
+      let node = Node::new(mc, NodeKind::Leaf(vec![]), Some(tracker.clone()));
+      Node::<T>::ensure_memory_available(mc, &tracker, 0)?;
+      List {
+        node,
+        len: 0,
+        tracker: Some(tracker.clone()),
+      }
+    } else {
+      let mut height = 0;
+      let mut capacity = CHUNK_MAX;
+      while prefix_len > capacity {
+        height += 1;
+        capacity = capacity.saturating_mul(BRANCH_MAX);
+      }
+
+      let node = Node::try_from_iter(mc, &mut values, prefix_len, height, &tracker)?;
+      List {
+        node,
+        len: prefix_len,
+        tracker: Some(tracker.clone()),
+      }
+    };
+
+    // If the iterator is bigger than its size_hint, fall back to appending.
+    for value in values {
+      if list.len == usize::MAX {
+        return Err("list: length overflow".to_string());
+      }
+      list = list.append(mc, value);
+      Node::<T>::ensure_memory_available(mc, &tracker, 0)?;
+    }
+    Ok(list)
+  }
+
   fn from_vec_with_tracker(
     mc: &Mutation<'gc>,
     values: Vec<T>,
@@ -196,6 +241,99 @@ impl<'gc, T: PartialEq + Clone + Collect<'gc>> PartialEq for List<'gc, T> {
 impl<'gc, T: Eq + Clone + Collect<'gc>> Eq for List<'gc, T> {}
 
 impl<'gc, T: Clone + Collect<'gc>> Node<'gc, T> {
+  fn capacity_at_height(height: usize) -> usize {
+    (0..height).fold(CHUNK_MAX, |capacity, _| capacity.saturating_mul(BRANCH_MAX))
+  }
+
+  fn ensure_memory_available(
+    mc: &Mutation<'gc>,
+    tracker: &SharedTracker,
+    additional_bytes: usize,
+  ) -> Result<(), String> {
+    let usage = mc
+      .metrics()
+      .total_gc_allocation()
+      .checked_add(tracker.external_bytes())
+      .and_then(|usage| usage.checked_add(additional_bytes))
+      .ok_or_else(|| "memory accounting overflow while building list".to_string())?;
+    if let Some(limit) = tracker.limit() {
+      if usage > limit {
+        return Err(format!(
+          "memory limit exceeded: {} bytes live (limit {})",
+          usage, limit
+        ));
+      }
+    }
+    Ok(())
+  }
+
+  fn try_from_iter<I>(
+    mc: &Mutation<'gc>,
+    values: &mut I,
+    len: usize,
+    height: usize,
+    tracker: &SharedTracker,
+  ) -> Result<Gc<'gc, Node<'gc, T>>, String>
+  where
+    I: Iterator<Item = T>,
+  {
+    if height == 0 {
+      let bytes = len
+        .checked_mul(std::mem::size_of::<T>())
+        .ok_or_else(|| "list: leaf allocation size overflow".to_string())?;
+      Self::ensure_memory_available(mc, tracker, bytes)?;
+
+      let mut items = Vec::new();
+      items
+        .try_reserve_exact(len)
+        .map_err(|_| format!("list: failed to allocate space for {len} values"))?;
+      for _ in 0..len {
+        let value = values
+          .next()
+          .ok_or_else(|| "list: iterator yielded fewer values than expected".to_string())?;
+        items.push(value);
+      }
+      let node = Self::new(mc, NodeKind::Leaf(items), Some(tracker.clone()));
+      Self::ensure_memory_available(mc, tracker, 0)?;
+      return Ok(node);
+    }
+
+    let child_capacity = Self::capacity_at_height(height - 1);
+    let child_count = len.div_ceil(child_capacity);
+    debug_assert!(child_count <= BRANCH_MAX);
+    let mut children = [None; BRANCH_MAX];
+    let mut remaining = len;
+    for child in children.iter_mut().take(child_count) {
+      let child_len = remaining.min(child_capacity);
+      *child = Some(Self::try_from_iter(
+        mc,
+        values,
+        child_len,
+        height - 1,
+        tracker,
+      )?);
+      remaining -= child_len;
+    }
+    debug_assert_eq!(remaining, 0);
+
+    let bytes = child_count
+      .checked_mul(std::mem::size_of::<Gc<'gc, Node<'gc, T>>>())
+      .ok_or_else(|| "list: branch allocation size overflow".to_string())?;
+    Self::ensure_memory_available(mc, tracker, bytes)?;
+    let mut nodes = Vec::new();
+    nodes
+      .try_reserve_exact(child_count)
+      .map_err(|_| format!("list: failed to allocate space for {child_count} branches"))?;
+    nodes.extend(
+      children[..child_count]
+        .iter()
+        .map(|child| child.expect("all branch children are initialized")),
+    );
+    let node = Self::new(mc, NodeKind::Branch(nodes), Some(tracker.clone()));
+    Self::ensure_memory_available(mc, tracker, 0)?;
+    Ok(node)
+  }
+
   fn new(
     mc: &Mutation<'gc>,
     kind: NodeKind<'gc, T>,
@@ -295,7 +433,14 @@ impl<'gc, T: Clone + Collect<'gc>> Iterator for IterList<'gc, T> {
     self.idx += 1;
     v
   }
+
+  fn size_hint(&self) -> (usize, Option<usize>) {
+    let remaining = self.list.len - self.idx;
+    (remaining, Some(remaining))
+  }
 }
+
+impl<'gc, T: Clone + Collect<'gc>> ExactSizeIterator for IterList<'gc, T> {}
 
 #[cfg(test)]
 mod test {
@@ -370,6 +515,63 @@ mod test {
         appended.iter().collect::<Vec<_>>(),
         (0..=10_000).collect::<Vec<_>>()
       );
+    });
+  }
+
+  #[test]
+  fn tracked_iterator_builder_allocates_only_final_tree_nodes() {
+    let tracker = Rc::new(super::super::MemoryTracker::new());
+    let arena_tracker = tracker.clone();
+    let arena = Arena::<Rootable![List<'_, usize>]>::new(|mc| {
+      List::try_from_iter_tracked(mc, 0..1_000, arena_tracker).unwrap()
+    });
+
+    // 16 leaves, two intermediate branches, and one root branch.
+    assert_eq!(arena.metrics().total_gc_count(), 19);
+    arena.mutate(|_, list| {
+      assert!(list.iter().eq(0..1_000));
+    });
+  }
+
+  #[test]
+  fn tracked_iterator_builder_appends_values_beyond_size_hint() {
+    struct UnderreportedRange(std::ops::Range<usize>);
+
+    impl Iterator for UnderreportedRange {
+      type Item = usize;
+
+      fn next(&mut self) -> Option<Self::Item> {
+        self.0.next()
+      }
+
+      fn size_hint(&self) -> (usize, Option<usize>) {
+        let hinted = self.0.len().min(2);
+        (hinted, Some(hinted))
+      }
+    }
+
+    let tracker = Rc::new(super::super::MemoryTracker::new());
+    let arena_tracker = tracker.clone();
+    let arena = Arena::<Rootable![List<'_, usize>]>::new(|mc| {
+      List::try_from_iter_tracked(mc, UnderreportedRange(0..100), arena_tracker).unwrap()
+    });
+
+    arena.mutate(|_, list| {
+      assert_eq!(list.len(), 100);
+      assert!(list.iter().eq(0..100));
+    });
+  }
+
+  #[test]
+  fn list_iterator_reports_exact_remaining_size() {
+    rootless_mutate(|mc| {
+      let list = List::from_vec(mc, vec![1, 2, 3]);
+      let mut values = list.iter();
+
+      assert_eq!(values.size_hint(), (3, Some(3)));
+      assert_eq!(values.next(), Some(1));
+      assert_eq!(values.size_hint(), (2, Some(2)));
+      assert_eq!(values.len(), 2);
     });
   }
 

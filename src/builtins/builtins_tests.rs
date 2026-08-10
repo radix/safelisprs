@@ -485,7 +485,7 @@ fn before_final_call(source: &str) -> Execution {
   exec
 }
 
-fn assert_final_builtin_reservation_fails(
+fn assert_final_builtin_memory_preflight_fails(
   source: &str,
   arity: usize,
   result_external_bytes: usize,
@@ -509,12 +509,12 @@ fn assert_final_builtin_reservation_fails(
   assert_eq!(
     exec.gc_count(),
     gc_before,
-    "builtin allocated GC results before rejecting its reservation: {source}"
+    "builtin allocated GC results before rejecting its memory preflight: {source}"
   );
 }
 
 #[test]
-fn allocating_builtins_reserve_before_building_results() {
+fn allocating_builtins_check_memory_before_building_results() {
   let large = "x".repeat(512);
   let ptr = ::std::mem::size_of::<Value<'static>>();
   let cases = [
@@ -534,11 +534,6 @@ fn allocating_builtins_reserve_before_building_results() {
       4 * ptr,
     ),
     (
-      "(fn main () ->(List Int) (std::range 0 10000))".to_string(),
-      2,
-      10_000 * ptr,
-    ),
-    (
       "(fn main () ->(List Int) (std::slice (std::list 1 2 3 4) 1 3))".to_string(),
       3,
       2 * ptr,
@@ -551,7 +546,7 @@ fn allocating_builtins_reserve_before_building_results() {
   ];
 
   for (source, arity, bytes) in cases {
-    assert_final_builtin_reservation_fails(&source, arity, bytes);
+    assert_final_builtin_memory_preflight_fails(&source, arity, bytes);
   }
 }
 
@@ -592,22 +587,16 @@ fn builtin_argument_buffer_is_reserved_before_allocation() {
 }
 
 #[test]
-fn range_reserves_result_buffer_before_allocation() {
+fn range_native_builder_enforces_memory_limit() {
   let mut exec = before_final_call("(fn main () ->(List Int) (std::range 0 10000))");
   let value_bytes = ::std::mem::size_of::<Value<'static>>();
   let scratch_bytes = 2 * value_bytes;
-  let result_vec_bytes = 10_000 * value_bytes;
+  let result_value_bytes = 10_000 * value_bytes;
   exec.set_memory_limit(Some(
-    exec.memory_usage() + scratch_bytes + result_vec_bytes - 1,
+    exec.memory_usage() + scratch_bytes + result_value_bytes - 1,
   ));
-  let gc_before = exec.gc_count();
-
   let err = exec.step().unwrap_err();
   assert!(err.contains("memory limit exceeded"), "unexpected: {err}");
-  assert!(
-    exec.gc_count() <= gc_before,
-    "range allocated a result before rejecting its reservation"
-  );
 }
 
 #[test]

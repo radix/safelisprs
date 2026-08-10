@@ -2044,6 +2044,16 @@ impl<'gc, 'call> HostCtx<'gc, 'call> {
     self.root.list_from_vec(self.mc, values)
   }
 
+  /// Construct a persistent list directly from an iterator. Its guaranteed
+  /// size-hint prefix feeds final leaf nodes without first collecting into a
+  /// `Vec`; any additional values are appended.
+  pub fn list_from_iter<I>(&self, values: I) -> Result<PersistentList<'gc, Value<'gc>>, String>
+  where
+    I: IntoIterator<Item = Value<'gc>>,
+  {
+    PersistentList::try_from_iter_tracked(self.mc, values, self.root.tracker.clone())
+  }
+
   /// Resolve a struct type by module/name in the currently executing package.
   pub fn struct_type(&self, module: &str, name: &str) -> Result<(u32, u32), String> {
     let struct_ = self

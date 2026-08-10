@@ -393,9 +393,7 @@ fn list<'gc, 'call>(
   ctx: &mut HostCtx<'gc, 'call>,
   args: &[Value<'gc>],
 ) -> Result<SLVal<'gc>, String> {
-  let (mut items, _reservation) = reserved_vec(ctx, args.len(), "list")?;
-  items.extend_from_slice(args);
-  Ok(SLVal::List(ctx.list_from_vec(items)))
+  Ok(SLVal::List(ctx.list_from_iter(args.iter().copied())?))
 }
 
 fn cell<'gc, 'call>(
@@ -511,13 +509,8 @@ fn range<'gc, 'call>(
       if stop <= start {
         Ok(SLVal::List(ctx.empty_list()))
       } else {
-        let len = usize::try_from(i128::from(stop) - i128::from(start))
-          .map_err(|_| "range: result is too large for this platform".to_string())?;
-        let (mut values, _reservation) = reserved_vec(ctx, len, "range")?;
-        for value in start..stop {
-          values.push(Value::Int(value));
-        }
-        Ok(SLVal::List(ctx.list_from_vec(values)))
+        let values = (start..stop).map(Value::Int);
+        Ok(SLVal::List(ctx.list_from_iter(values)?))
       }
     }
     _ => Err(format!(
@@ -543,9 +536,8 @@ fn slice<'gc, 'call>(
           Ok(SLVal::List(ctx.empty_list()))
         } else {
           let result_len = (stop - start) as usize;
-          let (mut result, _reservation) = reserved_vec(ctx, result_len, "slice")?;
-          result.extend(items.iter().skip(start as usize).take(result_len));
-          Ok(SLVal::List(ctx.list_from_vec(result)))
+          let values = items.iter().skip(start as usize).take(result_len);
+          Ok(SLVal::List(ctx.list_from_iter(values)?))
         }
       }
       SLVal::String(string) => {
@@ -598,27 +590,6 @@ fn norm_index(i: i64, len: i64) -> i64 {
   } else {
     i
   }
-}
-
-fn reserved_vec<T>(
-  ctx: &HostCtx<'_, '_>,
-  len: usize,
-  operation: &str,
-) -> Result<(Vec<T>, MemoryReservation), String> {
-  let requested_bytes = len
-    .checked_mul(::std::mem::size_of::<T>())
-    .ok_or_else(|| format!("{operation}: allocation size overflow"))?;
-  let mut reservation = ctx.reserve_memory(requested_bytes)?;
-  let mut values = Vec::new();
-  values
-    .try_reserve_exact(len)
-    .map_err(|_| format!("{operation}: failed to allocate space for {len} values"))?;
-  let actual_bytes = values
-    .capacity()
-    .checked_mul(::std::mem::size_of::<T>())
-    .ok_or_else(|| format!("{operation}: allocation capacity overflow"))?;
-  ctx.reconcile_reservation(&mut reservation, actual_bytes)?;
-  Ok((values, reservation))
 }
 
 fn reserve_value_slots(
