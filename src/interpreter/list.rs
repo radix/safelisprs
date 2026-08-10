@@ -207,6 +207,19 @@ impl<'gc, T: Clone + Collect<'gc>> List<'gc, T> {
     self.node.get(idx)
   }
 
+  pub fn remove(&self, mc: &Mutation<'gc>, idx: usize) -> Option<(T, List<'gc, T>)> {
+    if idx >= self.len {
+      return None;
+    }
+    let (node, item) = Node::remove(self.node, mc, idx, self.tracker.clone())?;
+    let new_list = List {
+      node,
+      len: self.len - 1,
+      tracker: self.tracker.clone(),
+    };
+    Some((item, new_list))
+  }
+
   pub fn concat(&self, mc: &Mutation<'gc>, other: &Self) -> Self {
     let mut result = self.clone();
     for value in other.iter() {
@@ -374,6 +387,45 @@ impl<'gc, T: Clone + Collect<'gc>> Node<'gc, T> {
             return v;
           }
           cur += node.len();
+        }
+        None
+      }
+    }
+  }
+  fn remove(
+    node: Gc<'gc, Node<'gc, T>>,
+    mc: &Mutation<'gc>,
+    idx: usize,
+    tracker: Option<SharedTracker>,
+  ) -> Option<(Gc<'gc, Node<'gc, T>>, T)> {
+    match &node.kind {
+      NodeKind::Leaf(items) => {
+        let item = items.get(idx)?.clone();
+        let mut new_items = items.clone();
+        new_items.remove(idx);
+        Some((Node::new(mc, NodeKind::Leaf(new_items), tracker), item))
+      }
+      NodeKind::Branch(nodes) => {
+        let mut cur = 0;
+        for (i, child) in nodes.iter().enumerate() {
+          let child_len = child.len();
+          if idx < cur + child_len {
+            let (new_child, item) =
+              Node::remove(*child, mc, idx - cur, tracker.clone())?;
+            let mut new_nodes = nodes.to_vec();
+            if new_child.len() == 0 {
+              new_nodes.remove(i);
+            } else {
+              new_nodes[i] = new_child;
+            }
+            let kind = if new_nodes.is_empty() {
+              NodeKind::Leaf(vec![])
+            } else {
+              NodeKind::Branch(new_nodes)
+            };
+            return Some((Node::new(mc, kind, tracker), item));
+          }
+          cur += child_len;
         }
         None
       }
@@ -584,7 +636,64 @@ mod test {
 
       assert_eq!(left.iter().collect::<Vec<_>>(), vec![1, 2]);
       assert_eq!(right.iter().collect::<Vec<_>>(), vec![3, 4]);
-      assert_eq!(combined.iter().collect::<Vec<_>>(), vec![1, 2, 3, 4]);
+     assert_eq!(combined.iter().collect::<Vec<_>>(), vec![1, 2, 3, 4]);
+   });
+ }
+
+  #[test]
+  fn remove_returns_item_and_new_list() {
+    rootless_mutate(|mc| {
+      let list = List::from_vec(mc, vec![1, 2, 3, 4, 5]);
+      let (item, new_list) = list.remove(mc, 2).expect("index in range");
+      assert_eq!(item, 3);
+      assert_eq!(new_list.iter().collect::<Vec<_>>(), vec![1, 2, 4, 5]);
+      assert_eq!(list.iter().collect::<Vec<_>>(), vec![1, 2, 3, 4, 5]);
+      assert_eq!(list.len(), 5);
+      assert_eq!(new_list.len(), 4);
+    });
+  }
+
+  #[test]
+  fn remove_out_of_range_returns_none() {
+    rootless_mutate(|mc| {
+      let list = List::from_vec(mc, vec![1, 2, 3]);
+      assert_eq!(list.remove(mc, 3), None);
+      assert_eq!(list.remove(mc, 100), None);
+    });
+  }
+
+  #[test]
+  fn remove_across_chunk_and_branch_boundaries() {
+    rootless_mutate(|mc| {
+      let items: Vec<usize> = (0..1_000).collect();
+      let list = List::from_vec(mc, items.clone());
+
+      let (item, removed) = list.remove(mc, 65).expect("index in range");
+      assert_eq!(item, 65);
+      let mut expected = items.clone();
+      expected.remove(65);
+      assert_eq!(removed.iter().collect::<Vec<_>>(), expected);
+      assert_eq!(removed.len(), 999);
+
+      let (item, removed) = removed.remove(mc, 0).expect("index in range");
+      assert_eq!(item, 0);
+      assert_eq!(removed.get(0), Some(1));
+      assert_eq!(removed.len(), 998);
+
+      let (item, removed) = removed.remove(mc, 997).expect("index in range");
+      assert_eq!(item, 999);
+      assert_eq!(removed.len(), 997);
+    });
+  }
+
+  #[test]
+  fn remove_last_element_leaves_empty_list() {
+    rootless_mutate(|mc| {
+      let list = List::from_vec(mc, vec![42]);
+      let (item, new_list) = list.remove(mc, 0).expect("index in range");
+      assert_eq!(item, 42);
+      assert!(new_list.is_empty());
+      assert_eq!(new_list.iter().collect::<Vec<_>>(), vec![]);
     });
   }
 
