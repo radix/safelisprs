@@ -669,9 +669,10 @@ fn backslashes_do_not_escape_symbol_delimiters() {
 
 #[test]
 fn special_form_arity_errors_are_positioned() {
-  let error = read_multiple("(if true 1)").unwrap_err();
-  assert!(error.contains("line 1, column 11"), "got: {error}");
-  assert!(error.contains("expected an expression"), "got: {error}");
+  let error = read_multiple("(if true 1 2 3)").unwrap_err();
+  assert!(error.contains("line 1, column 14"), "got: {error}");
+  assert!(error.contains("two or three arguments"), "got: {error}");
+  assert!(error.contains("expected `)`"), "got: {error}");
 
   let error = read_multiple("(let x 1 2)").unwrap_err();
   assert!(error.contains("exactly two arguments"), "got: {error}");
@@ -690,6 +691,9 @@ fn ast_nodes_keep_full_byte_spans() {
   };
   assert_eq!(condition.span, 4..8);
   assert_eq!(then_branch.span, 9..14);
+  let Some(else_branch) = else_branch else {
+    panic!("expected else branch");
+  };
   assert_eq!(else_branch.span, 15..16);
 
   let ASTKind::CallFixed(_, args) = &then_branch.kind else {

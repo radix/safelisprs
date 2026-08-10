@@ -149,7 +149,8 @@ pub(crate) enum ASTKind {
   /// Get a reference to a function. Source syntax is `module::function`.
   FunctionRef(String, String),
   /// Conditional: evaluate `cond`; if truthy, evaluate `then`, else evaluate `els`.
-  If(Box<AST>, Box<AST>, Box<AST>),
+  /// An omitted `else` branch yields `Void`.
+  If(Box<AST>, Box<AST>, Option<Box<AST>>),
   /// A sequence: evaluate each sub-expression in order, discarding all but the
   /// last, and return the last. Lets a single-expression position (e.g. an `if`
   /// branch) evaluate multiple expressions for side effects.
@@ -262,7 +263,10 @@ pub(crate) fn try_map_ast_children<E>(
     ASTKind::If(condition, then_branch, else_branch) => ASTKind::If(
       Box::new(map(condition)?),
       Box::new(map(then_branch)?),
-      Box::new(map(else_branch)?),
+      match else_branch {
+        Some(branch) => Some(Box::new(map(branch)?)),
+        None => None,
+      },
     ),
     ASTKind::Block(body) => ASTKind::Block(body.iter().map(&mut map).collect::<Result<_, _>>()?),
     ASTKind::Return(value) => {
@@ -396,7 +400,9 @@ pub(crate) fn erase_bindings(asts: &[AST]) -> Vec<AST> {
       ASTKind::If(condition, then_branch, else_branch) => {
         erase_ast(condition);
         erase_ast(then_branch);
-        erase_ast(else_branch);
+        if let Some(else_branch) = else_branch {
+          erase_ast(else_branch);
+        }
       }
       ASTKind::Block(body) => {
         for expression in body {
@@ -1601,35 +1607,45 @@ impl Parser {
     let (then_branch, else_branch, close) = match mode {
       FormMode::Paren => {
         let then_branch = self.parse_expr()?;
-        let else_branch = self.parse_expr()?;
-        let close = self.expect_form_end(
-          FormEnd::RParen,
-          "`if` must have exactly three arguments: cond, then, else",
-        )?;
-        (then_branch, else_branch, close)
+        if matches!(self.peek().kind, TokenKind::RParen) {
+          let close = self.expect_form_end(
+            FormEnd::RParen,
+            "`if` must have two or three arguments: cond, then, else",
+          )?;
+          (then_branch, None, close)
+        } else {
+          let else_branch = self.parse_expr()?;
+          let close = self.expect_form_end(
+            FormEnd::RParen,
+            "`if` must have two or three arguments: cond, then, else",
+          )?;
+          (then_branch, Some(Box::new(else_branch)), close)
+        }
       }
       FormMode::Layout => {
         let then_end = self.enter_layout_body("if")?;
         let then_exprs =
           self.parse_nonempty_exprs_until(then_end, NonemptyExprContext::IfThenBranch)?;
-        self.expect_form_end(
+        let then_close = self.expect_form_end(
           then_end,
           nonempty_expr_eof_message(NonemptyExprContext::IfThenBranch),
         )?;
 
-        self.expect(TokenKind::Else, "`if` layout requires an `else` clause")?;
-
-        let (else_branch, close) = self.parse_layout_else_branch()?;
-        (implicit_branch_block(then_exprs), else_branch, close)
+        if self.check_token(TokenKind::Else).is_some() {
+          let (else_branch, close) = self.parse_layout_else_branch()?;
+          (
+            implicit_branch_block(then_exprs),
+            Some(Box::new(else_branch)),
+            close,
+          )
+        } else {
+          (implicit_branch_block(then_exprs), None, then_close)
+        }
       }
     };
     let span = start..close.span.end;
     Ok(AST::new(
-      ASTKind::If(
-        Box::new(condition),
-        Box::new(then_branch),
-        Box::new(else_branch),
-      ),
+      ASTKind::If(Box::new(condition), Box::new(then_branch), else_branch),
       span,
     ))
   }

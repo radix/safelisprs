@@ -237,9 +237,15 @@ impl Resolver<'_> {
         // so the outer scope is unchanged by either branch.
         let mut then_scope = scope.clone();
         let then = self.resolve_expr(then, &mut then_scope)?;
-        let mut else_scope = scope.clone();
-        let els = self.resolve_expr(els, &mut else_scope)?;
-        Ok(ast.with_kind(ASTKind::If(Box::new(cond), Box::new(then), Box::new(els))))
+        let els = match els {
+          Some(els) => {
+            let mut else_scope = scope.clone();
+            let els = self.resolve_expr(els, &mut else_scope)?;
+            Some(Box::new(els))
+          }
+          None => None,
+        };
+        Ok(ast.with_kind(ASTKind::If(Box::new(cond), Box::new(then), els)))
       }
       ASTKind::Block(body) => {
         Ok(ast.with_kind(ASTKind::Block(self.resolve_sequence(body, scope)?)))

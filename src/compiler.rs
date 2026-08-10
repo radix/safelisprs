@@ -792,7 +792,12 @@ impl<'module, 'types> FunctionCompiler<'module, 'types> {
         self.compile_expr(then_branch)?;
         let jump_end = self.emit(Instruction::Jump(0));
         self.patch_jump_to_here(jump_else)?;
-        self.compile_expr(else_branch)?;
+        match else_branch {
+          Some(else_branch) => self.compile_expr(else_branch)?,
+          None => {
+            self.emit(Instruction::PushVoid);
+          }
+        };
         self.patch_jump_to_here(jump_end)?;
       }
       ASTKind::Block(body) => {

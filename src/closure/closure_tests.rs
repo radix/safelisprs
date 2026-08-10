@@ -201,6 +201,9 @@ fn nested_self_recursion_targets_lifted_function_with_captures() -> Result<(), S
   let ASTKind::If(_, _, else_branch) = &countdown.code[1].kind else {
     panic!("expected conditional body");
   };
+  let Some(else_branch) = else_branch else {
+    panic!("expected else branch");
+  };
   let ASTKind::Call(callable, args) = &else_branch.kind else {
     panic!("expected recursive call through local self binding");
   };

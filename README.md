@@ -132,6 +132,17 @@ fn first-or-zero (xs: (List Int)) -> Int
   0
 ```
 
+The `else` branch of an `if` is optional. An `if` with no `else` evaluates the
+then branch for side effects only and produces `Void`:
+
+```lisp
+fn bump-if-zero (x: Int) -> Int
+  let result x
+  if (== x 0)
+    (shd result 1)
+  result
+```
+
 ### Boolean forms
 
 `and` and `or` accept only Boolean operands and evaluate them left to right,
@@ -288,14 +299,12 @@ fn main () -> Creature
 `shd` can be used to reassign a variable even inside `for`, `if`, and `match`:
 
 ```lisp
-fn find-three ()
+fn find-three () -> Bool
   let found false
   for x in (range 0 10)
     if (== x 3)
       (shd found true)
-    else
-      (puts "searching..." x)
-      false
+  found
 ```
 
 Inside `if` and `match`, a `shd` can only change the type of a variable as long

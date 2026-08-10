@@ -627,20 +627,34 @@ impl Checker {
           .unify(condition_type, Type::Bool)
           .map_err(|error| error.at(condition.span.clone()))?;
         let mut then_env = env.clone();
-        let mut else_env = env.clone();
         let then_type = self.infer(&mut then_env, type_vars, then_branch)?;
-        let else_type = self.infer(&mut else_env, type_vars, else_branch)?;
-        let result_type = match (prune(&then_type), prune(&else_type)) {
-          (Type::Diverges, other) => other,
-          (other, Type::Diverges) => other,
-          _ => {
-            self
-              .unify(then_type.clone(), else_type)
-              .map_err(|error| error.at(else_branch.span.clone()))?;
-            then_type
+        let result_type = match else_branch {
+          Some(else_branch) => {
+            let mut else_env = env.clone();
+            let else_type = self.infer(&mut else_env, type_vars, else_branch)?;
+            let result_type = match (prune(&then_type), prune(&else_type)) {
+              (Type::Diverges, other) => other,
+              (other, Type::Diverges) => other,
+              _ => {
+                self
+                  .unify(then_type.clone(), else_type)
+                  .map_err(|error| error.at(else_branch.span.clone()))?;
+                then_type
+              }
+            };
+            *env = intersect_compatible_bindings(then_env, &else_env);
+            result_type
+          }
+          None => {
+            // No `else` branch: the `if` produces no value, so the result is
+            // `Void`. The missing branch leaves the environment unchanged, so
+            // intersect the then-branch env with the original outer env: this
+            // drops branch-local `let` bindings while keeping `shd` reuses of
+            // outer bindings that remain type-compatible.
+            *env = intersect_compatible_bindings(then_env, env);
+            Type::Void
           }
         };
-        *env = intersect_compatible_bindings(then_env, &else_env);
         Ok(result_type)
       }
       ASTKind::Block(body) => self.infer_sequence(env, type_vars, body),

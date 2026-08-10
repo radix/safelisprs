@@ -295,6 +295,46 @@ fn shd_in_if_one_branch_type_change_drops_binding() {
 }
 
 #[test]
+fn if_without_else_is_void() {
+  // An `if` with no `else` branch produces no value and is typed as `Void`.
+  check("(fn main () (if true 1))").unwrap();
+  check("(fn main () ->Void (if true 1))").unwrap();
+
+  // Using a no-`else` `if` as a value is a type error.
+  let error = check("(fn main () ->Int (if true 1))").unwrap_err();
+  assert!(
+    error.message.contains("Int") && error.message.contains("Void"),
+    "{error}"
+  );
+}
+
+#[test]
+fn if_without_else_keeps_outer_binding_compatible() {
+  // A `shd` in the then branch of a no-`else` `if` keeps a type compatible
+  // with the pre-`if` binding so the variable remains usable afterward.
+  check(
+    "(fn main () ->Int
+       (let x 1)
+       (if true (shd x 5))
+       x)",
+  )
+  .unwrap();
+}
+
+#[test]
+fn if_without_else_drops_branch_local_let() {
+  // A `let` inside a no-`else` `if` branch is branch-local and does not
+  // escape, so the trailing reference is an unknown name.
+  let error = check(
+    "(fn main () ->Int
+       (if true (let y 1))
+       y)",
+  )
+  .unwrap_err();
+  assert!(error.message.contains("Unknown name"), "{error}");
+}
+
+#[test]
 fn shd_in_for_same_type_is_usable_after() {
   check(
     "(fn main () ->Int

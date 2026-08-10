@@ -181,7 +181,7 @@ fn binding_in_only_one_if_branch_does_not_shadow_after_if() {
         AST::synthetic(ASTKind::If(
           Box::new(AST::synthetic(ASTKind::Bool(true))),
           Box::new(AST::Let("+".to_string(), Box::new(AST::Int(1)))),
-          Box::new(AST::Int(0)),
+          Some(Box::new(AST::Int(0))),
         )),
         AST::CallFixed(
           Identifier::Qualified("std".to_string(), "+".to_string()),
@@ -208,7 +208,7 @@ fn let_in_both_if_branches_does_not_escape_after_if() {
         AST::synthetic(ASTKind::If(
           Box::new(AST::synthetic(ASTKind::Bool(true))),
           Box::new(AST::Let("+".to_string(), Box::new(AST::Int(1)))),
-          Box::new(AST::Let("+".to_string(), Box::new(AST::Int(2)))),
+          Some(Box::new(AST::Let("+".to_string(), Box::new(AST::Int(2))))),
         )),
         AST::FunctionRef("std".to_string(), "+".to_string()),
       ],
@@ -290,6 +290,9 @@ fn shd_in_if_branches_reuses_one_binding() {
   };
   let ASTKind::Let(then_name, _, _) = &then_branch.kind else {
     panic!("expected shd in then branch");
+  };
+  let Some(else_branch) = else_branch else {
+    panic!("expected else branch");
   };
   let ASTKind::Let(else_name, _, _) = &else_branch.kind else {
     panic!("expected shd in else branch");

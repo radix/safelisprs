@@ -76,6 +76,22 @@ fn main () -> Int
   "(fn main () ->Int (let a 5) (if false (shd a 10) a) a)",
   SLValue::Int(5)
 )]
+#[case::if_without_else_runs_then_side_effect(
+  "(fn main () ->Int (let a 0) (if true (shd a 7)) a)",
+  SLValue::Int(7)
+)]
+#[case::if_without_else_skips_side_effect_when_false(
+  "(fn main () ->Int (let a 0) (if false (shd a 7)) a)",
+  SLValue::Int(0)
+)]
+#[case::layout_if_without_else_runs_then_side_effect(
+  "fn main () -> Int
+     let a 0
+     if true
+       shd a 7
+     a",
+  SLValue::Int(7)
+)]
 #[case::calls_same_module_function(
   "(fn id (a:Int) ->Int a) (fn main () ->Int (id 99))",
   SLValue::Int(99)
