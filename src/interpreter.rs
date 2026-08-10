@@ -7,6 +7,8 @@ use gc_arena::{collect::Collect, Arena, Gc, Mutation, RefLock, Rootable};
 use crate::builtins::Library;
 use crate::compiler::{Callable, Instruction, LinkedFunction as Function, Package};
 
+pub mod list;
+
 /// Per-execution memory accounting. Shared between the `Execution` (which owns
 /// the canonical `Rc`) and every `Accounted` box allocated in that execution's
 /// arena (each carries a cloned `Rc`). Holds the running external-bytes count
