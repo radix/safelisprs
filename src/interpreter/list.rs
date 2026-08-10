@@ -7,7 +7,6 @@ use std::sync::Arc;
 const CHUNK_MAX: usize = 64;
 const BRANCH_MAX: usize = 8;
 
-// should we just put a T: Clone bound on or should we explicitly wrap T in Gc?
 pub struct List<T> {
   // TODO: GC
   node: Arc<Node<T>>,
@@ -15,11 +14,11 @@ pub struct List<T> {
 }
 
 enum Node<T> {
-  Leaf(Vec<Arc<T>>),
+  Leaf(Vec<T>),
   Branch(Vec<Arc<Node<T>>>),
 }
 
-impl<T> List<T> {
+impl<T: Clone> List<T> {
   pub fn new() -> List<T> {
     List {
       node: Arc::new(Node::Leaf(vec![])),
@@ -46,8 +45,8 @@ impl<T> List<T> {
     IterList { list, idx: 0 }
   }
 
-  pub fn get(&self, idx: usize) -> Option<Arc<T>> {
-    self.node.arc_index(idx)
+  pub fn get(&self, idx: usize) -> Option<T> {
+    self.node.get(idx)
   }
 }
 
@@ -60,7 +59,7 @@ impl<T> Clone for List<T> {
   }
 }
 
-impl<T> Node<T> {
+impl<T: Clone> Node<T> {
   fn len(&self) -> usize {
     match self {
       Node::Leaf(items) => items.len(),
@@ -68,7 +67,7 @@ impl<T> Node<T> {
     }
   }
 
-  fn arc_index(&self, index: usize) -> Option<Arc<T>> {
+  fn get(&self, index: usize) -> Option<T> {
     // TODO: this sucks because we aren't keeping track of sizes higher up,
     // so we have to walk everything instead of doing a binary search?
     match &*self {
@@ -76,7 +75,7 @@ impl<T> Node<T> {
       Node::Branch(nodes) => {
         let mut cur = 0;
         for node in nodes {
-          let v = node.arc_index(index - cur);
+          let v = node.get(index - cur);
           if v.is_some() {
             return v;
           }
@@ -90,10 +89,10 @@ impl<T> Node<T> {
     match &*self {
       Node::Leaf(items) => {
         if items.len() > CHUNK_MAX {
-          Node::Branch(vec![self.clone(), Arc::new(Node::Leaf(vec![Arc::new(v)]))])
+          Node::Branch(vec![self.clone(), Arc::new(Node::Leaf(vec![v]))])
         } else {
           let mut items = items.clone();
-          items.push(Arc::new(v));
+          items.push(v);
           Node::Leaf(items)
         }
       }
@@ -115,14 +114,14 @@ pub struct IterList<T> {
   idx: usize,
 }
 
-impl<T> Iterator for IterList<T> {
-  type Item = Arc<T>;
+impl<T: Clone> Iterator for IterList<T> {
+  type Item = T;
 
   fn next(&mut self) -> Option<Self::Item> {
     if self.idx >= self.list.len {
       return None;
     }
-    let v = self.list.node.arc_index(self.idx);
+    let v = self.list.node.get(self.idx);
     self.idx += 1;
     v
   }
@@ -135,16 +134,16 @@ mod test {
   #[test]
   fn empty_iter() {
     let l: List<usize> = List::new();
-    let v: Vec<Arc<usize>> = l.iter().collect();
+    let v: Vec<usize> = l.iter().collect();
     assert_eq!(v, vec![]);
   }
   #[test]
   fn append() {
     let l: List<usize> = List::new();
     let l2 = l.append(1);
-    let v2: Vec<Arc<usize>> = l2.iter().collect();
-    assert_eq!(v2, vec![Arc::new(1)]);
-    let v: Vec<Arc<usize>> = l.iter().collect();
+    let v2: Vec<usize> = l2.iter().collect();
+    assert_eq!(v2, vec![1]);
+    let v: Vec<usize> = l.iter().collect();
     assert_eq!(v, vec![]);
   }
 
@@ -161,8 +160,7 @@ mod test {
     for i in &items {
       l = l.append(*i);
     }
-    let v: Vec<Arc<usize>> = l.iter().collect();
-    let expected_items: Vec<Arc<usize>> = items.into_iter().map(Arc::new).collect();
-    assert_eq!(v, expected_items)
+    let v: Vec<usize> = l.iter().collect();
+    assert_eq!(v, items)
   }
 }
