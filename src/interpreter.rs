@@ -9,7 +9,7 @@ use crate::compiler::{Callable, Instruction, LinkedFunction as Function, Package
 
 pub mod list;
 
-use list::List as PersistentList;
+use list::List;
 
 /// Per-execution memory accounting. Shared between the `Execution` (which owns
 /// the canonical `Rc`) and every `Accounted` box allocated in that execution's
@@ -456,16 +456,16 @@ struct ExecRoot<'gc> {
 }
 
 impl<'gc> ExecRoot<'gc> {
-  fn new_list(&self, mc: &'gc Mutation<'gc>) -> PersistentList<'gc, Value<'gc>> {
-    PersistentList::new_tracked(mc, self.tracker.clone())
+  fn new_list(&self, mc: &'gc Mutation<'gc>) -> List<'gc, Value<'gc>> {
+    List::new_tracked(mc, self.tracker.clone())
   }
 
   fn list_from_vec(
     &self,
     mc: &'gc Mutation<'gc>,
     values: Vec<Value<'gc>>,
-  ) -> PersistentList<'gc, Value<'gc>> {
-    PersistentList::from_vec_tracked(mc, values, self.tracker.clone())
+  ) -> List<'gc, Value<'gc>> {
+    List::from_vec_tracked(mc, values, self.tracker.clone())
   }
 
   /// The single chokepoint for creating heap-backed values. Wraps the
@@ -636,7 +636,7 @@ pub enum SLVal<'gc> {
   /// A partially applied function and its captured arguments.
   Partial(Partial<'gc>),
   /// A heap-backed list.
-  List(PersistentList<'gc, Value<'gc>>),
+  List(List<'gc, Value<'gc>>),
   /// A user-defined struct instance.
   Struct(StructInstance<'gc>),
   /// A user-defined enum instance.
@@ -847,7 +847,7 @@ impl<'gc> Value<'gc> {
   }
 
   /// Borrow this value as a heap-backed persistent list.
-  pub fn as_list<'value>(&'value self) -> Result<&'value PersistentList<'gc, Value<'gc>>, String> {
+  pub fn as_list<'value>(&'value self) -> Result<&'value List<'gc, Value<'gc>>, String> {
     match self {
       Value::Heap(heap) => match &heap.value {
         SLVal::List(items) => Ok(items),
@@ -2199,24 +2199,24 @@ impl<'gc, 'call> HostCtx<'gc, 'call> {
   }
 
   /// Construct an empty persistent list tracked by this execution.
-  pub fn empty_list(&self) -> PersistentList<'gc, Value<'gc>> {
+  pub fn empty_list(&self) -> List<'gc, Value<'gc>> {
     self.root.new_list(self.mc)
   }
 
   /// Construct a persistent list from owned values, tracking each shared
   /// node's external allocation against this execution's memory limit.
-  pub fn list_from_vec(&self, values: Vec<Value<'gc>>) -> PersistentList<'gc, Value<'gc>> {
+  pub fn list_from_vec(&self, values: Vec<Value<'gc>>) -> List<'gc, Value<'gc>> {
     self.root.list_from_vec(self.mc, values)
   }
 
   /// Construct a persistent list directly from an iterator. Its guaranteed
   /// size-hint prefix feeds final leaf nodes without first collecting into a
   /// `Vec`; any additional values are appended.
-  pub fn list_from_iter<I>(&self, values: I) -> Result<PersistentList<'gc, Value<'gc>>, String>
+  pub fn list_from_iter<I>(&self, values: I) -> Result<List<'gc, Value<'gc>>, String>
   where
     I: IntoIterator<Item = Value<'gc>>,
   {
-    PersistentList::try_from_iter_tracked(self.mc, values, self.root.tracker.clone())
+    List::try_from_iter_tracked(self.mc, values, self.root.tracker.clone())
   }
 
   /// Resolve a struct type by module/name in the currently executing package.
