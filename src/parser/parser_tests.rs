@@ -798,3 +798,60 @@ fn qualified_tuple_head_is_not_the_tuple_constructor() {
     )],
   );
 }
+
+#[test]
+fn bind_desugars_to_a_block_of_let_and_shd_field_accesses() {
+  let result = read_multiple("bind ((shd list) (let result)) (Tuple 1 2)").unwrap();
+  assert_eq!(result.len(), 1);
+  let ASTKind::Block(body) = &result[0].kind else {
+    panic!("`bind` should desugar to a block, got {:?}", result[0].kind);
+  };
+  // One temp `let`, one binding per pattern, plus a trailing reference to the
+  // temp so the block evaluates to the whole tuple.
+  assert_eq!(body.len(), 4);
+  // First: the temp binding holding the destructured value.
+  let ASTKind::Let(temp_name, None, expr) = &body[0].kind else {
+    panic!("first body item should be a `let`, got {:?}", body[0].kind);
+  };
+  assert!(
+    temp_name.as_str().starts_with("__bind_tmp_"),
+    "temp name should be prefixed, got {temp_name}"
+  );
+  let _ = expr;
+  // Second: `shd list <temp>.0`.
+  let ASTKind::Shd(name, None, access) = &body[1].kind else {
+    panic!("second body item should be a `shd`, got {:?}", body[1].kind);
+  };
+  assert_eq!(name.as_str(), "list");
+  let ASTKind::FieldAccess(receiver, field) = &access.kind else {
+    panic!("shd value should be a field access, got {:?}", access.kind);
+  };
+  assert_eq!(field, "0");
+  let _ = receiver;
+  // Third: `let result <temp>.1`.
+  let ASTKind::Let(name, None, access) = &body[2].kind else {
+    panic!("third body item should be a `let`, got {:?}", body[2].kind);
+  };
+  assert_eq!(name.as_str(), "result");
+  let ASTKind::FieldAccess(_, field) = &access.kind else {
+    panic!("let value should be a field access, got {:?}", access.kind);
+  };
+  assert_eq!(field, "1");
+  // Fourth: the trailing reference to the temp (the whole tuple value).
+  let ASTKind::Variable(trailing) = &body[3].kind else {
+    panic!(
+      "trailing body item should be a variable, got {:?}",
+      body[3].kind
+    );
+  };
+  assert_eq!(trailing.as_str(), temp_name.as_str());
+}
+
+#[test]
+fn bind_requires_parenthesized_pattern_group() {
+  let err = parse_internal("bind (shd list) (Tuple 1 2)").unwrap_err();
+  assert!(
+    format!("{err:?}").contains("binding pattern must be parenthesized"),
+    "{err:?}"
+  );
+}

@@ -100,7 +100,7 @@ assert!(error.contains("memory limit exceeded"));
 SafeLisp has a Lisp core with an indentation-based layout syntax for the common
 special forms. Function calls use parentheses, but special forms (`fn`, `if`,
 `else`, `match`, `let`, `struct`, `enum`, `new`, `block`, `return`, `and`,
-`or`, and `for`) can be written without outer parens.
+`or`, `for`, and `bind`) can be written without outer parens.
 
 ### Functions
 
@@ -241,6 +241,33 @@ fn main () -> Int
 Tuples require at least two elements. They are first-class values: they can be
 returned from functions, stored in lists, and passed to or returned from host
 builtins.
+
+### Tuple Binding: `bind`
+
+`bind` destructures a tuple into positional bindings in one form. Each pattern
+is either `(let name)` (introduce a new binding) or `(shd name)` (reassign an
+existing binding). Patterns are matched against the tuple elements in order.
+
+```lisp
+fn main () -> Int
+  let list (std::list 1 2 3 4 5)
+  bind ((shd list) (let result)) (remove-idx list 5)
+  result
+```
+
+This desugars to a `block` that evaluates the expression once, binds each
+element positionally for its side effects, and then yields the whole tuple:
+
+```lisp
+block
+  let __tmp (remove-idx list 5)
+  shd list __tmp.0
+  let result __tmp.1
+  __tmp
+```
+
+A `bind` expression evaluates to the entire tuple value; in a `Void` function
+that value is discarded. The number of patterns must match the tuple's arity.
 
 ### Cells
 

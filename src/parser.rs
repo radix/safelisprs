@@ -18,6 +18,16 @@ impl AstId {
   }
 }
 
+/// Monotonic counter for unique temporary names minted when desugaring `bind`
+/// forms. Each `bind` introduces a fresh local to hold the destructured value
+/// so that nested or repeated `bind`s never collide.
+static NEXT_BIND_TEMP: AtomicU64 = AtomicU64::new(0);
+
+fn fresh_bind_temp_name() -> String {
+  let n = NEXT_BIND_TEMP.fetch_add(1, Ordering::Relaxed);
+  format!("__bind_tmp_{n}")
+}
+
 /// Stable identity for one lexical binding within a resolved module.
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
 pub(crate) struct BindingId(u32);
@@ -507,6 +517,15 @@ pub(crate) struct MatchArm {
   pub(crate) body: AST,
 }
 
+/// One positional binding target inside a `bind` pattern group.
+#[derive(Debug, PartialEq, Clone)]
+struct BindTarget {
+  /// `true` for a `(let name)` pattern, `false` for `(shd name)`.
+  is_let: bool,
+  name: String,
+  span: Span,
+}
+
 #[derive(Debug, PartialEq, Clone)]
 pub(crate) enum MatchPattern {
   Variant {
@@ -592,6 +611,7 @@ enum TokenKind {
   And,
   Or,
   For,
+  Bind,
   In,
   Where,
   Sym(String),
@@ -635,6 +655,7 @@ impl fmt::Display for TokenKind {
       TokenKind::And => write!(formatter, "and"),
       TokenKind::Or => write!(formatter, "or"),
       TokenKind::For => write!(formatter, "for"),
+      TokenKind::Bind => write!(formatter, "bind"),
       TokenKind::In => write!(formatter, "in"),
       TokenKind::Where => write!(formatter, "where"),
       TokenKind::Sym(name) => write!(formatter, "{name}"),
@@ -1102,6 +1123,7 @@ fn identifier_token_kind(text: &str) -> TokenKind {
     "and" => TokenKind::And,
     "or" => TokenKind::Or,
     "for" => TokenKind::For,
+    "bind" => TokenKind::Bind,
     "in" => TokenKind::In,
     "where" => TokenKind::Where,
     "true" => TokenKind::Bool(true),
@@ -1224,7 +1246,8 @@ impl Parser {
       | TokenKind::Return
       | TokenKind::And
       | TokenKind::Or
-      | TokenKind::For)
+      | TokenKind::For
+      | TokenKind::Bind)
         if layout_line_start && self.starts_layout_form(&kind) =>
       {
         self.parse_form_after_head(
@@ -1303,6 +1326,7 @@ impl Parser {
       TokenKind::And => self.parse_boolean_form(start, mode, true),
       TokenKind::Or => self.parse_boolean_form(start, mode, false),
       TokenKind::For => self.parse_for(start, mode),
+      TokenKind::Bind => self.parse_bind(start, mode),
       TokenKind::Sym(name) => self.parse_fixed_call_after_head(start, head_span, name, mode),
       _ => unreachable!("caller only passes valid form heads"),
     }
@@ -1757,6 +1781,113 @@ impl Parser {
     ))
   }
 
+  /// Parse a `bind` form, which destructures a tuple into positional bindings.
+  ///
+  /// `bind ((shd list) (let result)) (mktup)` desugars to:
+  ///
+  /// ```text
+  /// (block
+  ///   (let __bind_tmp_N (mktup))
+  ///   (shd list __bind_tmp_N.0)
+  ///   (let result __bind_tmp_N.1))
+  /// ```
+  ///
+  /// Each pattern is `(let name)` (introduce a binding) or `(shd name)`
+  /// (reassign an existing binding). The `bind` expression evaluates to the
+  /// value of the last binding, matching the tuple element accessed by the
+  /// last pattern; in a `Void` function that value is discarded.
+  fn parse_bind(&mut self, start: usize, mode: FormMode) -> Result<AST, ParseError> {
+    self.expect(
+      TokenKind::LParen,
+      "`bind` requires a parenthesized pattern group",
+    )?;
+    let mut targets = Vec::new();
+    while !matches!(self.peek().kind, TokenKind::RParen) {
+      if matches!(self.peek().kind, TokenKind::Eof) {
+        return Err(
+          ParseError::new(
+            self.peek().span.clone(),
+            "unterminated `bind` pattern group",
+          )
+          .expected("a binding pattern")
+          .expected("`)`"),
+        );
+      }
+      targets.push(self.parse_bind_target()?);
+    }
+    let group_close = self.advance();
+    if targets.is_empty() {
+      return Err(ParseError::new(
+        start..group_close.span.end,
+        "`bind` requires at least one binding pattern",
+      ));
+    }
+    let expression = self.parse_expr()?;
+    let close = match mode {
+      FormMode::Paren => self.expect_form_end(
+        FormEnd::RParen,
+        "`bind` must have a pattern group and an expression",
+      )?,
+      FormMode::Layout => {
+        self.expect_layout_line_end("`bind` must have a pattern group and an expression")?
+      }
+    };
+    let span = start..close.span.end;
+
+    let temp_name = fresh_bind_temp_name();
+    let temp_var = |span: Span| AST::new(ASTKind::Variable(temp_name.clone().into()), span);
+    let field_access = |index: usize, span: Span| {
+      AST::new(
+        ASTKind::FieldAccess(Box::new(temp_var(span.clone())), index.to_string()),
+        span,
+      )
+    };
+
+    // One temp `let`, one binding per pattern, plus a trailing reference to
+    // the temp so the `bind` evaluates to the whole tuple value.
+    let mut body = Vec::with_capacity(targets.len() + 2);
+    body.push(AST::new(
+      ASTKind::Let(temp_name.clone().into(), None, Box::new(expression)),
+      span.clone(),
+    ));
+    for (index, target) in targets.into_iter().enumerate() {
+      let target_span = target.span;
+      let access = field_access(index, target_span.clone());
+      let kind = if target.is_let {
+        ASTKind::Let(target.name.into(), None, Box::new(access))
+      } else {
+        ASTKind::Shd(target.name.into(), None, Box::new(access))
+      };
+      body.push(AST::new(kind, target_span));
+    }
+    body.push(temp_var(span.clone()));
+
+    Ok(AST::new(ASTKind::Block(body), span))
+  }
+
+  fn parse_bind_target(&mut self) -> Result<BindTarget, ParseError> {
+    let open = self.expect(TokenKind::LParen, "binding pattern must be parenthesized")?;
+    let head = self.advance();
+    let is_let = match head.kind {
+      TokenKind::Let => true,
+      TokenKind::Shd => false,
+      _ => {
+        return Err(
+          ParseError::new(head.span, "binding pattern must start with `let` or `shd`")
+            .expected("`(let name)`")
+            .expected("`(shd name)`"),
+        )
+      }
+    };
+    let name = self.expect_symbol("binding pattern requires a name")?;
+    let close = self.expect(TokenKind::RParen, "binding pattern must end with `)`")?;
+    Ok(BindTarget {
+      is_let,
+      name,
+      span: open.span.start..close.span.end,
+    })
+  }
+
   fn parse_fixed_call_after_head(
     &mut self,
     start: usize,
@@ -2151,6 +2282,7 @@ fn is_form_head_token(kind: &TokenKind) -> bool {
       | TokenKind::And
       | TokenKind::Or
       | TokenKind::For
+      | TokenKind::Bind
   )
 }
 

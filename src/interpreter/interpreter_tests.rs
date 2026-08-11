@@ -2347,3 +2347,97 @@ fn tuple_out_of_range_index_is_a_runtime_error() {
     "unexpected error: {err}"
   );
 }
+
+#[test]
+fn bind_destructures_tuple_into_let_bindings() {
+  let source = "
+    (fn main () -> Int
+      (bind ((let a) (let b)) (Tuple 1 2))
+      b)";
+  assert_eq!(eval_main(source), SLValue::Int(2));
+}
+
+#[test]
+fn bind_shd_reassigns_existing_binding() {
+  let source = "
+    (fn main () -> Int
+      (let list (std::list 1 2 3 4 5))
+      (bind ((shd list) (let result)) (Tuple (std::list 9 8 7) 42))
+      (std::+ (std::len list) result))";
+  assert_eq!(eval_main(source), SLValue::Int(45));
+}
+
+#[test]
+fn bind_evaluates_to_the_whole_tuple() {
+  let source = "
+    (fn main () -> (Tuple Int Int)
+      (bind ((let a) (let b)) (Tuple 7 8)))";
+  assert_eq!(
+    eval_main(source),
+    SLValue::Tuple(vec![SLValue::Int(7), SLValue::Int(8)])
+  );
+}
+
+#[test]
+fn bind_layout_form_destructures_tuple() {
+  let source = "
+    fn main () -> Int
+      let list (std::list 1 2 3)
+      bind ((shd list) (let removed)) (Tuple (std::list 9) 5)
+      (std::+ (std::len list) removed)";
+  assert_eq!(eval_main(source), SLValue::Int(6));
+}
+
+#[test]
+fn bind_supports_multiple_shd_targets() {
+  let source = "
+    fn main () -> Int
+      let a 1
+      let b 2
+      bind ((shd a) (shd b)) (Tuple 10 20)
+      (std::+ a b)";
+  assert_eq!(eval_main(source), SLValue::Int(30));
+}
+
+#[test]
+fn bind_rejects_wrong_arity() {
+  let source = "
+    (fn main () -> Int
+      (bind ((let a) (let b) (let c)) (Tuple 1 2))
+      c)";
+  let err = compile_err(source);
+  assert!(err.contains("out of range"), "unexpected error: {err}");
+}
+
+#[test]
+fn bind_rejects_shd_of_unbound_name() {
+  let source = "
+    (fn main () -> Int
+      (bind ((shd x)) (Tuple 1))
+      x)";
+  let err = compile_err(source);
+  assert!(
+    err.contains("`shd` cannot reassign `x`"),
+    "unexpected error: {err}"
+  );
+}
+
+#[test]
+fn bind_rejects_let_rebinding_an_existing_name() {
+  let source = "
+    (fn main () -> Int
+      (let a 1)
+      (bind ((let a)) (Tuple 2))
+      a)";
+  let err = compile_err(source);
+  assert!(
+    err.contains("`let` cannot bind `a`"),
+    "unexpected error: {err}"
+  );
+}
+
+/// Helper: compile `main` and return the error string (panics if compilation
+/// succeeds).
+fn compile_err(source: &str) -> String {
+  compile_executable_from_source(source, ("main", "main"), &Library::default()).unwrap_err()
+}
