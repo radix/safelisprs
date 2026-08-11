@@ -77,9 +77,10 @@ fn choice<'gc, 'call>(
   ctx: &mut HostCtx<'gc, 'call>,
   args: &[Value<'gc>],
 ) -> Result<Value<'gc>, String> {
-  let (rng, list) = (args[0], args[1]);
+  let a = ctx.args("rand::choice!", args);
+  let rng = a.value(0)?;
+  let items = a.list(1)?;
   let cell = rng_state_cell(ctx, rng, "rand::choice!")?;
-  let items = list.as_list().map_err(|e| format!("rand::choice!: {e}"))?;
   if items.is_empty() {
     return Err("rand::choice!: cannot choose from an empty list".to_string());
   }
@@ -127,13 +128,9 @@ fn rng<'gc, 'call>(
   ctx: &mut HostCtx<'gc, 'call>,
   args: &[Value<'gc>],
 ) -> Result<Value<'gc>, String> {
-  let (seed, name) = (args[0], args[1]);
-  let parent = seed
-    .as_int()
-    .map_err(|_| format!("rand::rng: expected Int seed, got {}", seed.type_name()))?;
-  let namespace = name
-    .as_string()
-    .map_err(|_| format!("rand::rng: expected String name, got {}", name.type_name()))?;
+  let a = ctx.args("rand::rng", args);
+  let parent = a.int(0)?;
+  let namespace = a.string(1)?;
   alloc_rng(ctx, rand_rng(parent, namespace))
 }
 
@@ -141,11 +138,10 @@ fn roll<'gc, 'call>(
   ctx: &mut HostCtx<'gc, 'call>,
   args: &[Value<'gc>],
 ) -> Result<Value<'gc>, String> {
-  let (rng, sides) = (args[0], args[1]);
+  let a = ctx.args("rand::roll!", args);
+  let rng = a.value(0)?;
+  let sides = a.int(1)?;
   let cell = rng_state_cell(ctx, rng, "rand::roll!")?;
-  let sides = sides
-    .as_int()
-    .map_err(|_| format!("rand::roll!: expected Int sides, got {}", sides.type_name()))?;
   if sides <= 0 {
     return Err(format!(
       "rand::roll!: sides must be positive, got {}",

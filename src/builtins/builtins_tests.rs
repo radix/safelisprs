@@ -285,9 +285,7 @@ fn libraries_can_be_composed_with_custom_types() {
       ),
       |ctx, args| {
         let struct_ = ctx.struct_type("box", "Box")?;
-        let instance = args[0]
-          .as_struct_instance(struct_)
-          .map_err(|_| format!("expected Box, got {}", args[0].type_name()))?;
+        let instance = ctx.args("box::unbox", args).struct_instance(0, struct_)?;
         Ok(instance.fields[0])
       },
     ))
@@ -344,9 +342,7 @@ fn custom_types_are_distinct_across_modules() {
       ),
       |ctx, args| {
         let struct_ = ctx.struct_type("left", "Box")?;
-        let instance = args[0]
-          .as_struct_instance(struct_)
-          .map_err(|_| format!("expected Box, got {}", args[0].type_name()))?;
+        let instance = ctx.args("left::unbox", args).struct_instance(0, struct_)?;
         Ok(instance.fields[0])
       },
     ));
@@ -665,9 +661,7 @@ fn host_builtins_can_construct_rng_values() {
       Signature::named("rand", "Rng"),
     ),
     |ctx, args| {
-      let seed = args[0]
-        .as_int()
-        .map_err(|_| format!("expected Int, got {}", args[0].type_name()))?;
+      let seed = ctx.args("host::rng", args).int(0)?;
       super::rand::alloc_rng(ctx, seed)
     },
   ));
@@ -928,7 +922,7 @@ fn host_builtins_can_receive_and_return_tuples() {
         Signature::tuple(vec![Signature::String, Signature::Int]),
       ),
       |ctx, args| {
-        let elements = args[0].as_tuple()?;
+        let elements = ctx.args("host::swap", args).tuple(0)?;
         let n = elements[0]
           .as_int()
           .map_err(|_| "expected Int as first tuple element".to_string())?;
@@ -946,8 +940,8 @@ fn host_builtins_can_receive_and_return_tuples() {
         None,
         Signature::Int,
       ),
-      |_ctx, args| {
-        let elements = args[0].as_tuple()?;
+      |ctx, args| {
+        let elements = ctx.args("host::first", args).tuple(0)?;
         Ok(Value::Int(elements[0].as_int().map_err(|_| {
           "expected Int as first tuple element".to_string()
         })?))
@@ -1044,10 +1038,8 @@ fn remove_idx_negative_index_minus_two() {
 #[test]
 fn remove_idx_single_element_list_yields_empty_list() {
   assert_eq!(
-    eval_builtin_main(
-      "(fn main () -> (Tuple Int (List Int)) (std::remove-idx (std::list 7) 0))"
-    )
-    .unwrap(),
+    eval_builtin_main("(fn main () -> (Tuple Int (List Int)) (std::remove-idx (std::list 7) 0))")
+      .unwrap(),
     SLValue::Tuple(vec![SLValue::Int(7), SLValue::List(vec![])])
   );
 }
@@ -1086,20 +1078,17 @@ fn remove_idx_negative_out_of_range_errors() {
 
 #[test]
 fn remove_idx_on_empty_list_errors() {
-  let err = eval_builtin_main(
-    "(fn main () -> (Tuple Int (List Int)) (std::remove-idx (std::list) 0))",
-  )
-  .unwrap_err();
+  let err =
+    eval_builtin_main("(fn main () -> (Tuple Int (List Int)) (std::remove-idx (std::list) 0))")
+      .unwrap_err();
   assert!(err.contains("remove-idx"), "got: {}", err);
   assert!(err.contains("out of range"), "got: {}", err);
 }
 
 #[test]
 fn remove_idx_non_list_errors() {
-  let err = eval_builtin_main(
-    "(fn main () -> (Tuple Int (List Int)) (std::remove-idx 5 0))",
-  )
-  .unwrap_err();
+  let err =
+    eval_builtin_main("(fn main () -> (Tuple Int (List Int)) (std::remove-idx 5 0))").unwrap_err();
   assert!(err.contains("expected"), "got: {}", err);
   assert!(err.contains("List"), "got: {}", err);
 }

@@ -2155,6 +2155,144 @@ impl<'gc> ExecRoot<'gc> {
   }
 }
 
+/// A typed argument extractor for builtin host functions. Wraps a builtin's
+/// argument slice together with the operation name, so each typed accessor
+/// yields a prefixed runtime type error (e.g. `"std::idx: expected a List,
+/// got Int"`) without per-call `map_err` boilerplate.
+///
+/// The type checker normally prevents these errors from firing for guest
+/// source; the extractors exist as a defensive check for host-constructed or
+/// polymorphic call paths. Borrows of heap-backed values are tied to the
+/// argument slice's lifetime, not to `&self`, so multiple calls on one
+/// `Args` do not conflict.
+pub struct Args<'a, 'gc> {
+  op: &'static str,
+  args: &'a [Value<'gc>],
+}
+
+impl<'a, 'gc> Args<'a, 'gc> {
+  fn get(&self, i: usize) -> Result<&'a Value<'gc>, String> {
+    self
+      .args
+      .get(i)
+      .ok_or_else(|| format!("missing argument {i}"))
+  }
+
+  /// The raw `Value` at position `i`.
+  pub fn value(&self, i: usize) -> Result<Value<'gc>, String> {
+    self
+      .get(i)
+      .copied()
+      .map_err(|e| format!("{}: {e}", self.op))
+  }
+
+  /// Borrow the argument at position `i` as the unit (`void`) value.
+  pub fn void(&self, i: usize) -> Result<(), String> {
+    self
+      .get(i)
+      .and_then(|v| v.as_void())
+      .map_err(|e| format!("{}: {e}", self.op))
+  }
+
+  /// Borrow the argument at position `i` as a boolean.
+  pub fn bool(&self, i: usize) -> Result<bool, String> {
+    self
+      .get(i)
+      .and_then(|v| v.as_bool())
+      .map_err(|e| format!("{}: {e}", self.op))
+  }
+
+  /// Borrow the argument at position `i` as an integer.
+  pub fn int(&self, i: usize) -> Result<i64, String> {
+    self
+      .get(i)
+      .and_then(|v| v.as_int())
+      .map_err(|e| format!("{}: {e}", self.op))
+  }
+
+  /// Borrow the argument at position `i` as a float.
+  pub fn float(&self, i: usize) -> Result<f64, String> {
+    self
+      .get(i)
+      .and_then(|v| v.as_float())
+      .map_err(|e| format!("{}: {e}", self.op))
+  }
+
+  /// Borrow the argument at position `i` as a function reference.
+  pub fn function_ref(&self, i: usize) -> Result<(u32, u32), String> {
+    self
+      .get(i)
+      .and_then(|v| v.as_function_ref())
+      .map_err(|e| format!("{}: {e}", self.op))
+  }
+
+  /// Borrow the argument at position `i` as a mutable cell handle.
+  pub fn cell(&self, i: usize) -> Result<Gc<'gc, RefLock<CellContents<'gc>>>, String> {
+    self
+      .get(i)
+      .and_then(|v| v.as_cell())
+      .map_err(|e| format!("{}: {e}", self.op))
+  }
+
+  /// Borrow the argument at position `i` as a heap-backed string slice.
+  pub fn string(&self, i: usize) -> Result<&'a str, String> {
+    self
+      .get(i)
+      .and_then(|v| v.as_string())
+      .map_err(|e| format!("{}: {e}", self.op))
+  }
+
+  /// Borrow the argument at position `i` as a partially applied function.
+  pub fn partial(&self, i: usize) -> Result<&'a Partial<'gc>, String> {
+    self
+      .get(i)
+      .and_then(|v| v.as_partial())
+      .map_err(|e| format!("{}: {e}", self.op))
+  }
+
+  /// Borrow the argument at position `i` as a heap-backed persistent list.
+  pub fn list(&self, i: usize) -> Result<&'a List<'gc, Value<'gc>>, String> {
+    self
+      .get(i)
+      .and_then(|v| v.as_list())
+      .map_err(|e| format!("{}: {e}", self.op))
+  }
+
+  /// Borrow the argument at position `i` as an instance of the struct type
+  /// identified by `struct_`.
+  pub fn struct_instance(
+    &self,
+    i: usize,
+    struct_: (u32, u32),
+  ) -> Result<&'a StructInstance<'gc>, String> {
+    self
+      .get(i)
+      .and_then(|v| v.as_struct_instance(struct_))
+      .map_err(|e| format!("{}: {e}", self.op))
+  }
+
+  /// Borrow the argument at position `i` as an instance of the enum type
+  /// identified by `enum_`.
+  pub fn enum_instance(
+    &self,
+    i: usize,
+    enum_: (u32, u32),
+  ) -> Result<&'a EnumInstance<'gc>, String> {
+    self
+      .get(i)
+      .and_then(|v| v.as_enum_instance(enum_))
+      .map_err(|e| format!("{}: {e}", self.op))
+  }
+
+  /// Borrow the argument at position `i` as an anonymous tuple.
+  pub fn tuple(&self, i: usize) -> Result<&'a [Value<'gc>], String> {
+    self
+      .get(i)
+      .and_then(|v| v.as_tuple())
+      .map_err(|e| format!("{}: {e}", self.op))
+  }
+}
+
 /// The runtime context passed to a builtin handler. It carries the GC
 /// `Mutation` context, the `Package` / [`Library`] registries, and a
 /// short-lived mutable borrow of the execution root — enough for a builtin to
@@ -2190,6 +2328,13 @@ impl<'gc, 'call> HostCtx<'gc, 'call> {
   /// The GC `Mutation` context for allocating new `Gc` pointers.
   pub fn mc(&self) -> &'gc Mutation<'gc> {
     self.mc
+  }
+
+  /// Build a typed argument extractor for a builtin handler. `op` is the
+  /// builtin's `"module::name"` and prefixes every type error the extractor
+  /// produces.
+  pub fn args<'a>(&self, op: &'static str, args: &'a [Value<'gc>]) -> Args<'a, 'gc> {
+    Args { op, args }
   }
 
   /// Allocate a heap-backed value via the execution's chokepoint, charging the

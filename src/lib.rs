@@ -29,7 +29,8 @@ pub use builtins::{
 };
 pub use compiler::{compile_executable_from_source, Package};
 pub use interpreter::{
-  Accounted, CellContents, EnumInstance, Execution, HostCtx, HostPoll, Interpreter,
-  MemoryReservation, Partial, SLVal, SLValue, Status, StructInstance, Value,
+  Accounted, Args, CellContents, EnumInstance, Execution, HostCtx, HostPoll,
+  Interpreter, MemoryReservation, Partial, SLVal, SLValue, Status, StructInstance,
+  Value,
 };
 pub use types::{QualifiedTypeName, Signature};

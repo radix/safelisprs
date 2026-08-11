@@ -204,8 +204,8 @@ pub fn library() -> Library {
 }
 
 fn map_start<'gc, 'call>(ctx: &mut HostCtx<'gc, 'call>, args: &[Value<'gc>]) -> Result<(), String> {
+  ctx.args("std::map", args).list(0)?;
   let (list, func) = (args[0], args[1]);
-  list.as_list().map_err(|e| format!("std::map: {e}"))?;
   let results = ctx.empty_list();
   let results = ctx.alloc_heap(SLVal::List(results));
   ctx.push(list);
@@ -386,10 +386,10 @@ fn cell<'gc, 'call>(
 }
 
 fn get<'gc, 'call>(
-  _ctx: &mut HostCtx<'gc, 'call>,
+  ctx: &mut HostCtx<'gc, 'call>,
   args: &[Value<'gc>],
 ) -> Result<Value<'gc>, String> {
-  let cell = args[0].as_cell().map_err(|e| format!("std::get: {e}"))?;
+  let cell = ctx.args("std::get", args).cell(0)?;
   Ok(cell.borrow().value)
 }
 
@@ -397,8 +397,10 @@ fn set<'gc, 'call>(
   ctx: &mut HostCtx<'gc, 'call>,
   args: &[Value<'gc>],
 ) -> Result<Value<'gc>, String> {
-  let cell = args[0].as_cell().map_err(|e| format!("std::set!: {e}"))?;
-  Gc::write(ctx.mc(), cell).unlock().borrow_mut().set(args[1]);
+  let a = ctx.args("std::set!", args);
+  let cell = a.cell(0)?;
+  let value = a.value(1)?;
+  Gc::write(ctx.mc(), cell).unlock().borrow_mut().set(value);
   Ok(Value::Void)
 }
 
@@ -408,35 +410,23 @@ fn len<'gc>(value: Value<'gc>) -> Result<Value<'gc>, String> {
 }
 
 fn idx<'gc, 'call>(
-  _ctx: &mut HostCtx<'gc, 'call>,
+  ctx: &mut HostCtx<'gc, 'call>,
   args: &[Value<'gc>],
 ) -> Result<Value<'gc>, String> {
-  let (list, index_value) = (args[0], args[1]);
-  let items = list.as_list().map_err(|_| {
-    format!(
-      "idx: expected (List, Int), got ({}, {})",
-      list.type_name(),
-      index_value.type_name()
-    )
-  })?;
-  let index = index_value.as_int().map_err(|_| {
-    format!(
-      "idx: expected (List, Int), got ({}, {})",
-      list.type_name(),
-      index_value.type_name()
-    )
-  })?;
+  let a = ctx.args("std::idx", args);
+  let items = a.list(0)?;
+  let index = a.int(1)?;
   let len = items.len() as i64;
   let normalized = if index < 0 { index + len } else { index };
   if normalized < 0 || normalized >= len {
     Err(format!(
-      "idx: index {} out of range for list of length {}",
+      "std::idx: index {} out of range for list of length {}",
       index, len
     ))
   } else {
     items
       .get(normalized as usize)
-      .ok_or_else(|| "idx: normalized index is out of range".to_string())
+      .ok_or_else(|| "std::idx: normalized index is out of range".to_string())
   }
 }
 
@@ -444,32 +434,20 @@ fn remove_idx<'gc, 'call>(
   ctx: &mut HostCtx<'gc, 'call>,
   args: &[Value<'gc>],
 ) -> Result<Value<'gc>, String> {
-  let (list, index_value) = (args[0], args[1]);
-  let items = list.as_list().map_err(|_| {
-    format!(
-      "remove-idx: expected (List, Int), got ({}, {})",
-      list.type_name(),
-      index_value.type_name()
-    )
-  })?;
-  let index = index_value.as_int().map_err(|_| {
-    format!(
-      "remove-idx: expected (List, Int), got ({}, {})",
-      list.type_name(),
-      index_value.type_name()
-    )
-  })?;
+  let a = ctx.args("std::remove-idx", args);
+  let items = a.list(0)?;
+  let index = a.int(1)?;
   let len = items.len() as i64;
   let normalized = if index < 0 { index + len } else { index };
   if normalized < 0 || normalized >= len {
     Err(format!(
-      "remove-idx: index {} out of range for list of length {}",
+      "std::remove-idx: index {} out of range for list of length {}",
       index, len
     ))
   } else {
     let r = items
       .remove(ctx.mc(), normalized as usize)
-      .ok_or_else(|| "remove-idx: normalized index is out of range".to_string())?;
+      .ok_or_else(|| "std::remove-idx: normalized index is out of range".to_string())?;
     let new_list = ctx.alloc_heap(SLVal::List(r.1));
     ctx.alloc_tuple(vec![r.0, new_list])
   }
@@ -479,13 +457,14 @@ fn push<'gc, 'call>(
   ctx: &mut HostCtx<'gc, 'call>,
   args: &[Value<'gc>],
 ) -> Result<SLVal<'gc>, String> {
-  let (list, value) = (args[0], args[1]);
-  let items = list.as_list().map_err(|e| format!("push: {e}"))?;
+  let a = ctx.args("std::push", args);
+  let items = a.list(0)?;
+  let value = a.value(1)?;
   let len = items
     .len()
     .checked_add(1)
-    .ok_or_else(|| "push: list length overflow".to_string())?;
-  let _reservation = reserve_value_slots(ctx, len, "push")?;
+    .ok_or_else(|| "std::push: list length overflow".to_string())?;
+  let _reservation = reserve_value_slots(ctx, len, "std::push")?;
   Ok(SLVal::List(items.append(ctx.mc(), value)))
 }
 
@@ -493,21 +472,14 @@ fn range<'gc, 'call>(
   ctx: &mut HostCtx<'gc, 'call>,
   args: &[Value<'gc>],
 ) -> Result<SLVal<'gc>, String> {
-  let (start, stop) = (args[0], args[1]);
-  match (start.as_int(), stop.as_int()) {
-    (Ok(start), Ok(stop)) => {
-      if stop <= start {
-        Ok(SLVal::List(ctx.empty_list()))
-      } else {
-        let values = (start..stop).map(Value::Int);
-        Ok(SLVal::List(ctx.list_from_iter(values)?))
-      }
-    }
-    _ => Err(format!(
-      "range: expected (Int, Int), got ({}, {})",
-      start.type_name(),
-      stop.type_name()
-    )),
+  let a = ctx.args("std::range", args);
+  let start = a.int(0)?;
+  let stop = a.int(1)?;
+  if stop <= start {
+    Ok(SLVal::List(ctx.empty_list()))
+  } else {
+    let values = (start..stop).map(Value::Int);
+    Ok(SLVal::List(ctx.list_from_iter(values)?))
   }
 }
 
@@ -515,13 +487,10 @@ fn slice<'gc, 'call>(
   ctx: &mut HostCtx<'gc, 'call>,
   args: &[Value<'gc>],
 ) -> Result<SLVal<'gc>, String> {
-  let (value, start_value, stop_value) = (args[0], args[1], args[2]);
-  let start = start_value
-    .as_int()
-    .map_err(|_| slice_type_error(&value, &start_value, &stop_value))?;
-  let stop = stop_value
-    .as_int()
-    .map_err(|_| slice_type_error(&value, &start_value, &stop_value))?;
+  let a = ctx.args("std::slice", args);
+  let value = a.value(0)?;
+  let start = a.int(1)?;
+  let stop = a.int(2)?;
   if let Ok(items) = value.as_list() {
     let len = items.len() as i64;
     let start = norm_index(start, len).clamp(0, len);
@@ -543,21 +512,16 @@ fn slice<'gc, 'call>(
     let start_byte = char_boundary(string, start);
     let end_byte = char_boundary(string, stop);
     let source = &string[start_byte..end_byte];
-    let (mut result, _reservation) = reserved_string(ctx, source.len(), "slice")?;
+    let (mut result, _reservation) = reserved_string(ctx, source.len(), "std::slice")?;
     result.push_str(source);
     return Ok(SLVal::String(result));
   }
-  Err(slice_type_error(&value, &start_value, &stop_value))
-}
-
-/// Build the type-mismatch error for `std::slice`.
-fn slice_type_error(value: &Value<'_>, start: &Value<'_>, stop: &Value<'_>) -> String {
-  format!(
-    "slice: expected (List, Int, Int) or (String, Int, Int), got ({}, {}, {})",
-    value.type_name(),
-    start.type_name(),
-    stop.type_name()
-  )
+  Err(format!(
+    "std::slice: expected (List, Int, Int) or (String, Int, Int), got ({}, {}, {})",
+    args[0].type_name(),
+    args[1].type_name(),
+    args[2].type_name()
+  ))
 }
 
 /// Return the UTF-8 byte offset for a character boundary. `char_index` may
