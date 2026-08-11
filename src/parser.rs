@@ -142,9 +142,14 @@ impl PartialEq for AST {
 #[derive(Debug, PartialEq, Clone)]
 pub(crate) enum ASTKind {
   Let(ResolvedName, Option<TypeAst>, Box<AST>),
-  /// Reassign an already-bound local name. Like `let`, but the name must
-  /// already be bound in the current local scope.
+  /// Shadow an existing binding by introducing a fresh one. Equivalent to
+  /// `let`, but does not error when the name is already in scope: it explicitly
+  /// calls out that shadowing is happening, and may change the binding's type.
   Shd(ResolvedName, Option<TypeAst>, Box<AST>),
+  /// Assign to an already-bound local name. The name must already be bound in
+  /// the current local scope, and the new value must have the same type as the
+  /// existing binding.
+  Assign(ResolvedName, Option<TypeAst>, Box<AST>),
   DefineFn(Function),
   DefineStruct(Struct),
   DefineEnum(Enum),
@@ -232,6 +237,9 @@ pub(crate) fn try_map_ast_children<E>(
     }
     ASTKind::Shd(name, annotation, expression) => {
       ASTKind::Shd(name.clone(), annotation.clone(), Box::new(map(expression)?))
+    }
+    ASTKind::Assign(name, annotation, expression) => {
+      ASTKind::Assign(name.clone(), annotation.clone(), Box::new(map(expression)?))
     }
     ASTKind::DefineFn(function) => {
       let mut function = function.clone();
@@ -370,7 +378,9 @@ pub(crate) fn erase_bindings(asts: &[AST]) -> Vec<AST> {
 
   fn erase_ast(ast: &mut AST) {
     match &mut ast.kind {
-      ASTKind::Let(name, _, expression) | ASTKind::Shd(name, _, expression) => {
+      ASTKind::Let(name, _, expression)
+      | ASTKind::Shd(name, _, expression)
+      | ASTKind::Assign(name, _, expression) => {
         erase_name(name);
         erase_ast(expression);
       }
@@ -516,11 +526,21 @@ pub(crate) struct MatchArm {
   pub(crate) body: AST,
 }
 
+/// Which kind of binding a `bind` pattern introduces.
+#[derive(Debug, PartialEq, Clone, Copy)]
+enum BindKind {
+  /// `(let name)` — introduce a fresh binding.
+  Let,
+  /// `(shd name)` — shadow an existing binding with a fresh one.
+  Shd,
+  /// `(= name)` — assign to an existing binding (same type).
+  Assign,
+}
+
 /// One positional binding target inside a `bind` pattern group.
 #[derive(Debug, PartialEq, Clone)]
 struct BindTarget {
-  /// `true` for a `(let name)` pattern, `false` for `(shd name)`.
-  is_let: bool,
+  kind: BindKind,
   name: String,
   span: Span,
 }
@@ -598,6 +618,7 @@ enum TokenKind {
   Dedent,
   Let,
   Shd,
+  Assign,
   Fn,
   Struct,
   Enum,
@@ -642,6 +663,7 @@ impl fmt::Display for TokenKind {
       TokenKind::Dedent => write!(formatter, "dedent"),
       TokenKind::Let => write!(formatter, "let"),
       TokenKind::Shd => write!(formatter, "shd"),
+      TokenKind::Assign => write!(formatter, "="),
       TokenKind::Fn => write!(formatter, "fn"),
       TokenKind::Struct => write!(formatter, "struct"),
       TokenKind::Enum => write!(formatter, "enum"),
@@ -1110,6 +1132,7 @@ fn identifier_token_kind(text: &str) -> TokenKind {
   match text {
     "let" => TokenKind::Let,
     "shd" => TokenKind::Shd,
+    "=" => TokenKind::Assign,
     "fn" => TokenKind::Fn,
     "struct" => TokenKind::Struct,
     "enum" => TokenKind::Enum,
@@ -1272,6 +1295,7 @@ impl Parser {
       TokenKind::LParen => self.parse_list(token.span.start, FormMode::Paren),
       kind @ (TokenKind::Let
       | TokenKind::Shd
+      | TokenKind::Assign
       | TokenKind::Fn
       | TokenKind::Struct
       | TokenKind::Enum
@@ -1351,6 +1375,7 @@ impl Parser {
     match kind {
       TokenKind::Let => self.parse_let(start, mode),
       TokenKind::Shd => self.parse_shd(start, mode),
+      TokenKind::Assign => self.parse_assign(start, mode),
       TokenKind::Fn => self.parse_fn(start, mode),
       TokenKind::Struct => self.parse_struct(start, mode),
       TokenKind::Enum => self.parse_enum(start, mode),
@@ -1406,6 +1431,27 @@ impl Parser {
     let span = start..close.span.end;
     Ok(AST::new(
       ASTKind::Shd(variable.into(), annotation, Box::new(expression)),
+      span,
+    ))
+  }
+
+  fn parse_assign(&mut self, start: usize, mode: FormMode) -> Result<AST, ParseError> {
+    let variable = self.expect_symbol("first argument to `=` must be a symbol")?;
+    let annotation = if self.check_token(TokenKind::Colon).is_some() {
+      Some(self.parse_type()?)
+    } else {
+      None
+    };
+    let expression = self.parse_expr()?;
+    let close = match mode {
+      FormMode::Paren => {
+        self.expect_form_end(FormEnd::RParen, "`=` must have exactly two arguments")?
+      }
+      FormMode::Layout => self.expect_layout_line_end("`=` must have exactly two arguments")?,
+    };
+    let span = start..close.span.end;
+    Ok(AST::new(
+      ASTKind::Assign(variable.into(), annotation, Box::new(expression)),
       span,
     ))
   }
@@ -1899,10 +1945,10 @@ impl Parser {
     for (index, target) in targets.into_iter().enumerate() {
       let target_span = target.span;
       let access = field_access(index, target_span.clone());
-      let kind = if target.is_let {
-        ASTKind::Let(target.name.into(), None, Box::new(access))
-      } else {
-        ASTKind::Shd(target.name.into(), None, Box::new(access))
+      let kind = match target.kind {
+        BindKind::Let => ASTKind::Let(target.name.into(), None, Box::new(access)),
+        BindKind::Shd => ASTKind::Shd(target.name.into(), None, Box::new(access)),
+        BindKind::Assign => ASTKind::Assign(target.name.into(), None, Box::new(access)),
       };
       body.push(AST::new(kind, target_span));
     }
@@ -1914,21 +1960,26 @@ impl Parser {
   fn parse_bind_target(&mut self) -> Result<BindTarget, ParseError> {
     let open = self.expect(TokenKind::LParen, "binding pattern must be parenthesized")?;
     let head = self.advance();
-    let is_let = match head.kind {
-      TokenKind::Let => true,
-      TokenKind::Shd => false,
+    let kind = match head.kind {
+      TokenKind::Let => BindKind::Let,
+      TokenKind::Shd => BindKind::Shd,
+      TokenKind::Assign => BindKind::Assign,
       _ => {
         return Err(
-          ParseError::new(head.span, "binding pattern must start with `let` or `shd`")
-            .expected("`(let name)`")
-            .expected("`(shd name)`"),
+          ParseError::new(
+            head.span,
+            "binding pattern must start with `let`, `shd`, or `=`",
+          )
+          .expected("`(let name)`")
+          .expected("`(shd name)`")
+          .expected("`(= name)`"),
         )
       }
     };
     let name = self.expect_symbol("binding pattern requires a name")?;
     let close = self.expect(TokenKind::RParen, "binding pattern must end with `)`")?;
     Ok(BindTarget {
-      is_let,
+      kind,
       name,
       span: open.span.start..close.span.end,
     })
@@ -2324,6 +2375,7 @@ fn is_form_head_token(kind: &TokenKind) -> bool {
     kind,
     TokenKind::Let
       | TokenKind::Shd
+      | TokenKind::Assign
       | TokenKind::Fn
       | TokenKind::Struct
       | TokenKind::Enum

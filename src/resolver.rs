@@ -148,7 +148,7 @@ impl Resolver<'_> {
         if let Some(binding) = scope.get(name.as_str()) {
           if self.locals.contains(binding) {
             return Err(format!(
-              "`let` cannot bind `{name}` because it is already in scope; use `shd` to reassign an existing binding"
+              "`let` cannot bind `{name}` because it is already in scope; use `shd` to shadow or `=` to reassign an existing binding"
             ));
           }
         }
@@ -158,11 +158,20 @@ impl Resolver<'_> {
         Ok(ast.with_kind(ASTKind::Let(name, annotation.clone(), Box::new(expr))))
       }
       ASTKind::Shd(name, annotation, expr) => {
+        // `shd` introduces a fresh binding that shadows an existing one (if
+        // present). Unlike `let`, it does not error when the name is already in
+        // scope; it is the explicit shadowing form and may change the type.
+        let expr = self.resolve_expr(expr, scope)?;
+        let name = self.fresh_name(name.as_str());
+        scope.insert(name.name.clone(), name.binding);
+        Ok(ast.with_kind(ASTKind::Let(name, annotation.clone(), Box::new(expr))))
+      }
+      ASTKind::Assign(name, annotation, expr) => {
         let binding = match scope.get(name.as_str()) {
           Some(binding) if self.locals.contains(binding) => *binding,
           _ => {
             return Err(format!(
-              "`shd` cannot reassign `{name}` because it is not bound in the local scope"
+              "`=` cannot assign to `{name}` because it is not bound in the local scope"
             ))
           }
         };

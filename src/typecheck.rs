@@ -282,7 +282,6 @@ struct Checker {
   matches: HashMap<AstId, MatchInfo>,
   constructions: HashMap<AstId, ConstructionInfo>,
   current_return: Option<Type>,
-  loop_depth: usize,
   next_var: usize,
   inference_vars: Vec<TvRef>,
 }
@@ -314,7 +313,6 @@ impl Checker {
       matches: HashMap::new(),
       constructions: HashMap::new(),
       current_return: None,
-      loop_depth: 0,
       next_var: 0,
       inference_vars: Vec::new(),
     }
@@ -503,8 +501,6 @@ impl Checker {
     top_level: bool,
   ) -> Result<(), TypeError> {
     let previous_return = self.current_return.replace(scheme.ret.clone());
-    let previous_loop_depth = self.loop_depth;
-    self.loop_depth = 0;
     let result = (|| {
       let checkpoint = self.inference_vars.len();
       let mut seen = HashSet::new();
@@ -534,7 +530,6 @@ impl Checker {
       self.reject_unresolved(checkpoint)
     })();
     self.current_return = previous_return;
-    self.loop_depth = previous_loop_depth;
     result
   }
 
@@ -625,7 +620,9 @@ impl Checker {
       ASTKind::Bool(_) => Ok(Type::Bool),
       ASTKind::Variable(name) => self.resolve_bare(env, name),
       ASTKind::FunctionRef(module, name) => self.resolve_scheme(module, name),
-      ASTKind::Let(name, annotation, expression) | ASTKind::Shd(name, annotation, expression) => {
+      ASTKind::Let(name, annotation, expression)
+      | ASTKind::Shd(name, annotation, expression)
+      | ASTKind::Assign(name, annotation, expression) => {
         let inferred = self.infer(env, type_vars, expression)?;
         if let Some(annotation) = annotation {
           let expected = self.resolve_type(annotation, type_vars)?;
@@ -641,16 +638,18 @@ impl Checker {
         } else {
           Binding::Mono(inferred.clone())
         };
-        // `shd` can't change the type of a variable inside of a loop, both
-        // because it may run 0 or more times, and because the lines of code in
-        // the loop *before* the shd could see either of two types!
-        if self.loop_depth > 0 {
-          if let Some(existing) = env.get(&name.binding) {
-            if !bindings_compatible(&binding, existing) {
-              return Err(TypeError::new(
-                "`shd` inside a `for` loop may not change a binding's type",
-              ));
-            }
+        // `=` reuses an existing binding, so the new type must match the
+        // existing one. `let` and `shd` introduce fresh bindings (new binding
+        // ids that are never already in `env`), so this check only fires for
+        // assignments. This also covers the loop case: a `=` inside a `for`
+        // body sees the pre-loop type in `env` (the body env is cloned from
+        // it), so an incompatible reassignment is rejected regardless of loop
+        // depth.
+        if let Some(existing) = env.get(&name.binding) {
+          if !bindings_compatible(&binding, existing) {
+            return Err(TypeError::new(
+              "`=` cannot change the type of an existing binding; use `shd` to shadow with a new type",
+            ));
           }
         }
         env.insert(name.binding, binding);
@@ -723,11 +722,12 @@ impl Checker {
             result_type
           }
           None => {
-            // No `else` branch: the `if` produces no value, so the result is
-            // `Void`. The missing branch leaves the environment unchanged, so
-            // intersect the then-branch env with the original outer env: this
-            // drops branch-local `let` bindings while keeping `shd` reuses of
-            // outer bindings that remain type-compatible.
+            // No `else` branch: the `if` produces no value, so the result
+            // is `Void`. The missing branch leaves the environment
+            // unchanged, so intersect the then-branch env with the original
+            // outer env: this drops branch-local fresh bindings (`let` /
+            // `shd`) while keeping `=` assignments of outer bindings that
+            // remain type-compatible.
             *env = intersect_compatible_bindings(then_env, env);
             Type::Void
           }
@@ -766,15 +766,14 @@ impl Checker {
           .map_err(|error| error.at(iterable.span.clone()))?;
         let mut body_env = env.clone();
         body_env.insert(name.binding, Binding::Mono(item_type));
-        self.loop_depth += 1;
         let body_result = self.infer_sequence(&mut body_env, type_vars, body);
-        self.loop_depth -= 1;
         body_result?;
-        // A loop runs zero or more times, so a binding that is `shd`-reassigned
-        // inside the body must keep a type compatible with its pre-loop type to
-        // remain usable afterward; intersect the body env back into the outer
-        // env so the loop variable and branch-local lets are dropped after the
-        // loop while same-type `shd` bindings survive.
+        // A loop runs zero or more times, so a binding that is reassigned
+        // with `=` inside the body must keep a type compatible with its
+        // pre-loop type to remain usable afterward; intersect the body env
+        // back into the outer env so the loop variable and branch-local
+        // fresh bindings (`let`/`shd`) are dropped after the loop while
+        // same-type `=` assignments survive.
         let merged = intersect_compatible_bindings(body_env, env);
         *env = merged;
         Ok(Type::Void)

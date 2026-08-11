@@ -158,7 +158,7 @@ then branch for side effects only and produces `Void`:
 fn bump-if-zero (x: Int) -> Int
   let result x
   if (== x 0)
-    (shd result 1)
+    (= result 1)
   result
 ```
 
@@ -261,33 +261,6 @@ Tuples require at least two elements. They are first-class values: they can be
 returned from functions, stored in lists, and passed to or returned from host
 builtins.
 
-### Tuple Binding: `bind`
-
-`bind` destructures a tuple into positional bindings in one form. Each pattern
-is either `(let name)` (introduce a new binding) or `(shd name)` (reassign an
-existing binding). Patterns are matched against the tuple elements in order.
-
-```lisp
-fn main () -> Int
-  let list (std::list 1 2 3 4 5)
-  bind ((shd list) (let result)) (remove-idx list 5)
-  result
-```
-
-This desugars to a `block` that evaluates the expression once, binds each
-element positionally for its side effects, and then yields the whole tuple:
-
-```lisp
-block
-  let __tmp (remove-idx list 5)
-  shd list __tmp.0
-  let result __tmp.1
-  __tmp
-```
-
-A `bind` expression evaluates to the entire tuple value; in a `Void` function
-that value is discarded. The number of patterns must match the tuple's arity.
-
 ### Cells
 
 Variables and struct fields are immutable. In the default language and library,
@@ -322,22 +295,31 @@ fn main () -> Int
   (next) # returns 3
 ```
 
-### Variable Bindings: `let` and `shd`
+### Variable Bindings: `let`, `shd`, and `=`
 
-`let` introduces a new binding. Once a name is bound in the current function,
-`let` cannot bind it again — use `shd` to shadow an existing binding instead.
+SafeLisp has three binding forms:
+
+- `let` introduces a new binding. Once a name is bound in the current
+  function, `let` cannot bind it again.
+- `shd` shadows an existing binding by introducing a fresh one. It is
+  equivalent to `let`, but explicitly calls out that shadowing is happening and
+  does not error when the name is already in scope. It may change the binding's
+  type.
+- `=` assigns to an existing binding. The name must already be bound in the
+  current local scope, and the new value must have the same type as the
+  existing binding.
 
 ```lisp
 fn main () -> Int
   let x 1
-  shd x 2
+  = x 2
   x  # 2
 ```
 
-Don't mistake this for actual mutation. For example, if a closure captures a
-value and then the outer scope reassigns the name with `shd`, the closure still
-sees the original captured value. In other words, `shd` does not allow
-observable mutation through closures.
+Don't mistake `shd` or `=` for actual mutation. For example, if a closure
+captures a value and then the outer scope shadows the name with `shd`, the
+closure still sees the original captured value. In other words, neither `shd`
+nor `=` allows observable mutation through closures.
 
 ```lisp
 fn main () -> Int
@@ -352,7 +334,7 @@ This returns 1, but if you move the `shd a 2` to before the `fn inner`, it will
 instead return 2. See the section on `cell` to see how we allow explicit
 mutation.
 
-`shd` may also change a binding's type, to facilitate common patterns like:
+`shd` may change a binding's type, to facilitate common patterns like:
 
 ```lisp
 fn main () -> Creature
@@ -361,21 +343,55 @@ fn main () -> Creature
   creature
 ```
 
-`shd` can be used to reassign a variable even inside `for`, `if`, and `match`:
+`=` requires the same type; use `shd` when you need to change it.
+
+`=` can be used to reassign a variable even inside `for`, `if`, and `match`:
 
 ```lisp
 fn find-three () -> Bool
   let found false
   for x in (range 0 10)
     if (== x 3)
-      (shd found true)
+      (= found true)
   found
 ```
 
-Inside `if` and `match`, a `shd` can only change the type of a variable as long
-as every branch agrees on the resulting type; the binding then keeps that type
-after the conditional. Inside a `for` loop, `shd` cannot change types.
+`shd` inside `if`, `match`, or `for` introduces a binding that is local to that
+branch or loop body; the outer binding is unchanged afterward. `=` inside those
+forms reassigns the outer binding, and every branch (or loop iteration) must
+agree on the type.
 
+### Tuple Binding: `bind`
+
+`bind` destructures a tuple into positional bindings in one form. Each pattern
+is one of:
+
+- `(let name)` — introduce a new binding.
+- `(shd name)` — shadow an existing binding with a fresh one (may change type).
+- `(= name)` — reassign an existing binding (requires the same type).
+
+Patterns are matched against the tuple elements in order.
+
+```lisp
+fn main () -> Int
+  let list (std::list 1 2 3 4 5)
+  bind ((= list) (let result)) (remove-idx list 5)
+  result
+```
+
+This desugars to a `block` that evaluates the expression once, binds each
+element positionally for its side effects, and then yields the whole tuple:
+
+```lisp
+block
+  let __tmp (remove-idx list 5)
+  = list __tmp.0
+  let result __tmp.1
+  __tmp
+```
+
+A `bind` expression evaluates to the entire tuple value; in a `Void` function
+that value is discarded. The number of patterns must match the tuple's arity.
 
 ### Builtin Host Functions
 

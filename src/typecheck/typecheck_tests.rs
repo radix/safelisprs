@@ -436,23 +436,57 @@ fn match_pattern_names_must_be_variant_fields() {
 }
 
 #[test]
-fn shd_can_change_type_in_a_sequence() {
+fn shd_shadows_with_a_new_type_in_a_sequence() {
+  // `shd` introduces a fresh binding that may have a different type from the
+  // one it shadows; the new type is visible from that point onward.
   check("(fn main () ->Int (let x 1) (shd x true) (if x 1 0))").unwrap();
 }
 
 #[test]
-fn shd_in_if_both_branches_same_type_is_usable_after() {
+fn assign_requires_the_same_type() {
+  // `=` reuses the existing binding, so the new value must match the old type.
+  let error = check("(fn main () ->Int (let x 1) (= x true) x)").unwrap_err();
+  assert!(
+    error.message.contains("`=` cannot change the type"),
+    "{error}"
+  );
+}
+
+#[test]
+fn assign_same_type_succeeds() {
+  check("(fn main () ->Int (let x 1) (= x 2) x)").unwrap();
+}
+
+#[test]
+fn assign_in_if_both_branches_same_type_is_usable_after() {
+  // `=` in both branches reassigns the outer binding with the same type, so
+  // the variable remains usable after the conditional.
   check(
     "(fn main () ->Int
        (let x 1)
-       (if true (shd x true) (shd x false))
-       (if x 1 0))",
+       (if true (= x 5) (= x 6))
+       x)",
   )
   .unwrap();
 }
 
 #[test]
-fn shd_in_if_one_branch_same_type_is_usable_after() {
+fn shd_in_if_branches_is_branch_local() {
+  // `shd` introduces a fresh branch-local binding, so the outer `x` is
+  // unchanged after the conditional and keeps its original type.
+  check(
+    "(fn main () ->Int
+       (let x 1)
+       (if true (shd x true) (shd x false))
+       x)",
+  )
+  .unwrap();
+}
+
+#[test]
+fn shd_in_if_one_branch_keeps_outer_binding_usable() {
+  // `shd` in one branch is branch-local, so the outer `x` keeps its original
+  // type and remains usable after the conditional.
   check(
     "(fn main () ->Int
        (let x 1)
@@ -463,15 +497,20 @@ fn shd_in_if_one_branch_same_type_is_usable_after() {
 }
 
 #[test]
-fn shd_in_if_one_branch_type_change_drops_binding() {
+fn assign_in_if_one_branch_type_change_is_rejected() {
+  // `=` requires the same type, so reassigning with a different type in one
+  // branch is a type error.
   let error = check(
     "(fn main () ->Int
        (let x 1)
-       (if true (block (shd x true) 0) 0)
+       (if true (block (= x true) 0) 0)
        x)",
   )
   .unwrap_err();
-  assert!(error.message.contains("Unknown name"), "{error}");
+  assert!(
+    error.message.contains("`=` cannot change the type"),
+    "{error}"
+  );
 }
 
 #[test]
@@ -490,12 +529,12 @@ fn if_without_else_is_void() {
 
 #[test]
 fn if_without_else_keeps_outer_binding_compatible() {
-  // A `shd` in the then branch of a no-`else` `if` keeps a type compatible
+  // An `=` in the then branch of a no-`else` `if` keeps a type compatible
   // with the pre-`if` binding so the variable remains usable afterward.
   check(
     "(fn main () ->Int
        (let x 1)
-       (if true (shd x 5))
+       (if true (= x 5))
        x)",
   )
   .unwrap();
@@ -515,33 +554,51 @@ fn if_without_else_drops_branch_local_let() {
 }
 
 #[test]
-fn shd_in_for_same_type_is_usable_after() {
+fn assign_in_for_same_type_is_usable_after() {
+  // `=` inside a `for` body reassigns the outer binding with the same type,
+  // so the variable remains usable after the loop.
   check(
     "(fn main () ->Int
        (let x 0)
-       (for n in (std::list 1 2 3) (shd x n))
+       (for n in (std::list 1 2 3) (= x n))
        x)",
   )
   .unwrap();
 }
 
 #[test]
-fn shd_in_for_type_change_is_rejected() {
+fn assign_in_for_type_change_is_rejected() {
+  // `=` inside a `for` body requires the same type as the pre-loop binding.
   let error = check(
     "(fn main () ->Int
        (let x 1)
-       (for n in (std::list 1) (shd x true))
+       (for n in (std::list 1) (= x true))
        x)",
   )
   .unwrap_err();
   assert!(
-    error.message.contains("may not change a binding's type"),
+    error.message.contains("`=` cannot change the type"),
     "{error}"
   );
 }
 
 #[test]
-fn shd_in_match_all_arms_same_type_is_usable_after() {
+fn shd_in_for_introduces_loop_local_binding() {
+  // `shd` inside a `for` body introduces a fresh loop-local binding, so the
+  // outer `x` is unchanged after the loop and keeps its original type.
+  check(
+    "(fn main () ->Int
+       (let x 1)
+       (for n in (std::list 1) (shd x true))
+       x)",
+  )
+  .unwrap();
+}
+
+#[test]
+fn assign_in_match_all_arms_same_type_is_usable_after() {
+  // `=` in every arm reassigns the outer binding with the same type, so the
+  // variable remains usable after the match.
   check(
     "(enum E
        (A)
@@ -549,15 +606,17 @@ fn shd_in_match_all_arms_same_type_is_usable_after() {
      (fn main (e:E) ->Int
        (let x 1)
        (match e
-         (A) => (shd x 10)
-         (B) => (shd x 20))
+         (A) => (= x 10)
+         (B) => (= x 20))
        x)",
   )
   .unwrap();
 }
 
 #[test]
-fn shd_in_match_all_arms_type_change_is_usable_after() {
+fn shd_in_match_arms_is_arm_local() {
+  // `shd` introduces a fresh arm-local binding, so the outer `x` is unchanged
+  // after the match and keeps its original type.
   check(
     "(enum E
        (A)
@@ -567,15 +626,15 @@ fn shd_in_match_all_arms_type_change_is_usable_after() {
        (match e
          (A) => (shd x true)
          (B) => (shd x false))
-       (if x 1 0))",
+       x)",
   )
   .unwrap();
 }
 
 #[test]
-fn shd_in_match_with_default_arms_must_agree() {
-  // The default arm does not `shd` x, so x keeps its original type there while
-  // the variant arm changes it; the binding must therefore be dropped after.
+fn assign_in_match_with_default_arm_type_change_is_rejected() {
+  // `=` requires the same type; the variant arm attempts a type change, which
+  // is rejected even though the default arm does not touch `x`.
   let error = check(
     "(enum E
        (A)
@@ -583,12 +642,15 @@ fn shd_in_match_with_default_arms_must_agree() {
      (fn main (e:E) ->Int
        (let x 1)
        (match e
-         (A) => (block (shd x true) 0)
+         (A) => (block (= x true) 0)
          _ => 0)
        x)",
   )
   .unwrap_err();
-  assert!(error.message.contains("Unknown name"), "{error}");
+  assert!(
+    error.message.contains("`=` cannot change the type"),
+    "{error}"
+  );
 }
 
 #[test]

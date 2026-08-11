@@ -2465,16 +2465,39 @@ fn bind_rejects_wrong_arity() {
 }
 
 #[test]
-fn bind_rejects_shd_of_unbound_name() {
+fn bind_shd_accepts_an_unbound_name() {
+  // `shd` in a `bind` pattern introduces a fresh binding (like `let`), so it
+  // accepts a name that was not previously bound.
   let source = "
     (fn main () -> Int
-      (bind ((shd x)) (Tuple 1))
+      (bind ((shd x) (let _y)) (Tuple 1 2))
+      x)";
+  assert_eq!(eval_main(source), SLValue::Int(1));
+}
+
+#[test]
+fn bind_rejects_assign_of_unbound_name() {
+  let source = "
+    (fn main () -> Int
+      (bind ((= x)) (Tuple 1))
       x)";
   let err = compile_err(source);
   assert!(
-    err.contains("`shd` cannot reassign `x`"),
+    err.contains("`=` cannot assign to `x`"),
     "unexpected error: {err}"
   );
+}
+
+#[test]
+fn bind_assign_reassigns_existing_binding() {
+  // `(= name)` in a `bind` pattern reassigns an existing binding with the same
+  // type, so the new value is visible after the `bind`.
+  let source = "
+    (fn main () -> Int
+      (let a 1)
+      (bind ((= a) (let b)) (Tuple 10 20))
+      (std::+ a b))";
+  assert_eq!(eval_main(source), SLValue::Int(30));
 }
 
 #[test]
