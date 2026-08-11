@@ -148,8 +148,8 @@ pub(crate) enum ASTKind {
   Float(f64),
   String(String),
   Bool(bool),
-  NewStruct(String, Vec<(String, AST)>),
-  NewEnum(String, String, Vec<(String, AST)>),
+  NewStruct(TypeNameAst, Vec<(String, AST)>),
+  NewEnum(TypeNameAst, String, Vec<(String, AST)>),
   /// Construct an anonymous tuple from positional element expressions.
   NewTuple(Vec<AST>),
   FieldAccess(Box<AST>, String),
@@ -1527,12 +1527,7 @@ impl Parser {
   }
 
   fn parse_new(&mut self, start: usize, mode: FormMode) -> Result<AST, ParseError> {
-    let name = self.expect_symbol("`new` requires a struct name")?;
-    let variant = if self.check_token(TokenKind::DoubleColon).is_some() {
-      Some(self.expect_symbol("enum construction requires a variant name after `::`")?)
-    } else {
-      None
-    };
+    let (type_name, variant) = self.parse_new_head()?;
     let end = self.enter_form_body(mode, "new")?;
     let mut fields = Vec::new();
     self.skip_newlines();
@@ -1556,10 +1551,31 @@ impl Parser {
     let close = self.expect_form_end(end, "unterminated `new` form")?;
     let span = start..close.span.end;
     if let Some(variant) = variant {
-      Ok(AST::new(ASTKind::NewEnum(name, variant, fields), span))
+      Ok(AST::new(ASTKind::NewEnum(type_name, variant, fields), span))
     } else {
-      Ok(AST::new(ASTKind::NewStruct(name, fields), span))
+      Ok(AST::new(ASTKind::NewStruct(type_name, fields), span))
     }
+  }
+
+  /// Parse the type-name (and optional enum variant) following the `new`
+  /// keyword. The head has three shapes:
+  ///
+  ///   `new T`            -> bare struct `T` in the source module
+  ///   `new T::V`          -> source enum `T`, variant `V`
+  ///   `new M::T::V`       -> library enum `M::T`, variant `V`
+  fn parse_new_head(&mut self) -> Result<(TypeNameAst, Option<String>), ParseError> {
+    // `check_token` consumes the match, so it doubles as both the test and the
+    // advance past `::`.
+    let first = self.expect_symbol("`new` requires a struct or enum type name")?;
+    if self.check_token(TokenKind::DoubleColon).is_none() {
+      return Ok((TypeNameAst::bare(first), None));
+    }
+    let second = self.expect_symbol("enum construction requires a variant name after `::`")?;
+    if self.check_token(TokenKind::DoubleColon).is_none() {
+      return Ok((TypeNameAst::bare(first), Some(second)));
+    }
+    let third = self.expect_symbol("enum construction requires a variant name after `::`")?;
+    Ok((TypeNameAst::qualified(first, second), Some(third)))
   }
 
   fn parse_match(&mut self, start: usize, mode: FormMode) -> Result<AST, ParseError> {

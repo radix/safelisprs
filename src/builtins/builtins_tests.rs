@@ -141,6 +141,77 @@ fn host_defined_enums_can_be_constructed_by_builtins_and_matched() {
   assert_eq!(none.run_until_done().unwrap(), SLValue::Int(0));
 }
 
+/// Host-defined enums can be constructed directly from source with the
+/// `new module::Type::Variant` form, not only through builtin allocators.
+#[test]
+fn host_defined_enums_can_be_constructed_from_source() {
+  let library = maybe_int_library();
+  let package = compile_executable_from_source(
+    "(fn main (use_some:Bool) ->Int
+       (let maybe
+         (if use_some
+           (new host::MaybeInt::Some value:42)
+           (new host::MaybeInt::None)))
+       (match maybe
+         (Some value) => value
+         (None) => 0))",
+    ("main", "main"),
+    &library,
+  )
+  .unwrap_or_else(|e| panic!("compile failed: {e}"));
+  let mut some = Interpreter::with_library(package.clone(), library.clone())
+    .call_main_with(vec![SLValue::Bool(true)])
+    .unwrap_or_else(|e| panic!("call_main_with failed: {e}"));
+  let mut none = Interpreter::with_library(package, library)
+    .call_main_with(vec![SLValue::Bool(false)])
+    .unwrap_or_else(|e| panic!("call_main_with failed: {e}"));
+
+  assert_eq!(some.run_until_done().unwrap(), SLValue::Int(42));
+  assert_eq!(none.run_until_done().unwrap(), SLValue::Int(0));
+}
+
+/// A value built with `new module::Type::Variant` is indistinguishable from one
+/// built by a builtin allocator: the host can consume it with `enum_instance`.
+#[test]
+fn source_constructed_host_enums_can_be_consumed_by_builtins() {
+  let library = maybe_int_library();
+  let package = compile_executable_from_source(
+    "(fn main (use_some:Bool) ->Int
+       (host::get-or-zero
+         (if use_some
+           (new host::MaybeInt::Some value:42)
+           (new host::MaybeInt::None))))",
+    ("main", "main"),
+    &library,
+  )
+  .unwrap_or_else(|e| panic!("compile failed: {e}"));
+  let mut some = Interpreter::with_library(package.clone(), library.clone())
+    .call_main_with(vec![SLValue::Bool(true)])
+    .unwrap_or_else(|e| panic!("call_main_with failed: {e}"));
+  let mut none = Interpreter::with_library(package, library)
+    .call_main_with(vec![SLValue::Bool(false)])
+    .unwrap_or_else(|e| panic!("call_main_with failed: {e}"));
+
+  assert_eq!(some.run_until_done().unwrap(), SLValue::Int(42));
+  assert_eq!(none.run_until_done().unwrap(), SLValue::Int(0));
+}
+
+/// Constructing a host enum variant with the wrong field type is a
+/// compile-time type error.
+#[test]
+fn source_constructed_host_enum_rejects_wrong_field_type() {
+  let library = maybe_int_library();
+  let error = compile_executable_from_source(
+    "(fn main () ->host::MaybeInt
+       (new host::MaybeInt::Some value:\"nope\"))",
+    ("main", "main"),
+    &library,
+  )
+  .unwrap_err();
+  assert!(error.contains("expected `Int`"), "{error}");
+  assert!(error.contains("got `String`"), "{error}");
+}
+
 #[test]
 fn builtins_can_consume_host_defined_enums() {
   let library = maybe_int_library();

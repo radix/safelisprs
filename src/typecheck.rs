@@ -760,10 +760,10 @@ impl Checker {
     &mut self,
     env: &mut Env,
     type_vars: &TypeVars,
-    name: &str,
+    type_name: &TypeNameAst,
     fields: &[(String, AST)],
   ) -> Result<Type, TypeError> {
-    let type_name = QualifiedTypeName::source(name);
+    let type_name = construction_type_name(type_name);
     let struct_ = self.struct_def(&type_name)?;
     let mut provided = HashSet::new();
     for (field, expr) in fields {
@@ -776,19 +776,21 @@ impl Checker {
         .fields
         .iter()
         .find(|(expected, _)| expected == field)
-        .ok_or_else(|| TypeError::new(format!("unknown field `{field}` for struct `{name}`")))?;
+        .ok_or_else(|| {
+          TypeError::new(format!("unknown field `{field}` for struct `{type_name}`"))
+        })?;
       let actual = self.infer(env, type_vars, expr)?;
       let expected = self.resolve_type(&expected.1, type_vars)?;
       self.unify(actual, expected).map_err(|error| {
         error
           .at(expr.span.clone())
-          .context(format!("while checking field `{field}` of `{name}`"))
+          .context(format!("while checking field `{field}` of `{type_name}`"))
       })?;
     }
     for (field, _) in &struct_.fields {
       if !provided.contains(field.as_str()) {
         return Err(TypeError::new(format!(
-          "missing initializer for field `{field}` of `{name}`"
+          "missing initializer for field `{field}` of `{type_name}`"
         )));
       }
     }
@@ -799,17 +801,21 @@ impl Checker {
     &mut self,
     env: &mut Env,
     type_vars: &TypeVars,
-    name: &str,
+    type_name: &TypeNameAst,
     variant: &str,
     fields: &[(String, AST)],
   ) -> Result<Type, TypeError> {
-    let type_name = QualifiedTypeName::source(name);
+    let type_name = construction_type_name(type_name);
     let enum_ = self.enum_def(&type_name)?;
     let variant = enum_
       .variants
       .iter()
       .find(|candidate| candidate.name == variant)
-      .ok_or_else(|| TypeError::new(format!("unknown variant `{variant}` for enum `{name}`")))?;
+      .ok_or_else(|| {
+        TypeError::new(format!(
+          "unknown variant `{variant}` for enum `{type_name}`"
+        ))
+      })?;
     let mut provided = HashSet::new();
     for (field, expr) in fields {
       if !provided.insert(field.as_str()) {
@@ -823,7 +829,7 @@ impl Checker {
         .find(|(expected, _)| expected == field)
         .ok_or_else(|| {
           TypeError::new(format!(
-            "unknown field `{field}` for variant `{name}::{}`",
+            "unknown field `{field}` for variant `{type_name}::{}`",
             variant.name
           ))
         })?;
@@ -831,7 +837,7 @@ impl Checker {
       let expected = self.resolve_type(&expected.1, type_vars)?;
       self.unify(actual, expected).map_err(|error| {
         error.at(expr.span.clone()).context(format!(
-          "while checking field `{field}` of `{name}::{}`",
+          "while checking field `{field}` of `{type_name}::{}`",
           variant.name
         ))
       })?;
@@ -839,7 +845,7 @@ impl Checker {
     for (field, _) in &variant.fields {
       if !provided.contains(field.as_str()) {
         return Err(TypeError::new(format!(
-          "missing initializer for field `{field}` of `{name}::{}`",
+          "missing initializer for field `{field}` of `{type_name}::{}`",
           variant.name
         )));
       }
@@ -1789,6 +1795,16 @@ fn resolve_user_type<'a>(
         }
       }
     }
+  }
+}
+
+/// Resolve the type name in a `new` construction form to a qualified type
+/// name. Bare names refer to source-defined types (the `main` module);
+/// qualified names refer to library-defined types in their own module.
+fn construction_type_name(name: &TypeNameAst) -> QualifiedTypeName {
+  match name {
+    TypeNameAst::Bare(name) => QualifiedTypeName::source(name.clone()),
+    TypeNameAst::Qualified(type_name) => type_name.clone(),
   }
 }
 

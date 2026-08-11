@@ -2,7 +2,9 @@ use std::collections::HashMap;
 
 use crate::builtins::{CustomTypeKind, CustomTypeSpec, Library};
 use crate::closure::transform_closures_in_module;
-use crate::parser::{self, ASTKind, BindingId, Identifier, MatchPattern, ResolvedName, AST};
+use crate::parser::{
+  self, ASTKind, BindingId, Identifier, MatchPattern, ResolvedName, TypeNameAst, AST,
+};
 use crate::prelude::resolve_module_names;
 use crate::typecheck::{CheckedModule, MatchArmInfo, TypecheckInfo};
 
@@ -386,20 +388,29 @@ fn find_type(index: &ModuleIndex, module_name: &str, type_name: &str) -> Option<
 fn compile_resolved_module(
   module_name: &str,
   checked: &CheckedModule,
+  library: &Library,
 ) -> Result<CompiledModule, String> {
   let asts = transform_closures_in_module(module_name, checked.asts())?;
-  ModuleCompiler::new(module_name, &asts, checked.type_info()).compile(&asts)
+  ModuleCompiler::new(module_name, &asts, checked.type_info(), library).compile(&asts)
 }
 
 struct ModuleCompiler<'types> {
   module_name: String,
   type_indices: HashMap<String, usize>,
   type_defs: Vec<TypeDef>,
+  /// Library-defined types keyed by `(module, name)`, used to resolve
+  /// construction of host-defined types from source.
+  library_types: HashMap<(String, String), TypeDef>,
   type_info: &'types TypecheckInfo,
 }
 
 impl<'types> ModuleCompiler<'types> {
-  fn new(module_name: &str, asts: &[AST], type_info: &'types TypecheckInfo) -> Self {
+  fn new(
+    module_name: &str,
+    asts: &[AST],
+    type_info: &'types TypecheckInfo,
+    library: &Library,
+  ) -> Self {
     let mut type_indices = HashMap::new();
     let mut type_defs = vec![];
     for ast in asts {
@@ -441,10 +452,18 @@ impl<'types> ModuleCompiler<'types> {
         _ => {}
       }
     }
+    let mut library_types = HashMap::new();
+    for type_ in library.types() {
+      library_types.insert(
+        (type_.module.to_string(), type_.name.to_string()),
+        type_def_from_custom(type_),
+      );
+    }
     Self {
       module_name: module_name.to_string(),
       type_indices,
       type_defs,
+      library_types,
       type_info,
     }
   }
@@ -470,21 +489,39 @@ impl<'types> ModuleCompiler<'types> {
     FunctionCompiler::new(self, f).compile(f)
   }
 
-  fn struct_def(&self, name: &str) -> Result<&ConstructorDef, String> {
-    self
-      .type_indices
-      .get(name)
-      .and_then(|index| self.type_defs.get(*index))
-      .and_then(|type_| type_.constructors.first())
-      .ok_or_else(|| format!("unknown struct `{name}`"))
+  /// Resolve a `(module, name)` pair to its type definition, searching the
+  /// source module first and then library-defined types.
+  fn type_def(&self, module: &str, name: &str) -> Result<&TypeDef, String> {
+    if module == self.module_name {
+      self
+        .type_indices
+        .get(name)
+        .and_then(|index| self.type_defs.get(*index))
+        .ok_or_else(|| format!("unknown type `{module}::{name}`"))
+    } else {
+      self
+        .library_types
+        .get(&(module.to_string(), name.to_string()))
+        .ok_or_else(|| format!("unknown type `{module}::{name}`"))
+    }
   }
 
-  fn enum_variant(&self, name: &str, variant: &str) -> Result<(u16, &ConstructorDef), String> {
-    let enum_ = self
-      .type_indices
-      .get(name)
-      .and_then(|index| self.type_defs.get(*index))
-      .ok_or_else(|| format!("unknown enum `{name}`"))?;
+  fn struct_def(&self, module: &str, name: &str) -> Result<&ConstructorDef, String> {
+    self.type_def(module, name).and_then(|type_| {
+      type_
+        .constructors
+        .first()
+        .ok_or_else(|| format!("`{module}::{name}` is not a struct"))
+    })
+  }
+
+  fn enum_variant(
+    &self,
+    module: &str,
+    name: &str,
+    variant: &str,
+  ) -> Result<(u16, &ConstructorDef), String> {
+    let enum_ = self.type_def(module, name)?;
     enum_
       .constructors
       .iter()
@@ -493,10 +530,10 @@ impl<'types> ModuleCompiler<'types> {
       .map(|(index, variant)| {
         u16::try_from(index)
           .map(|index| (index, variant))
-          .map_err(|_| format!("enum `{name}` has too many variants"))
+          .map_err(|_| format!("enum `{module}::{name}` has too many variants"))
       })
       .transpose()?
-      .ok_or_else(|| format!("unknown variant `{variant}` for enum `{name}`"))
+      .ok_or_else(|| format!("unknown variant `{variant}` for enum `{module}::{name}`"))
   }
 }
 
@@ -697,8 +734,9 @@ impl<'module, 'types> FunctionCompiler<'module, 'types> {
         self.compile_expr(callable)?;
         self.emit(Instruction::PartialApply(args.len() as u16));
       }
-      ASTKind::NewStruct(name, fields) => {
-        let field_names = self.module.struct_def(name)?.fields.clone();
+      ASTKind::NewStruct(type_name, fields) => {
+        let (module, name) = construction_target(self.module, type_name);
+        let field_names = self.module.struct_def(&module, &name)?.fields.clone();
         for field_name in field_names {
           let expression = fields
             .iter()
@@ -707,13 +745,11 @@ impl<'module, 'types> FunctionCompiler<'module, 'types> {
             .ok_or_else(|| format!("missing initializer for field `{field_name}` of `{name}`"))?;
           self.compile_expr(expression)?;
         }
-        self.emit(Instruction::NewStruct((
-          self.module.module_name.clone(),
-          name.clone(),
-        )));
+        self.emit(Instruction::NewStruct((module, name)));
       }
-      ASTKind::NewEnum(name, variant, fields) => {
-        let (variant_index, variant_def) = self.module.enum_variant(name, variant)?;
+      ASTKind::NewEnum(type_name, variant, fields) => {
+        let (module, name) = construction_target(self.module, type_name);
+        let (variant_index, variant_def) = self.module.enum_variant(&module, &name, variant)?;
         let field_names = variant_def.fields.clone();
         for field_name in field_names {
           let expression = fields
@@ -721,14 +757,13 @@ impl<'module, 'types> FunctionCompiler<'module, 'types> {
             .find(|(field, _)| field == &field_name)
             .map(|(_, expression)| expression)
             .ok_or_else(|| {
-              format!("missing initializer for field `{field_name}` of `{name}::{variant}`")
+              format!(
+                "missing initializer for field `{field_name}` of `{module}::{name}::{variant}`"
+              )
             })?;
           self.compile_expr(expression)?;
         }
-        self.emit(Instruction::NewEnum(
-          (self.module.module_name.clone(), name.clone()),
-          variant_index,
-        ));
+        self.emit(Instruction::NewEnum((module, name), variant_index));
       }
       ASTKind::NewTuple(elements) => {
         for element in elements {
@@ -901,7 +936,19 @@ fn compile_modules_from_source(
   let asts = resolve_module_names("main", &asts, library.prelude(), &module_symbols)?;
   let checked =
     crate::typecheck::typecheck(asts, library).map_err(|error| error.render(module_source))?;
-  Ok(vec![compile_resolved_module("main", &checked)?])
+  Ok(vec![compile_resolved_module("main", &checked, library)?])
+}
+
+/// Resolve a `new` construction type name to the `(module, name)` pair the
+/// interpreter uses to locate the type definition. Bare names refer to the
+/// source module being compiled; qualified names carry their own module.
+fn construction_target(module: &ModuleCompiler, name: &TypeNameAst) -> (String, String) {
+  match name {
+    TypeNameAst::Bare(name) => (module.module_name.clone(), name.clone()),
+    TypeNameAst::Qualified(type_name) => {
+      (type_name.module().to_string(), type_name.name().to_string())
+    }
+  }
 }
 
 fn type_def_from_custom(type_: &CustomTypeSpec) -> TypeDef {

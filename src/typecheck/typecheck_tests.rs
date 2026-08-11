@@ -1,12 +1,27 @@
 use super::*;
-use crate::builtins::Library;
+use crate::builtins::{CustomTypeSpec, Library};
 use crate::parser::read_multiple;
 use crate::prelude::resolve_module_names;
+use crate::types::Signature;
 
 fn check(source: &str) -> Result<(), TypeError> {
   let asts = read_multiple(source).unwrap();
   let asts = resolve_module_names("main", &asts, &[], &[]).unwrap();
   typecheck(asts, &Library::default()).map(|_| ())
+}
+
+fn check_with(source: &str, library: &Library) -> Result<(), TypeError> {
+  let asts = read_multiple(source).unwrap();
+  let asts = resolve_module_names("main", &asts, &[], &[]).unwrap();
+  typecheck(asts, library).map(|_| ())
+}
+
+fn host_enum_library() -> Library {
+  Library::new().with_type(CustomTypeSpec::enum_(
+    "host",
+    "MaybeInt",
+    vec![("Some", vec![("value", Signature::Int)]), ("None", vec![])],
+  ))
 }
 
 #[test]
@@ -172,6 +187,67 @@ fn enums_typecheck_variant_construction() {
        (new Foo::Var3 y:\"hi\" z:(std::cell 2)))",
   )
   .unwrap();
+}
+
+#[test]
+fn host_defined_enum_can_be_constructed_from_source() {
+  let library = host_enum_library();
+  check_with(
+    "(fn main () ->host::MaybeInt
+       (new host::MaybeInt::Some value:42))",
+    &library,
+  )
+  .unwrap();
+}
+
+#[test]
+fn host_defined_enum_construction_can_match() {
+  let library = host_enum_library();
+  check_with(
+    "(fn main (m:host::MaybeInt) ->Int
+       (match m
+         (Some value) => value
+         (None) => 0))",
+    &library,
+  )
+  .unwrap();
+}
+
+#[test]
+fn host_defined_enum_construction_rejects_unknown_variant() {
+  let library = host_enum_library();
+  let error = check_with(
+    "(fn main () ->host::MaybeInt
+       (new host::MaybeInt::Nope value:1))",
+    &library,
+  )
+  .unwrap_err();
+  assert!(error.message.contains("unknown variant `Nope`"), "{error}");
+}
+
+#[test]
+fn host_defined_enum_construction_rejects_wrong_field_type() {
+  let library = host_enum_library();
+  let error = check_with(
+    "(fn main () ->host::MaybeInt
+       (new host::MaybeInt::Some value:\"nope\"))",
+    &library,
+  )
+  .unwrap_err();
+  assert!(error.message.contains("Int"), "{error}");
+  assert!(error.message.contains("String"), "{error}");
+}
+
+#[test]
+fn host_defined_enum_construction_rejects_unknown_type() {
+  let library = host_enum_library();
+  let error = check_with(
+    "(fn main () ->host::Nope
+       (new host::Nope::Variant value:1))",
+    &library,
+  )
+  .unwrap_err();
+  assert!(error.message.contains("unknown type"), "{error}");
 }
 
 #[test]

@@ -1,5 +1,5 @@
 use super::*;
-use crate::builtins::{sig, Builtin, Library};
+use crate::builtins::{sig, Builtin, CustomTypeSpec, Library};
 use crate::compiler::{self, *};
 use crate::types::Signature;
 use std::time::Duration;
@@ -228,6 +228,54 @@ fn constructs_enum_values_with_named_fields() {
       ],
     }
   );
+}
+
+#[test]
+fn constructs_host_defined_enum_values_from_source() {
+  let library = Library::new().with_type(CustomTypeSpec::enum_(
+    "host",
+    "MaybeInt",
+    vec![("Some", vec![("value", Signature::Int)]), ("None", vec![])],
+  ));
+  let source = "(fn main () ->Int
+    (let m (new host::MaybeInt::Some value:42))
+    (match m
+      (Some value) => value
+      (None) => 0))";
+  assert_eq!(eval_main_with(source, library), SLValue::Int(42));
+}
+
+#[test]
+fn constructs_host_defined_enum_unit_variant_from_source() {
+  let library = Library::new().with_type(CustomTypeSpec::enum_(
+    "host",
+    "MaybeInt",
+    vec![("Some", vec![("value", Signature::Int)]), ("None", vec![])],
+  ));
+  let source = "(fn main () ->Int
+    (let m (new host::MaybeInt::None))
+    (match m
+      (Some value) => value
+      (None) => 0))";
+  assert_eq!(eval_main_with(source, library), SLValue::Int(0));
+}
+
+#[test]
+fn constructs_host_defined_enum_using_layout_syntax() {
+  let library = Library::new().with_type(CustomTypeSpec::enum_(
+    "host",
+    "MaybeInt",
+    vec![("Some", vec![("value", Signature::Int)]), ("None", vec![])],
+  ));
+  let source = "fn make () -> host::MaybeInt
+  new host::MaybeInt::Some
+    value: 42
+fn main () -> Int
+  let m (make)
+  match m
+    (Some value) => value
+    (None) => 0";
+  assert_eq!(eval_main_with(source, library), SLValue::Int(42));
 }
 
 #[test]

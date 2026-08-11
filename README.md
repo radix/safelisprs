@@ -389,6 +389,30 @@ SafeLisp ships with a default host library containing these prelude functions:
 - higher-order helpers: `map`
 - deterministic random values: `rand::rng`, `rand::roll!`, `rand::choice!`
 
+### Host-Defined Types
+
+A `Library` may also declare custom types with `with_type`. Source code refers to
+them by their qualified `module::Type` name and constructs enum variants with the
+fully-qualified `new module::Type::Variant` form. The resulting values are
+indistinguishable from those produced by host builtin allocators, so builtins
+and `match` work across both.
+
+```rust
+let library = Library::new().with_type(CustomTypeSpec::enum_(
+  "host",
+  "MaybeInt",
+  vec![("Some", vec![("value", Signature::Int)]), ("None", vec![])],
+));
+```
+
+```lisp
+fn main () -> Int
+  let maybe (new host::MaybeInt::Some value: 42)
+  match maybe
+    (Some value) => value
+    (None) => 0
+```
+
 ## Features
 
 Security:

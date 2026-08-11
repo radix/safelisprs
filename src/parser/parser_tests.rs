@@ -509,7 +509,21 @@ fn parses_enum_definitions_and_construction() {
   assert!(matches!(
     main.code[0].kind,
     ASTKind::NewEnum(ref enum_name, ref variant, _)
-      if enum_name == "Foo" && variant == "Var2"
+      if *enum_name == TypeNameAst::bare("Foo") && variant == "Var2"
+  ));
+}
+
+#[test]
+fn parses_qualified_library_enum_construction() {
+  let asts =
+    read_multiple("(fn main () ->host::MaybeInt (new host::MaybeInt::Some value:3))").unwrap();
+  let ASTKind::DefineFn(main) = &asts[0].kind else {
+    panic!("expected function");
+  };
+  assert!(matches!(
+    main.code[0].kind,
+    ASTKind::NewEnum(ref type_name, ref variant, _)
+      if *type_name == TypeNameAst::qualified("host", "MaybeInt") && variant == "Some"
   ));
 }
 
