@@ -1,0 +1,15 @@
+[package]
+name = "safelisp-derive"
+version = "0.1.0"
+edition = "2021"
+authors = ["Christopher Armstrong <radix@twistedmatrix.com>"]
+description = "Derive macros for the safelisp crate."
+license = "Apache-2.0"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = {version = "2", features = ["full", "parsing", "extra-traits"]}
+quote = "1"
+proc-macro2 = "1"

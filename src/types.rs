@@ -1,5 +1,8 @@
 use std::fmt;
 
+use crate::builtins::CustomTypeSpec;
+use crate::interpreter::{HostCtx, SLVal, Value};
+
 pub(crate) const SOURCE_MODULE: &str = "main";
 
 /// A type name qualified by the module that declares it.
@@ -111,5 +114,178 @@ impl Signature {
   /// Construct a named type reference.
   pub fn named(module: impl Into<String>, name: impl Into<String>) -> Self {
     Self::Named(QualifiedTypeName::new(module, name))
+  }
+}
+
+/// A Rust type that can be converted to and from in-arena SafeLisp values.
+///
+/// Every field type of a `#[derive(SafelispValue)]` struct or enum must
+/// implement this trait. The crate provides impls for the integer and float
+/// primitives, `bool`, [`String`], `()`, [`Box<T>`], and [`Vec<T>`]; derive
+/// impls cover user-defined structs and enums.
+///
+/// Positional (tuple) fields have no Rust name, so the derive requires an
+/// explicit SafeLisp name via `#[safelisp(field = "name")]` on each one:
+///
+/// ```
+/// use safelisp::SafelispValue;
+///
+/// #[derive(SafelispValue)]
+/// #[safelisp(module = "arp")]
+/// enum Dice {
+///   Plus(
+///     #[safelisp(field = "left")] Box<Dice>,
+///     #[safelisp(field = "right")] Box<Dice>,
+///   ),
+/// }
+/// ```
+///
+/// Omitting the annotation on a positional field is a compile error:
+///
+/// ```compile_fail
+/// use safelisp::SafelispValue;
+///
+/// #[derive(SafelispValue)]
+/// #[safelisp(module = "arp")]
+/// enum Bad {
+///   V(u8),
+/// }
+/// ```
+pub trait SafelispValue: Sized {
+  /// The SafeLisp type expression describing this Rust type.
+  fn sl_signature() -> Signature;
+  /// Convert `self` into an in-arena SafeLisp value.
+  fn to_value<'gc>(&self, ctx: &mut HostCtx<'gc, '_>) -> Result<Value<'gc>, String>;
+  /// Convert an in-arena SafeLisp value back into this Rust type.
+  fn from_value<'gc>(ctx: &HostCtx<'gc, '_>, value: Value<'gc>) -> Result<Self, String>;
+}
+
+/// A named SafeLisp type that can describe itself to the compiler.
+///
+/// The `#[derive(SafelispValue)]` macro implements this alongside
+/// [`SafelispValue`] for structs and enums; pass [`SafelispType::type_spec`]
+/// to [`Library::with_type`](crate::builtins::Library::with_type) to register
+/// the type.
+pub trait SafelispType: SafelispValue {
+  /// The compile-time description of this type.
+  fn type_spec() -> CustomTypeSpec;
+}
+
+// ---------------------------------------------------------------------------
+// Primitive impls
+// ---------------------------------------------------------------------------
+
+macro_rules! impl_int {
+  ($($ty:ty),* $(,)?) => {
+    $(
+      impl SafelispValue for $ty {
+        fn sl_signature() -> Signature {
+          Signature::Int
+        }
+        fn to_value<'gc>(&self, _ctx: &mut HostCtx<'gc, '_>) -> Result<Value<'gc>, String> {
+          Ok(Value::Int(i64::from(*self)))
+        }
+        fn from_value<'gc>(
+          _ctx: &HostCtx<'gc, '_>,
+          value: Value<'gc>,
+        ) -> Result<Self, String> {
+          let n = value.as_int()?;
+          <$ty>::try_from(n).map_err(|_| {
+            format!("Int {n} does not fit in {}", stringify!($ty))
+          })
+        }
+      }
+    )*
+  };
+}
+
+impl_int!(i8, i16, i32, i64, u8, u16, u32);
+
+macro_rules! impl_float {
+  ($($ty:ty),* $(,)?) => {
+    $(
+      impl SafelispValue for $ty {
+        fn sl_signature() -> Signature {
+          Signature::Float
+        }
+        fn to_value<'gc>(&self, _ctx: &mut HostCtx<'gc, '_>) -> Result<Value<'gc>, String> {
+          Ok(Value::Float(f64::from(*self)))
+        }
+        fn from_value<'gc>(
+          _ctx: &HostCtx<'gc, '_>,
+          value: Value<'gc>,
+        ) -> Result<Self, String> {
+          Ok(value.as_float()? as $ty)
+        }
+      }
+    )*
+  };
+}
+
+impl_float!(f32, f64);
+
+impl SafelispValue for bool {
+  fn sl_signature() -> Signature {
+    Signature::Bool
+  }
+  fn to_value<'gc>(&self, _ctx: &mut HostCtx<'gc, '_>) -> Result<Value<'gc>, String> {
+    Ok(Value::Bool(*self))
+  }
+  fn from_value<'gc>(_ctx: &HostCtx<'gc, '_>, value: Value<'gc>) -> Result<Self, String> {
+    value.as_bool()
+  }
+}
+
+impl SafelispValue for () {
+  fn sl_signature() -> Signature {
+    Signature::Void
+  }
+  fn to_value<'gc>(&self, _ctx: &mut HostCtx<'gc, '_>) -> Result<Value<'gc>, String> {
+    Ok(Value::Void)
+  }
+  fn from_value<'gc>(_ctx: &HostCtx<'gc, '_>, value: Value<'gc>) -> Result<Self, String> {
+    value.as_void()
+  }
+}
+
+impl SafelispValue for String {
+  fn sl_signature() -> Signature {
+    Signature::String
+  }
+  fn to_value<'gc>(&self, ctx: &mut HostCtx<'gc, '_>) -> Result<Value<'gc>, String> {
+    Ok(ctx.alloc_heap(SLVal::String(self.clone())))
+  }
+  fn from_value<'gc>(_ctx: &HostCtx<'gc, '_>, value: Value<'gc>) -> Result<Self, String> {
+    Ok(value.as_string()?.to_string())
+  }
+}
+
+impl<T: SafelispValue> SafelispValue for Box<T> {
+  fn sl_signature() -> Signature {
+    T::sl_signature()
+  }
+  fn to_value<'gc>(&self, ctx: &mut HostCtx<'gc, '_>) -> Result<Value<'gc>, String> {
+    (**self).to_value(ctx)
+  }
+  fn from_value<'gc>(ctx: &HostCtx<'gc, '_>, value: Value<'gc>) -> Result<Self, String> {
+    Ok(Box::new(T::from_value(ctx, value)?))
+  }
+}
+
+impl<T: SafelispValue> SafelispValue for Vec<T> {
+  fn sl_signature() -> Signature {
+    Signature::list(T::sl_signature())
+  }
+  fn to_value<'gc>(&self, ctx: &mut HostCtx<'gc, '_>) -> Result<Value<'gc>, String> {
+    let items = self
+      .iter()
+      .map(|item| item.to_value(ctx))
+      .collect::<Result<Vec<_>, _>>()?;
+    let list = ctx.list_from_vec(items);
+    Ok(ctx.alloc_heap(SLVal::List(list)))
+  }
+  fn from_value<'gc>(ctx: &HostCtx<'gc, '_>, value: Value<'gc>) -> Result<Self, String> {
+    let list = value.as_list()?;
+    list.iter().map(|item| T::from_value(ctx, item)).collect()
   }
 }

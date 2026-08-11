@@ -520,9 +520,19 @@ dependencies = [
  "rand_chacha",
  "rand_core",
  "rstest",
+ "safelisp-derive",
  "serde",
  "serde_derive",
  "unescape",
+]
+
+[[package]]
+name = "safelisp-derive"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.118",
 ]
 
 [[package]]

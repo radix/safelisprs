@@ -35,4 +35,9 @@ pub use interpreter::{
   Accounted, Args, CellContents, EnumInstance, Execution, HostCtx, HostPoll, Interpreter,
   MemoryReservation, Partial, SLVal, SLValue, Status, StructInstance, Value,
 };
-pub use types::{QualifiedTypeName, Signature};
+pub use types::{QualifiedTypeName, SafelispType, SafelispValue, Signature};
+
+// Re-export the derive macro under the same name as the trait, so a single
+// `use safelisp::SafelispValue;` brings both into scope.
+#[cfg(feature = "derive")]
+pub use safelisp_derive::SafelispValue;

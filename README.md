@@ -435,6 +435,61 @@ fn main () -> Int
     (None) => 0
 ```
 
+### Deriving Conversions for Rust Types
+
+When a host type needs to round-trip through SafeLisp values, derive
+`SafelispValue` on a Rust struct or enum instead of hand-writing the
+`CustomTypeSpec` and conversion functions. The derive is available when the
+`derive` feature is enabled (it is on by default):
+
+```rust
+use safelisp::SafelispValue;
+
+#[derive(SafelispValue)]
+#[safelisp(module = "arp")]
+enum Dice {
+  Expr { num: u8, size: u8 },
+  Plus(
+    #[safelisp(field = "left")] Box<Dice>,
+    #[safelisp(field = "right")] Box<Dice>,
+  ),
+  Flat { value: i8 },
+  BestOf(
+    #[safelisp(field = "count")] u8,
+    #[safelisp(field = "dice")] Box<Dice>,
+  ),
+}
+```
+
+This implements the `SafelispValue` trait (`to_value` / `from_value` /
+`sl_signature`) and the `SafelispType` trait (`type_spec`). Register the type
+with the compiler and convert at the host boundary:
+
+```rust
+let library = Library::new().with_type(Dice::type_spec());
+
+// inside a builtin, where `ctx: &mut HostCtx`:
+let value: Value = dice.to_value(ctx)?;
+let back: Dice = Dice::from_value(ctx, value)?;
+```
+
+Every field type must itself implement `SafelispValue`; the crate provides impls
+for basic Rust types.
+
+Safelisp doesn't support positional fields in enum variants, so each one must be
+given an explicit SafeLisp name with `#[safelisp(field = "name")]`. This lets
+source code construct and match the variant by those names:
+
+```lisp
+fn main () -> Int
+  let flat (new arp::Dice::Flat value:3)
+  match (new arp::Dice::BestOf count:2 dice:flat)
+    (BestOf count dice) => count
+    _ => 0
+```
+
+Omitting the annotation on a positional field is a compile error.
+
 ## Features
 
 Security:

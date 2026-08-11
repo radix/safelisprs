@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/sli", "crates/slc"]
+members = [".", "crates/sli", "crates/slc", "crates/safelisp-derive"]
 default-members = [".", "crates/sli", "crates/slc"]
 resolver = "2"
 
@@ -10,7 +10,9 @@ edition = "2021"
 authors = ["Christopher Armstrong <radix@twistedmatrix.com>"]
 
 [features]
-default = []
+default = ["derive"]
+# Derive macros for converting Rust structs/enums to and from SafeLisp values.
+derive = ["dep:safelisp-derive"]
 
 [dependencies]
 serde = "1.0"
@@ -20,6 +22,7 @@ gc-arena = "0.6"
 blake3 = {version = "1", default-features = false}
 rand_chacha = {version = "0.9", default-features = false}
 rand_core = {version = "0.9", default-features = false}
+safelisp-derive = {path = "crates/safelisp-derive", optional = true}
 
 [dev-dependencies]
 pretty_assertions = "1.2.1"
