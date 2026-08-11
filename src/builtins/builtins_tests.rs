@@ -236,9 +236,11 @@ fn custom_interpreter_builtins_are_public_api() {
     "main",
     "add2",
     sig(&[], vec![Signature::Int], None, Signature::Int),
-    |value| match value {
-      Value::Int(n) => Ok(Value::Int(n + 2)),
-      other => Err(format!("expected Int, got {}", other.type_name())),
+    |value| {
+      let n = value
+        .as_int()
+        .map_err(|_| format!("expected Int, got {}", value.type_name()))?;
+      Ok(Value::Int(n + 2))
     },
   ));
   let package =
@@ -271,21 +273,22 @@ fn libraries_can_be_composed_with_custom_types() {
       ),
       |ctx, args| ctx.alloc_struct("box", "Box", vec![args[0]]),
     ))
-    .with_builtin(Builtin::unary(
+    .with_builtin(Builtin::contextual_value(
       "box",
       "unbox",
+      Some(1),
       sig(
         &[],
         vec![Signature::named("box", "Box")],
         None,
         Signature::Int,
       ),
-      |value| match value {
-        Value::Heap(heap) => match &heap.value {
-          SLVal::Struct(instance) => Ok(instance.fields[0]),
-          other => Err(format!("expected Box, got {}", other.type_name())),
-        },
-        other => Err(format!("expected Box, got {}", other.type_name())),
+      |ctx, args| {
+        let struct_ = ctx.struct_type("box", "Box")?;
+        let instance = args[0]
+          .as_struct_instance(struct_)
+          .map_err(|_| format!("expected Box, got {}", args[0].type_name()))?;
+        Ok(instance.fields[0])
       },
     ))
     .with_prelude("box", "box")
@@ -329,21 +332,22 @@ fn custom_types_are_distinct_across_modules() {
       ),
       |ctx, args| ctx.alloc_struct("right", "Box", vec![args[0]]),
     ))
-    .with_builtin(Builtin::unary(
+    .with_builtin(Builtin::contextual_value(
       "left",
       "unbox",
+      Some(1),
       sig(
         &[],
         vec![Signature::named("left", "Box")],
         None,
         Signature::Int,
       ),
-      |value| match value {
-        Value::Heap(heap) => match &heap.value {
-          SLVal::Struct(instance) => Ok(instance.fields[0]),
-          other => Err(format!("expected Box, got {}", other.type_name())),
-        },
-        other => Err(format!("expected Box, got {}", other.type_name())),
+      |ctx, args| {
+        let struct_ = ctx.struct_type("left", "Box")?;
+        let instance = args[0]
+          .as_struct_instance(struct_)
+          .map_err(|_| format!("expected Box, got {}", args[0].type_name()))?;
+        Ok(instance.fields[0])
       },
     ));
 
@@ -660,9 +664,11 @@ fn host_builtins_can_construct_rng_values() {
       None,
       Signature::named("rand", "Rng"),
     ),
-    |ctx, args| match args[0] {
-      Value::Int(seed) => super::rand::alloc_rng(ctx, seed),
-      other => Err(format!("expected Int, got {}", other.type_name())),
+    |ctx, args| {
+      let seed = args[0]
+        .as_int()
+        .map_err(|_| format!("expected Int, got {}", args[0].type_name()))?;
+      super::rand::alloc_rng(ctx, seed)
     },
   ));
   let package = compile_executable_from_source(
@@ -922,10 +928,10 @@ fn host_builtins_can_receive_and_return_tuples() {
         Signature::tuple(vec![Signature::String, Signature::Int]),
       ),
       |ctx, args| {
-        let elements = ctx.tuple_instance(&args[0])?;
-        let Value::Int(n) = elements[0] else {
-          return Err("expected Int as first tuple element".to_string());
-        };
+        let elements = args[0].as_tuple()?;
+        let n = elements[0]
+          .as_int()
+          .map_err(|_| "expected Int as first tuple element".to_string())?;
         // Reorder the elements: String first, Int second.
         ctx.alloc_tuple(vec![elements[1], Value::Int(n)])
       },
@@ -940,12 +946,11 @@ fn host_builtins_can_receive_and_return_tuples() {
         None,
         Signature::Int,
       ),
-      |ctx, args| {
-        let elements = ctx.tuple_instance(&args[0])?;
-        match elements[0] {
-          Value::Int(n) => Ok(Value::Int(n)),
-          _ => Err("expected Int as first tuple element".to_string()),
-        }
+      |_ctx, args| {
+        let elements = args[0].as_tuple()?;
+        Ok(Value::Int(elements[0].as_int().map_err(|_| {
+          "expected Int as first tuple element".to_string()
+        })?))
       },
     ));
 

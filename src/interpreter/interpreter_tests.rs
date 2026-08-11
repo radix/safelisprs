@@ -2143,13 +2143,10 @@ fn resumable_host_call_with_value_returning_callback() {
     },
     |ctx, pending_result| {
       if let Some(result) = pending_result {
-        return match result {
-          Value::Int(n) => Ok(HostPoll::Ready(Value::Int(n * 2))),
-          other => Err(format!(
-            "expected Int from callback, got {}",
-            other.type_name()
-          )),
-        };
+        let n = result
+          .as_int()
+          .map_err(|_| format!("expected Int from callback, got {}", result.type_name()))?;
+        return Ok(HostPoll::Ready(Value::Int(n * 2)));
       }
       let f = ctx.pop()?;
       ctx.call(f, &[Value::Int(7)])?;
@@ -2186,13 +2183,10 @@ fn resumable_host_call_with_void_returning_callback() {
     },
     |ctx, pending_result| {
       if let Some(result) = pending_result {
-        return match result {
-          Value::Void => Ok(HostPoll::Ready(Value::Bool(true))),
-          other => Err(format!(
-            "expected Void from callback, got {}",
-            other.type_name()
-          )),
-        };
+        result
+          .as_void()
+          .map_err(|_| format!("expected Void from callback, got {}", result.type_name()))?;
+        return Ok(HostPoll::Ready(Value::Bool(true)));
       }
       let f = ctx.pop()?;
       ctx.call(f, &[Value::Int(7)])?;

@@ -5,7 +5,7 @@ use gc_arena::{Gc, RefLock};
 use rand_chacha::ChaCha8Rng;
 use rand_core::{RngCore, SeedableRng};
 
-use crate::interpreter::{CellContents, HostCtx, SLVal, Value};
+use crate::interpreter::{CellContents, HostCtx, Value};
 use crate::types::Signature;
 
 use super::{sig, Builtin, CustomTypeSpec, Library};
@@ -79,23 +79,7 @@ fn choice<'gc, 'call>(
 ) -> Result<Value<'gc>, String> {
   let (rng, list) = (args[0], args[1]);
   let cell = rng_state_cell(ctx, rng, "rand::choice!")?;
-  let items = match &list {
-    Value::Heap(heap) => match &heap.value {
-      SLVal::List(items) => items,
-      _ => {
-        return Err(format!(
-          "rand::choice!: expected a List, got {}",
-          list.type_name()
-        ))
-      }
-    },
-    _ => {
-      return Err(format!(
-        "rand::choice!: expected a List, got {}",
-        list.type_name()
-      ))
-    }
-  };
+  let items = list.as_list().map_err(|e| format!("rand::choice!: {e}"))?;
   if items.is_empty() {
     return Err("rand::choice!: cannot choose from an empty list".to_string());
   }
@@ -144,32 +128,12 @@ fn rng<'gc, 'call>(
   args: &[Value<'gc>],
 ) -> Result<Value<'gc>, String> {
   let (seed, name) = (args[0], args[1]);
-  let parent = match seed {
-    Value::Int(seed) => seed,
-    other => {
-      return Err(format!(
-        "rand::rng: expected Int seed, got {}",
-        other.type_name()
-      ))
-    }
-  };
-  let namespace = match &name {
-    Value::Heap(heap) => match &heap.value {
-      SLVal::String(name) => name.as_str(),
-      _ => {
-        return Err(format!(
-          "rand::rng: expected String name, got {}",
-          name.type_name()
-        ))
-      }
-    },
-    other => {
-      return Err(format!(
-        "rand::rng: expected String name, got {}",
-        other.type_name()
-      ))
-    }
-  };
+  let parent = seed
+    .as_int()
+    .map_err(|_| format!("rand::rng: expected Int seed, got {}", seed.type_name()))?;
+  let namespace = name
+    .as_string()
+    .map_err(|_| format!("rand::rng: expected String name, got {}", name.type_name()))?;
   alloc_rng(ctx, rand_rng(parent, namespace))
 }
 
@@ -179,15 +143,9 @@ fn roll<'gc, 'call>(
 ) -> Result<Value<'gc>, String> {
   let (rng, sides) = (args[0], args[1]);
   let cell = rng_state_cell(ctx, rng, "rand::roll!")?;
-  let sides = match sides {
-    Value::Int(sides) => sides,
-    other => {
-      return Err(format!(
-        "rand::roll!: expected Int sides, got {}",
-        other.type_name()
-      ))
-    }
-  };
+  let sides = sides
+    .as_int()
+    .map_err(|_| format!("rand::roll!: expected Int sides, got {}", sides.type_name()))?;
   if sides <= 0 {
     return Err(format!(
       "rand::roll!: sides must be positive, got {}",
@@ -212,11 +170,12 @@ fn rng_state_cell<'gc, 'call>(
     .struct_instance(&rng, "rand", "Rng")
     .map_err(|error| format!("{operation}: {error}"))?;
   match instance.fields.as_slice() {
-    [Value::Cell(cell)] => Ok(*cell),
-    [other] => Err(format!(
-      "{operation}: expected Rng state to be a Cell, got {}",
-      other.type_name()
-    )),
+    [state] => state.as_cell().map_err(|_| {
+      format!(
+        "{operation}: expected Rng state to be a Cell, got {}",
+        state.type_name()
+      )
+    }),
     _ => Err(format!(
       "{operation}: expected Rng to have 1 field, got {}",
       instance.fields.len()
@@ -228,13 +187,13 @@ fn rng_seed<'gc>(
   cell: Gc<'gc, RefLock<CellContents<'gc>>>,
   operation: &str,
 ) -> Result<i64, String> {
-  match cell.borrow().value {
-    Value::Int(seed) => Ok(seed),
-    other => Err(format!(
+  let value = cell.borrow().value;
+  value.as_int().map_err(|_| {
+    format!(
       "{operation}: expected Cell to hold an Int, got {}",
-      other.type_name()
-    )),
-  }
+      value.type_name()
+    )
+  })
 }
 
 /// Derive a deterministic 64-bit seed from a parent seed and a name, using

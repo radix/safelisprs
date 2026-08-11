@@ -775,6 +775,175 @@ impl<'gc> Value<'gc> {
       Value::Cell(r) => SLValue::Cell(Box::new(r.borrow().value.to_value())),
     }
   }
+
+  /// Borrow this value as an integer.
+  pub fn as_int(&self) -> Result<i64, String> {
+    match self {
+      Value::Int(value) => Ok(*value),
+      other => Err(format!("expected Int, got {}", other.type_name())),
+    }
+  }
+
+  /// Borrow this value as a float.
+  pub fn as_float(&self) -> Result<f64, String> {
+    match self {
+      Value::Float(value) => Ok(*value),
+      other => Err(format!("expected Float, got {}", other.type_name())),
+    }
+  }
+
+  /// Borrow this value as the unit (`void`) value.
+  pub fn as_void(&self) -> Result<(), String> {
+    match self {
+      Value::Void => Ok(()),
+      other => Err(format!("expected Void, got {}", other.type_name())),
+    }
+  }
+
+  /// Borrow this value as a boolean.
+  pub fn as_bool(&self) -> Result<bool, String> {
+    match self {
+      Value::Bool(value) => Ok(*value),
+      other => Err(format!("expected Bool, got {}", other.type_name())),
+    }
+  }
+
+  /// Borrow this value as a function reference `(module, function)`.
+  pub fn as_function_ref(&self) -> Result<(u32, u32), String> {
+    match self {
+      Value::FunctionRef(module, function) => Ok((*module, *function)),
+      other => Err(format!("expected FunctionRef, got {}", other.type_name())),
+    }
+  }
+
+  /// Borrow this value as a mutable cell handle.
+  pub fn as_cell(&self) -> Result<Gc<'gc, RefLock<CellContents<'gc>>>, String> {
+    match self {
+      Value::Cell(cell) => Ok(*cell),
+      other => Err(format!("expected Cell, got {}", other.type_name())),
+    }
+  }
+
+  /// Borrow this value as a heap-backed string slice.
+  pub fn as_string<'value>(&'value self) -> Result<&'value str, String> {
+    match self {
+      Value::Heap(heap) => match &heap.value {
+        SLVal::String(string) => Ok(string.as_str()),
+        _ => Err(format!("expected a String, got {}", self.type_name())),
+      },
+      other => Err(format!("expected a String, got {}", other.type_name())),
+    }
+  }
+
+  /// Borrow this value as a partially applied function.
+  pub fn as_partial<'value>(&'value self) -> Result<&'value Partial<'gc>, String> {
+    match self {
+      Value::Heap(heap) => match &heap.value {
+        SLVal::Partial(partial) => Ok(partial),
+        _ => Err(format!("expected a Partial, got {}", self.type_name())),
+      },
+      other => Err(format!("expected a Partial, got {}", other.type_name())),
+    }
+  }
+
+  /// Borrow this value as a heap-backed persistent list.
+  pub fn as_list<'value>(&'value self) -> Result<&'value PersistentList<'gc, Value<'gc>>, String> {
+    match self {
+      Value::Heap(heap) => match &heap.value {
+        SLVal::List(items) => Ok(items),
+        _ => Err(format!("expected a List, got {}", self.type_name())),
+      },
+      other => Err(format!("expected a List, got {}", other.type_name())),
+    }
+  }
+
+  /// Borrow this value as a user-defined struct instance, without checking
+  /// the specific struct type. Returns an error if the value is not a struct.
+  pub fn as_struct<'value>(&'value self) -> Result<&'value StructInstance<'gc>, String> {
+    match self {
+      Value::Heap(heap) => match &heap.value {
+        SLVal::Struct(instance) => Ok(instance),
+        _ => Err(format!("expected a Struct, got {}", self.type_name())),
+      },
+      other => Err(format!("expected a Struct, got {}", other.type_name())),
+    }
+  }
+
+  /// Borrow this value as an instance of the struct type identified by
+  /// `(module, type)`. Returns an error if the value is not a struct or is a
+  /// struct of a different type.
+  pub fn as_struct_instance<'value>(
+    &'value self,
+    struct_: (u32, u32),
+  ) -> Result<&'value StructInstance<'gc>, String> {
+    match self {
+      Value::Heap(heap) => match &heap.value {
+        SLVal::Struct(instance) if instance.struct_ == struct_ => Ok(instance),
+        _ => Err(format!(
+          "expected struct {}/{}, got {}",
+          struct_.0,
+          struct_.1,
+          self.type_name()
+        )),
+      },
+      other => Err(format!(
+        "expected struct {}/{}, got {}",
+        struct_.0,
+        struct_.1,
+        other.type_name()
+      )),
+    }
+  }
+
+  /// Borrow this value as a user-defined enum instance, without checking the
+  /// specific enum type. Returns an error if the value is not an enum.
+  pub fn as_enum<'value>(&'value self) -> Result<&'value EnumInstance<'gc>, String> {
+    match self {
+      Value::Heap(heap) => match &heap.value {
+        SLVal::Enum(instance) => Ok(instance),
+        _ => Err(format!("expected an Enum, got {}", self.type_name())),
+      },
+      other => Err(format!("expected an Enum, got {}", other.type_name())),
+    }
+  }
+
+  /// Borrow this value as an instance of the enum type identified by
+  /// `(module, type)`. Returns an error if the value is not an enum or is an
+  /// enum of a different type.
+  pub fn as_enum_instance<'value>(
+    &'value self,
+    enum_: (u32, u32),
+  ) -> Result<&'value EnumInstance<'gc>, String> {
+    match self {
+      Value::Heap(heap) => match &heap.value {
+        SLVal::Enum(instance) if instance.enum_ == enum_ => Ok(instance),
+        _ => Err(format!(
+          "expected enum {}/{}, got {}",
+          enum_.0,
+          enum_.1,
+          self.type_name()
+        )),
+      },
+      other => Err(format!(
+        "expected enum {}/{}, got {}",
+        enum_.0,
+        enum_.1,
+        other.type_name()
+      )),
+    }
+  }
+
+  /// Borrow this value as an anonymous tuple, returning its elements in
+  /// positional order.
+  pub fn as_tuple<'value>(&'value self) -> Result<&'value [Value<'gc>], String> {
+    match self {
+      Value::Heap(heap) => match &heap.value {
+        SLVal::Tuple(elements) => Ok(elements),
+        _ => Err(format!("expected a Tuple, got {}", self.type_name())),
+      },
+      other => Err(format!("expected a Tuple, got {}", other.type_name())),
+    }
+  }
 }
 
 impl<'gc> SLVal<'gc> {
@@ -1541,81 +1710,49 @@ impl<'gc> ExecRoot<'gc> {
       }
       Instruction::GetField(field) => {
         let receiver = self.pop()?;
-        let value = match receiver {
-          Value::Heap(heap) => match &heap.value {
-            SLVal::Struct(instance) => *instance.fields.get(field as usize).ok_or_else(|| {
-              format!(
-                "struct field index {} out of range for struct {}/{}",
-                field, instance.struct_.0, instance.struct_.1
-              )
-            })?,
-            SLVal::Tuple(elements) => *elements.get(field as usize).ok_or_else(|| {
-              format!(
-                "tuple index {field} out of range (tuple has {} elements)",
-                elements.len()
-              )
-            })?,
-            _ => {
-              return Err(format!(
-                "field access expected a struct or tuple, got {}",
-                receiver.type_name()
-              ))
-            }
-          },
-          _ => {
-            return Err(format!(
-              "field access expected a struct or tuple, got {}",
-              receiver.type_name()
-            ))
-          }
+        let value = if let Ok(instance) = receiver.as_struct() {
+          *instance.fields.get(field as usize).ok_or_else(|| {
+            format!(
+              "struct field index {} out of range for struct {}/{}",
+              field, instance.struct_.0, instance.struct_.1
+            )
+          })?
+        } else if let Ok(elements) = receiver.as_tuple() {
+          *elements.get(field as usize).ok_or_else(|| {
+            format!(
+              "tuple index {field} out of range (tuple has {} elements)",
+              elements.len()
+            )
+          })?
+        } else {
+          return Err(format!(
+            "field access expected a struct or tuple, got {}",
+            receiver.type_name()
+          ));
         };
         self.stack.push(value);
       }
       Instruction::IsEnumVariant(variant) => {
         let receiver = self.pop()?;
-        let matches = match receiver {
-          Value::Heap(heap) => match &heap.value {
-            SLVal::Enum(instance) => instance.variant == variant,
-            _ => {
-              return Err(format!(
-                "match expected an enum, got {}",
-                receiver.type_name()
-              ))
-            }
-          },
-          _ => {
-            return Err(format!(
-              "match expected an enum, got {}",
-              receiver.type_name()
-            ))
-          }
-        };
-        self.stack.push(Value::Bool(matches));
+        let instance = receiver
+          .as_enum()
+          .map_err(|_| format!("match expected an enum, got {}", receiver.type_name()))?;
+        self.stack.push(Value::Bool(instance.variant == variant));
       }
       Instruction::GetEnumField(field) => {
         let receiver = self.pop()?;
-        let value = match receiver {
-          Value::Heap(heap) => match &heap.value {
-            SLVal::Enum(instance) => *instance.fields.get(field as usize).ok_or_else(|| {
-              format!(
-                "enum field index {} out of range for enum {}/{} variant {}",
-                field, instance.enum_.0, instance.enum_.1, instance.variant
-              )
-            })?,
-            _ => {
-              return Err(format!(
-                "enum field access expected an enum, got {}",
-                receiver.type_name()
-              ))
-            }
-          },
-          _ => {
-            return Err(format!(
-              "enum field access expected an enum, got {}",
-              receiver.type_name()
-            ))
-          }
-        };
+        let instance = receiver.as_enum().map_err(|_| {
+          format!(
+            "enum field access expected an enum, got {}",
+            receiver.type_name()
+          )
+        })?;
+        let value = *instance.fields.get(field as usize).ok_or_else(|| {
+          format!(
+            "enum field index {} out of range for enum {}/{} variant {}",
+            field, instance.enum_.0, instance.enum_.1, instance.variant
+          )
+        })?;
         self.stack.push(value);
       }
       Instruction::Pop => {
@@ -1702,8 +1839,8 @@ impl<'gc> ExecRoot<'gc> {
       }
       Instruction::JumpIfFalse(offset) => {
         let val = self.pop()?;
-        match val {
-          Value::Bool(false) => {
+        match val.as_bool() {
+          Ok(false) => {
             let frame = self
               .frames
               .last_mut()
@@ -1714,11 +1851,11 @@ impl<'gc> ExecRoot<'gc> {
             };
             function_frame.ip = function_frame.ip.wrapping_add(offset as usize);
           }
-          Value::Bool(true) => {}
-          ref other => {
+          Ok(true) => {}
+          Err(_) => {
             return Err(format!(
               "`if` condition must be a bool, got {}",
-              other.error_description()
+              val.error_description()
             ))
           }
         }
@@ -1757,34 +1894,23 @@ impl<'gc> ExecRoot<'gc> {
             function_frame.locals[usize::from(index_local)],
           )
         };
-        let index = match index {
-          Value::Int(index) if index >= 0 => {
+        let index = match index.as_int() {
+          Ok(index) if index >= 0 => {
             usize::try_from(index).map_err(|_| "for-loop index does not fit usize".to_string())?
           }
-          other => {
-            return Err(format!(
-              "for-loop index must be a non-negative Int, got {}",
-              other.error_description()
-            ))
-          }
-        };
-        let items = match &list {
-          Value::Heap(heap) => match &heap.value {
-            SLVal::List(items) => items,
-            _ => {
-              return Err(format!(
-                "for-loop iterable must be a list, got {}",
-                list.error_description()
-              ))
-            }
-          },
           _ => {
             return Err(format!(
-              "for-loop iterable must be a list, got {}",
-              list.error_description()
+              "for-loop index must be a non-negative Int, got {}",
+              index.error_description()
             ))
           }
         };
+        let items = list.as_list().map_err(|_| {
+          format!(
+            "for-loop iterable must be a list, got {}",
+            list.error_description()
+          )
+        })?;
         if let Some(item) = items.get(index) {
           let next_index =
             i64::try_from(index + 1).map_err(|_| "for-loop index overflow".to_string())?;
@@ -1846,16 +1972,16 @@ impl<'gc> ExecRoot<'gc> {
     // No guest code or limit check can run between releasing the temporary
     // reservation and `Accounted::new` adopting the Vec's actual capacity.
     drop(args_reservation);
-    let closure = match func {
-      Value::FunctionRef(mod_index, func_index) => self.alloc_heap(
-        mc,
-        SLVal::Partial(Partial {
-          function: (mod_index, func_index),
-          args,
-        }),
-      ),
-      _ => return Err("make_closure needs a function at TOS".to_string()),
-    };
+    let (mod_index, func_index) = func
+      .as_function_ref()
+      .map_err(|_| "make_closure needs a function at TOS".to_string())?;
+    let closure = self.alloc_heap(
+      mc,
+      SLVal::Partial(Partial {
+        function: (mod_index, func_index),
+        args,
+      }),
+    );
     self.stack.push(closure);
     Ok(())
   }
@@ -1954,47 +2080,41 @@ impl<'gc> ExecRoot<'gc> {
     arity: u16,
   ) -> Result<(), String> {
     let callable = self.pop()?;
-    match callable {
-      Value::FunctionRef(mod_index, func_index) => {
-        self.call_fixed(mc, package, library, mod_index, func_index, arity)
-      }
-      Value::Heap(heap) => match &heap.value {
-        SLVal::Partial(Partial {
-          function: (mod_index, func_index),
-          args,
-        }) => {
-          let module = package
-            .get_module(*mod_index)
-            .ok_or_else(|| format!("Module not found: {}", mod_index))?;
-          let (func_name, callable) = module
-            .functions
-            .get(*func_index as usize)
-            .ok_or_else(|| format!("Function not found: {}/{}", mod_index, func_index))?;
-          match callable {
-            Callable::Function(func) => {
-              // The remaining params (after the pre-bound ones) must be supplied
-              // by the call site; arity-check that they line up.
-              let expected = func.num_params.saturating_sub(args.len() as u16);
-              if arity != expected {
-                return Err(format!(
-                  "{}.{} expects {} more arg(s) but was called with {}",
-                  mod_index, func_name, expected, arity
-                ));
-              }
-              self.enter_function(mc, *mod_index, *func_index, func, args.clone())
-            }
-            Callable::Builtin => Err("Can't invoke a builtin as a closure".to_string()),
-          }
-        }
-        _ => Err(format!(
+    if let Ok((mod_index, func_index)) = callable.as_function_ref() {
+      return self.call_fixed(mc, package, library, mod_index, func_index, arity);
+    }
+    let partial = match callable.as_partial() {
+      Ok(partial) => partial,
+      Err(_) => {
+        return Err(format!(
           "Can't call a non-callable! {}",
-          Value::Heap(heap).error_description()
-        )),
-      },
-      x => Err(format!(
-        "Can't call a non-callable! {}",
-        x.error_description()
-      )),
+          callable.error_description()
+        ))
+      }
+    };
+    let (mod_index, func_index) = partial.function;
+    let args = &partial.args;
+    let module = package
+      .get_module(mod_index)
+      .ok_or_else(|| format!("Module not found: {}", mod_index))?;
+    let (func_name, callable) = module
+      .functions
+      .get(func_index as usize)
+      .ok_or_else(|| format!("Function not found: {}/{}", mod_index, func_index))?;
+    match callable {
+      Callable::Function(func) => {
+        // The remaining params (after the pre-bound ones) must be supplied
+        // by the call site; arity-check that they line up.
+        let expected = func.num_params.saturating_sub(args.len() as u16);
+        if arity != expected {
+          return Err(format!(
+            "{}.{} expects {} more arg(s) but was called with {}",
+            mod_index, func_name, expected, arity
+          ));
+        }
+        self.enter_function(mc, mod_index, func_index, func, args.clone())
+      }
+      Callable::Builtin => Err("Can't invoke a builtin as a closure".to_string()),
     }
   }
 
@@ -2120,19 +2240,9 @@ impl<'gc, 'call> HostCtx<'gc, 'call> {
     name: &str,
   ) -> Result<&'value StructInstance<'gc>, String> {
     let struct_ = self.struct_type(module, name)?;
-    match value {
-      Value::Heap(value) => match &value.value {
-        SLVal::Struct(instance) if instance.struct_ == struct_ => Ok(instance),
-        _ => Err(format!(
-          "expected {module}::{name}, got {}",
-          value.value.type_name()
-        )),
-      },
-      other => Err(format!(
-        "expected {module}::{name}, got {}",
-        other.type_name()
-      )),
-    }
+    value
+      .as_struct_instance(struct_)
+      .map_err(|_| format!("expected {module}::{name}, got {}", value.type_name()))
   }
 
   /// Allocate a struct instance for a type declared in the current package.
@@ -2180,19 +2290,9 @@ impl<'gc, 'call> HostCtx<'gc, 'call> {
     name: &str,
   ) -> Result<&'value EnumInstance<'gc>, String> {
     let enum_ = self.enum_type(module, name)?;
-    match value {
-      Value::Heap(value) => match &value.value {
-        SLVal::Enum(instance) if instance.enum_ == enum_ => Ok(instance),
-        _ => Err(format!(
-          "expected {module}::{name}, got {}",
-          value.value.type_name()
-        )),
-      },
-      other => Err(format!(
-        "expected {module}::{name}, got {}",
-        other.type_name()
-      )),
-    }
+    value
+      .as_enum_instance(enum_)
+      .map_err(|_| format!("expected {module}::{name}, got {}", value.type_name()))
   }
 
   /// Allocate an enum instance for a type declared in the current package.
@@ -2231,21 +2331,6 @@ impl<'gc, 'call> HostCtx<'gc, 'call> {
       variant,
       fields,
     })))
-  }
-
-  /// Borrow `value` as an anonymous tuple, returning its elements in
-  /// positional order. Returns an error if `value` is not a tuple.
-  pub fn tuple_instance<'value>(
-    &self,
-    value: &'value Value<'gc>,
-  ) -> Result<&'value [Value<'gc>], String> {
-    match value {
-      Value::Heap(value) => match &value.value {
-        SLVal::Tuple(elements) => Ok(elements),
-        _ => Err(format!("expected a tuple, got {}", value.value.type_name())),
-      },
-      other => Err(format!("expected a tuple, got {}", other.type_name())),
-    }
   }
 
   /// Allocate an anonymous tuple from its element values, in positional order.

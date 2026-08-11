@@ -190,15 +190,7 @@ pub fn library() -> Library {
 
 fn map_start<'gc, 'call>(ctx: &mut HostCtx<'gc, 'call>, args: &[Value<'gc>]) -> Result<(), String> {
   let (list, func) = (args[0], args[1]);
-  match &list {
-    Value::Heap(heap) if matches!(&heap.value, SLVal::List(_)) => {}
-    _ => {
-      return Err(format!(
-        "std::map: expected a List, got {}",
-        list.type_name()
-      ))
-    }
-  }
+  list.as_list().map_err(|e| format!("std::map: {e}"))?;
   let results = ctx.empty_list();
   let results = ctx.alloc_heap(SLVal::List(results));
   ctx.push(list);
@@ -212,12 +204,12 @@ fn pop_map_state<'gc, 'call>(
   ctx: &mut HostCtx<'gc, 'call>,
 ) -> Result<(Value<'gc>, Value<'gc>, usize, Value<'gc>), String> {
   let results = ctx.pop()?;
-  if !matches!(results, Value::Heap(heap) if matches!(&heap.value, SLVal::List(_))) {
-    return Err(format!(
+  results.as_list().map_err(|_| {
+    format!(
       "std::map: expected result List, got {}",
       results.type_name()
-    ));
-  }
+    )
+  })?;
   let index = match ctx.pop()? {
     Value::Int(value) if value >= 0 => {
       usize::try_from(value).map_err(|_| "std::map: index does not fit usize".to_string())?
@@ -254,23 +246,13 @@ fn append_map_result<'gc, 'call>(
   results: Value<'gc>,
   value: Value<'gc>,
 ) -> Result<Value<'gc>, String> {
-  let appended = match results {
-    Value::Heap(heap) => match &heap.value {
-      SLVal::List(items) => items.append(ctx.mc(), value),
-      _ => {
-        return Err(format!(
-          "std::map: expected result List, got {}",
-          results.type_name()
-        ))
-      }
-    },
-    _ => {
-      return Err(format!(
-        "std::map: expected result List, got {}",
-        results.type_name()
-      ))
-    }
-  };
+  let items = results.as_list().map_err(|_| {
+    format!(
+      "std::map: expected result List, got {}",
+      results.type_name()
+    )
+  })?;
+  let appended = items.append(ctx.mc(), value);
   Ok(ctx.alloc_heap(SLVal::List(appended)))
 }
 
@@ -289,26 +271,11 @@ fn map_resume<'gc, 'call>(
   }
 
   let (source_list, func, index, results) = pop_map_state(ctx)?;
-  let (len, item) = match &source_list {
-    Value::Heap(heap) => match &heap.value {
-      SLVal::List(items) => {
-        let item = items.get(index);
-        (items.len(), item)
-      }
-      _ => {
-        return Err(format!(
-          "std::map: expected a List, got {}",
-          source_list.type_name()
-        ))
-      }
-    },
-    _ => {
-      return Err(format!(
-        "std::map: expected a List, got {}",
-        source_list.type_name()
-      ))
-    }
-  };
+  let items = source_list
+    .as_list()
+    .map_err(|e| format!("std::map: {e}"))?;
+  let item = items.get(index);
+  let len = items.len();
 
   if index == len {
     Ok(HostPoll::Ready(results))
@@ -322,27 +289,31 @@ fn map_resume<'gc, 'call>(
 }
 
 fn add<'gc>(a: Value<'gc>, b: Value<'gc>) -> Result<Value<'gc>, String> {
-  match (a, b) {
-    (Value::Int(x), Value::Int(y)) => Ok(Value::Int(x + y)),
-    (Value::Float(x), Value::Float(y)) => Ok(Value::Float(x + y)),
-    _ => Err(format!(
+  if let (Ok(x), Ok(y)) = (a.as_int(), b.as_int()) {
+    Ok(Value::Int(x + y))
+  } else if let (Ok(x), Ok(y)) = (a.as_float(), b.as_float()) {
+    Ok(Value::Float(x + y))
+  } else {
+    Err(format!(
       "Couldn't add {} and {}",
       a.type_name(),
       b.type_name()
-    )),
+    ))
   }
 }
 
 fn subtract<'gc>(a: Value<'gc>, b: Value<'gc>) -> Result<Value<'gc>, String> {
-  match (a, b) {
+  if let (Ok(x), Ok(y)) = (a.as_int(), b.as_int()) {
     // `a` is the left operand, `b` is the right operand: left - right.
-    (Value::Int(x), Value::Int(y)) => Ok(Value::Int(x - y)),
-    (Value::Float(x), Value::Float(y)) => Ok(Value::Float(x - y)),
-    _ => Err(format!(
+    Ok(Value::Int(x - y))
+  } else if let (Ok(x), Ok(y)) = (a.as_float(), b.as_float()) {
+    Ok(Value::Float(x - y))
+  } else {
+    Err(format!(
       "Couldn't sub {} and {}",
       a.type_name(),
       b.type_name()
-    )),
+    ))
   }
 }
 
@@ -355,19 +326,19 @@ fn concat<'gc, 'call>(
   args: &[Value<'gc>],
 ) -> Result<SLVal<'gc>, String> {
   let (a, b) = (args[0], args[1]);
-  match (&a, &b) {
-    (Value::Heap(a), Value::Heap(b)) => match (&a.value, &b.value) {
-      (SLVal::String(x), SLVal::String(y)) => {
-        let len = x
-          .len()
-          .checked_add(y.len())
-          .ok_or_else(|| "concat: string length overflow".to_string())?;
-        let (mut combined, _reservation) = reserved_string(ctx, len, "concat")?;
-        combined.push_str(x);
-        combined.push_str(y);
-        Ok(SLVal::String(combined))
-      }
-      (SLVal::List(x), SLVal::List(y)) => {
+  match (a.as_string(), b.as_string()) {
+    (Ok(x), Ok(y)) => {
+      let len = x
+        .len()
+        .checked_add(y.len())
+        .ok_or_else(|| "concat: string length overflow".to_string())?;
+      let (mut combined, _reservation) = reserved_string(ctx, len, "concat")?;
+      combined.push_str(x);
+      combined.push_str(y);
+      Ok(SLVal::String(combined))
+    }
+    _ => match (a.as_list(), b.as_list()) {
+      (Ok(x), Ok(y)) => {
         let len = x
           .len()
           .checked_add(y.len())
@@ -377,15 +348,10 @@ fn concat<'gc, 'call>(
       }
       _ => Err(format!(
         "Couldn't concat {} and {}",
-        a.value.type_name(),
-        b.value.type_name()
+        a.type_name(),
+        b.type_name()
       )),
     },
-    _ => Err(format!(
-      "Couldn't concat {} and {}",
-      a.type_name(),
-      b.type_name()
-    )),
   }
 }
 
@@ -408,39 +374,22 @@ fn get<'gc, 'call>(
   _ctx: &mut HostCtx<'gc, 'call>,
   args: &[Value<'gc>],
 ) -> Result<Value<'gc>, String> {
-  match args[0] {
-    Value::Cell(cell) => Ok(cell.borrow().value),
-    other => Err(format!(
-      "std::get: expected a Cell, got {}",
-      other.type_name()
-    )),
-  }
+  let cell = args[0].as_cell().map_err(|e| format!("std::get: {e}"))?;
+  Ok(cell.borrow().value)
 }
 
 fn set<'gc, 'call>(
   ctx: &mut HostCtx<'gc, 'call>,
   args: &[Value<'gc>],
 ) -> Result<Value<'gc>, String> {
-  match args[0] {
-    Value::Cell(cell) => {
-      Gc::write(ctx.mc(), cell).unlock().borrow_mut().set(args[1]);
-      Ok(Value::Void)
-    }
-    other => Err(format!(
-      "std::set!: expected a Cell, got {}",
-      other.type_name()
-    )),
-  }
+  let cell = args[0].as_cell().map_err(|e| format!("std::set!: {e}"))?;
+  Gc::write(ctx.mc(), cell).unlock().borrow_mut().set(args[1]);
+  Ok(Value::Void)
 }
 
 fn len<'gc>(value: Value<'gc>) -> Result<Value<'gc>, String> {
-  match value {
-    Value::Heap(heap) => match &heap.value {
-      SLVal::List(items) => Ok(Value::Int(items.len() as i64)),
-      _ => Err(format!("len: expected a List, got {}", value.type_name())),
-    },
-    _ => Err(format!("len: expected a List, got {}", value.type_name())),
-  }
+  let items = value.as_list().map_err(|e| format!("len: {e}"))?;
+  Ok(Value::Int(items.len() as i64))
 }
 
 fn idx<'gc, 'call>(
@@ -448,33 +397,31 @@ fn idx<'gc, 'call>(
   args: &[Value<'gc>],
 ) -> Result<Value<'gc>, String> {
   let (list, index_value) = (args[0], args[1]);
-  match (&list, &index_value) {
-    (Value::Heap(list), Value::Int(index)) => match &list.value {
-      SLVal::List(items) => {
-        let len = items.len() as i64;
-        let normalized = if *index < 0 { *index + len } else { *index };
-        if normalized < 0 || normalized >= len {
-          Err(format!(
-            "idx: index {} out of range for list of length {}",
-            index, len
-          ))
-        } else {
-          items
-            .get(normalized as usize)
-            .ok_or_else(|| "idx: normalized index is out of range".to_string())
-        }
-      }
-      _ => Err(format!(
-        "idx: expected (List, Int), got ({}, {})",
-        list.value.type_name(),
-        index_value.type_name()
-      )),
-    },
-    _ => Err(format!(
+  let items = list.as_list().map_err(|_| {
+    format!(
       "idx: expected (List, Int), got ({}, {})",
       list.type_name(),
       index_value.type_name()
-    )),
+    )
+  })?;
+  let index = index_value.as_int().map_err(|_| {
+    format!(
+      "idx: expected (List, Int), got ({}, {})",
+      list.type_name(),
+      index_value.type_name()
+    )
+  })?;
+  let len = items.len() as i64;
+  let normalized = if index < 0 { index + len } else { index };
+  if normalized < 0 || normalized >= len {
+    Err(format!(
+      "idx: index {} out of range for list of length {}",
+      index, len
+    ))
+  } else {
+    items
+      .get(normalized as usize)
+      .ok_or_else(|| "idx: normalized index is out of range".to_string())
   }
 }
 
@@ -483,20 +430,13 @@ fn push<'gc, 'call>(
   args: &[Value<'gc>],
 ) -> Result<SLVal<'gc>, String> {
   let (list, value) = (args[0], args[1]);
-  match &list {
-    Value::Heap(heap) => match &heap.value {
-      SLVal::List(items) => {
-        let len = items
-          .len()
-          .checked_add(1)
-          .ok_or_else(|| "push: list length overflow".to_string())?;
-        let _reservation = reserve_value_slots(ctx, len, "push")?;
-        Ok(SLVal::List(items.append(ctx.mc(), value)))
-      }
-      _ => Err(format!("push: expected a List, got {}", list.type_name())),
-    },
-    _ => Err(format!("push: expected a List, got {}", list.type_name())),
-  }
+  let items = list.as_list().map_err(|e| format!("push: {e}"))?;
+  let len = items
+    .len()
+    .checked_add(1)
+    .ok_or_else(|| "push: list length overflow".to_string())?;
+  let _reservation = reserve_value_slots(ctx, len, "push")?;
+  Ok(SLVal::List(items.append(ctx.mc(), value)))
 }
 
 fn range<'gc, 'call>(
@@ -504,8 +444,8 @@ fn range<'gc, 'call>(
   args: &[Value<'gc>],
 ) -> Result<SLVal<'gc>, String> {
   let (start, stop) = (args[0], args[1]);
-  match (start, stop) {
-    (Value::Int(start), Value::Int(stop)) => {
+  match (start.as_int(), stop.as_int()) {
+    (Ok(start), Ok(stop)) => {
       if stop <= start {
         Ok(SLVal::List(ctx.empty_list()))
       } else {
@@ -526,49 +466,48 @@ fn slice<'gc, 'call>(
   args: &[Value<'gc>],
 ) -> Result<SLVal<'gc>, String> {
   let (value, start_value, stop_value) = (args[0], args[1], args[2]);
-  match (&value, &start_value, &stop_value) {
-    (Value::Heap(heap), Value::Int(start), Value::Int(stop)) => match &heap.value {
-      SLVal::List(items) => {
-        let len = items.len() as i64;
-        let start = norm_index(*start, len).clamp(0, len);
-        let stop = norm_index(*stop, len).clamp(0, len);
-        if start >= stop {
-          Ok(SLVal::List(ctx.empty_list()))
-        } else {
-          let result_len = (stop - start) as usize;
-          let values = items.iter().skip(start as usize).take(result_len);
-          Ok(SLVal::List(ctx.list_from_iter(values)?))
-        }
-      }
-      SLVal::String(string) => {
-        let len = string.chars().count() as i64;
-        let start = norm_index(*start, len).clamp(0, len) as usize;
-        let stop = norm_index(*stop, len).clamp(0, len) as usize;
-        if start >= stop {
-          Ok(SLVal::String(String::new()))
-        } else {
-          let start_byte = char_boundary(string, start);
-          let end_byte = char_boundary(string, stop);
-          let source = &string[start_byte..end_byte];
-          let (mut result, _reservation) = reserved_string(ctx, source.len(), "slice")?;
-          result.push_str(source);
-          Ok(SLVal::String(result))
-        }
-      }
-      _ => Err(format!(
-        "slice: expected (List, Int, Int) or (String, Int, Int), got ({}, {}, {})",
-        value.type_name(),
-        start_value.type_name(),
-        stop_value.type_name()
-      )),
-    },
-    _ => Err(format!(
-      "slice: expected (List, Int, Int) or (String, Int, Int), got ({}, {}, {})",
-      value.type_name(),
-      start_value.type_name(),
-      stop_value.type_name()
-    )),
+  let start = start_value
+    .as_int()
+    .map_err(|_| slice_type_error(&value, &start_value, &stop_value))?;
+  let stop = stop_value
+    .as_int()
+    .map_err(|_| slice_type_error(&value, &start_value, &stop_value))?;
+  if let Ok(items) = value.as_list() {
+    let len = items.len() as i64;
+    let start = norm_index(start, len).clamp(0, len);
+    let stop = norm_index(stop, len).clamp(0, len);
+    if start >= stop {
+      return Ok(SLVal::List(ctx.empty_list()));
+    }
+    let result_len = (stop - start) as usize;
+    let values = items.iter().skip(start as usize).take(result_len);
+    return Ok(SLVal::List(ctx.list_from_iter(values)?));
   }
+  if let Ok(string) = value.as_string() {
+    let len = string.chars().count() as i64;
+    let start = norm_index(start, len).clamp(0, len) as usize;
+    let stop = norm_index(stop, len).clamp(0, len) as usize;
+    if start >= stop {
+      return Ok(SLVal::String(String::new()));
+    }
+    let start_byte = char_boundary(string, start);
+    let end_byte = char_boundary(string, stop);
+    let source = &string[start_byte..end_byte];
+    let (mut result, _reservation) = reserved_string(ctx, source.len(), "slice")?;
+    result.push_str(source);
+    return Ok(SLVal::String(result));
+  }
+  Err(slice_type_error(&value, &start_value, &stop_value))
+}
+
+/// Build the type-mismatch error for `std::slice`.
+fn slice_type_error(value: &Value<'_>, start: &Value<'_>, stop: &Value<'_>) -> String {
+  format!(
+    "slice: expected (List, Int, Int) or (String, Int, Int), got ({}, {}, {})",
+    value.type_name(),
+    start.type_name(),
+    stop.type_name()
+  )
 }
 
 /// Return the UTF-8 byte offset for a character boundary. `char_index` may

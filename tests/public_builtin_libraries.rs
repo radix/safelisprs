@@ -7,10 +7,10 @@ fn seeded_rng<'gc, 'call>(
   ctx: &mut HostCtx<'gc, 'call>,
   args: &[Value<'gc>],
 ) -> Result<Value<'gc>, String> {
-  match args[0] {
-    Value::Int(seed) => rand::alloc_rng(ctx, seed),
-    other => Err(format!("expected Int, got {}", other.type_name())),
-  }
+  let seed = args[0]
+    .as_int()
+    .map_err(|_| format!("expected Int, got {}", args[0].type_name()))?;
+  rand::alloc_rng(ctx, seed)
 }
 
 #[test]
