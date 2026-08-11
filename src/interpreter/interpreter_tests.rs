@@ -279,6 +279,19 @@ fn main () -> Int
 }
 
 #[test]
+fn constructs_host_defined_struct_from_source() {
+  let library = Library::new().with_type(CustomTypeSpec::struct_(
+    "host",
+    "Box",
+    vec![("value", Signature::Int)],
+  ));
+  let source = "(fn main () ->Int
+    (let b (new host::Box value: 42))
+    b.value)";
+  assert_eq!(eval_main_with(source, library), SLValue::Int(42));
+}
+
+#[test]
 fn matches_enum_variants_and_binds_fields() {
   let source = "
       (enum Foo

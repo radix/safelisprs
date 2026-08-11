@@ -148,8 +148,13 @@ pub(crate) enum ASTKind {
   Float(f64),
   String(String),
   Bool(bool),
-  NewStruct(TypeNameAst, Vec<(String, AST)>),
-  NewEnum(TypeNameAst, String, Vec<(String, AST)>),
+  /// Construct a struct or enum value. `path` is the `::`-separated type path
+  /// (1 to 3 segments). Whether `path` names a struct or an enum variant is
+  /// resolved by the typechecker and recorded in [`TypecheckInfo`].
+  New {
+    path: Vec<String>,
+    fields: Vec<(String, AST)>,
+  },
   /// Construct an anonymous tuple from positional element expressions.
   NewTuple(Vec<AST>),
   FieldAccess(Box<AST>, String),
@@ -238,21 +243,13 @@ pub(crate) fn try_map_ast_children<E>(
       identifier.clone(),
       args.iter().map(&mut map).collect::<Result<_, _>>()?,
     ),
-    ASTKind::NewStruct(name, fields) => ASTKind::NewStruct(
-      name.clone(),
-      fields
+    ASTKind::New { path, fields } => ASTKind::New {
+      path: path.clone(),
+      fields: fields
         .iter()
         .map(|(field, expression)| Ok((field.clone(), map(expression)?)))
         .collect::<Result<_, _>>()?,
-    ),
-    ASTKind::NewEnum(name, variant, fields) => ASTKind::NewEnum(
-      name.clone(),
-      variant.clone(),
-      fields
-        .iter()
-        .map(|(field, expression)| Ok((field.clone(), map(expression)?)))
-        .collect::<Result<_, _>>()?,
-    ),
+    },
     ASTKind::NewTuple(elements) => {
       ASTKind::NewTuple(elements.iter().map(&mut map).collect::<Result<_, _>>()?)
     }
@@ -394,12 +391,7 @@ pub(crate) fn erase_bindings(asts: &[AST]) -> Vec<AST> {
         }
       }
       ASTKind::Variable(name) => erase_name(name),
-      ASTKind::NewStruct(_, fields) => {
-        for (_, expression) in fields {
-          erase_ast(expression);
-        }
-      }
-      ASTKind::NewEnum(_, _, fields) => {
+      ASTKind::New { fields, .. } => {
         for (_, expression) in fields {
           erase_ast(expression);
         }
@@ -1527,7 +1519,7 @@ impl Parser {
   }
 
   fn parse_new(&mut self, start: usize, mode: FormMode) -> Result<AST, ParseError> {
-    let (type_name, variant) = self.parse_new_head()?;
+    let path = self.parse_new_head()?;
     let end = self.enter_form_body(mode, "new")?;
     let mut fields = Vec::new();
     self.skip_newlines();
@@ -1550,32 +1542,26 @@ impl Parser {
     }
     let close = self.expect_form_end(end, "unterminated `new` form")?;
     let span = start..close.span.end;
-    if let Some(variant) = variant {
-      Ok(AST::new(ASTKind::NewEnum(type_name, variant, fields), span))
-    } else {
-      Ok(AST::new(ASTKind::NewStruct(type_name, fields), span))
-    }
+    Ok(AST::new(ASTKind::New { path, fields }, span))
   }
 
-  /// Parse the type-name (and optional enum variant) following the `new`
-  /// keyword. The head has three shapes:
+  /// Parse the `::`-separated type path following the `new` keyword. The
+  /// typechecker resolves paths of one to three segments:
   ///
-  ///   `new T`            -> bare struct `T` in the source module
-  ///   `new T::V`          -> source enum `T`, variant `V`
-  ///   `new M::T::V`       -> library enum `M::T`, variant `V`
-  fn parse_new_head(&mut self) -> Result<(TypeNameAst, Option<String>), ParseError> {
+  ///   `new T`         -> `[T]`           (source struct)
+  ///   `new T::V`       -> `[T, V]`        (source enum variant, or host struct)
+  ///   `new M::T::V`    -> `[M, T, V]`     (library enum variant)
+  ///
+  /// Whether a 2-segment path names a source enum variant or a host struct is
+  /// resolved later by the typechecker; longer paths are rejected then.
+  fn parse_new_head(&mut self) -> Result<Vec<String>, ParseError> {
     // `check_token` consumes the match, so it doubles as both the test and the
     // advance past `::`.
-    let first = self.expect_symbol("`new` requires a struct or enum type name")?;
-    if self.check_token(TokenKind::DoubleColon).is_none() {
-      return Ok((TypeNameAst::bare(first), None));
+    let mut path = vec![self.expect_symbol("`new` requires a struct or enum type name")?];
+    while self.check_token(TokenKind::DoubleColon).is_some() {
+      path.push(self.expect_symbol("type path requires a name after `::`")?);
     }
-    let second = self.expect_symbol("enum construction requires a variant name after `::`")?;
-    if self.check_token(TokenKind::DoubleColon).is_none() {
-      return Ok((TypeNameAst::bare(first), Some(second)));
-    }
-    let third = self.expect_symbol("enum construction requires a variant name after `::`")?;
-    Ok((TypeNameAst::qualified(first, second), Some(third)))
+    Ok(path)
   }
 
   fn parse_match(&mut self, start: usize, mode: FormMode) -> Result<AST, ParseError> {

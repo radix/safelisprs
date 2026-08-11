@@ -160,10 +160,39 @@ pub struct CheckedModule {
   type_info: TypecheckInfo,
 }
 
+/// The typechecker's resolution of a `new` construction form: which type (and,
+/// for enums, which variant) the `::`-separated path names. The compiler uses
+/// this to emit `NewStruct`/`NewEnum` for the right type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConstructionInfo {
+  /// A struct construction, identified by its qualified type name.
+  Struct(QualifiedTypeName),
+  /// An enum variant construction.
+  Enum {
+    /// The enum's qualified type name.
+    type_name: QualifiedTypeName,
+    /// The variant name.
+    variant: String,
+  },
+}
+
+impl ConstructionInfo {
+  /// The qualified type name being constructed.
+  pub fn type_name(&self) -> &QualifiedTypeName {
+    match self {
+      Self::Struct(name)
+      | Self::Enum {
+        type_name: name, ..
+      } => name,
+    }
+  }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TypecheckInfo {
   field_accesses: HashMap<AstId, FieldAccessInfo>,
   matches: HashMap<AstId, MatchInfo>,
+  constructions: HashMap<AstId, ConstructionInfo>,
 }
 
 /// The kind of aggregate value whose field is being accessed.
@@ -213,6 +242,12 @@ impl TypecheckInfo {
   pub fn match_info(&self, match_: AstId) -> Option<&MatchInfo> {
     self.matches.get(&match_)
   }
+
+  /// The typechecker's resolution of a `new` construction, if `id` is a
+  /// construction expression.
+  pub fn construction(&self, id: AstId) -> Option<&ConstructionInfo> {
+    self.constructions.get(&id)
+  }
 }
 
 impl FieldAccessInfo {
@@ -245,6 +280,7 @@ struct Checker {
   types: HashMap<QualifiedTypeName, UserType>,
   field_accesses: HashMap<AstId, FieldAccessInfo>,
   matches: HashMap<AstId, MatchInfo>,
+  constructions: HashMap<AstId, ConstructionInfo>,
   current_return: Option<Type>,
   loop_depth: usize,
   next_var: usize,
@@ -276,6 +312,7 @@ impl Checker {
       types: HashMap::new(),
       field_accesses: HashMap::new(),
       matches: HashMap::new(),
+      constructions: HashMap::new(),
       current_return: None,
       loop_depth: 0,
       next_var: 0,
@@ -400,6 +437,7 @@ impl Checker {
     Ok(TypecheckInfo {
       field_accesses: self.field_accesses,
       matches: self.matches,
+      constructions: self.constructions,
     })
   }
 
@@ -636,10 +674,7 @@ impl Checker {
       ASTKind::CallFixed(identifier, args) => {
         self.infer_fixed_call(env, type_vars, identifier, args)
       }
-      ASTKind::NewStruct(name, fields) => self.infer_new_struct(env, type_vars, name, fields),
-      ASTKind::NewEnum(name, variant, fields) => {
-        self.infer_new_enum(env, type_vars, name, variant, fields)
-      }
+      ASTKind::New { path, fields } => self.infer_new(env, type_vars, ast.id(), path, fields),
       ASTKind::NewTuple(elements) => {
         if elements.len() < 2 {
           return Err(
@@ -756,101 +791,164 @@ impl Checker {
     }
   }
 
-  fn infer_new_struct(
+  /// Typecheck a `new` construction form and record its resolution in
+  /// [`TypecheckInfo::constructions`].
+  ///
+  /// The `path` has one to three `::`-separated segments:
+  ///
+  ///   `[T]`         -> source struct `main::T`
+  ///   `[T, V]`       -> source enum `main::T` variant `V`, or (if that fails)
+  ///                     a library struct `T::V`
+  ///   `[M, T, V]`    -> library enum `M::T` variant `V`
+  fn infer_new(
     &mut self,
     env: &mut Env,
     type_vars: &TypeVars,
-    type_name: &TypeNameAst,
+    ast_id: AstId,
+    path: &[String],
     fields: &[(String, AST)],
   ) -> Result<Type, TypeError> {
-    let type_name = construction_type_name(type_name);
-    let struct_ = self.struct_def(&type_name)?;
-    let mut provided = HashSet::new();
-    for (field, expr) in fields {
-      if !provided.insert(field.as_str()) {
+    match path.len() {
+      1 => {
+        let type_name = QualifiedTypeName::source(path[0].clone());
+        let struct_ = self.struct_def(&type_name)?;
+        self.check_construction_fields(
+          env,
+          type_vars,
+          type_name.to_string(),
+          &struct_.fields,
+          fields,
+        )?;
+        self
+          .constructions
+          .insert(ast_id, ConstructionInfo::Struct(type_name.clone()));
+        Ok(Type::Struct(type_name))
+      }
+      2 => {
+        // Ambiguous between a source enum variant `main::path[0]::path[1]`
+        // and a library struct `path[0]::path[1]`. Resolve with source-enum
+        // precedence: if `main::path[0]` is an enum, a matching variant wins;
+        // otherwise fall back to a library struct. When the source enum exists
+        // but lacks the variant, prefer the "unknown variant" error over the
+        // "unknown struct" error (unless a library struct actually matches).
+        let source_enum = QualifiedTypeName::source(path[0].clone());
+        if let Ok(enum_) = self.enum_def(&source_enum) {
+          if let Some(variant) = enum_.variants.iter().find(|v| v.name == path[1]) {
+            let variant = variant.clone();
+            self.check_construction_fields(
+              env,
+              type_vars,
+              format!("{source_enum}::{}", variant.name),
+              &variant.fields,
+              fields,
+            )?;
+            self.constructions.insert(
+              ast_id,
+              ConstructionInfo::Enum {
+                type_name: source_enum.clone(),
+                variant: variant.name.clone(),
+              },
+            );
+            return Ok(Type::Enum(source_enum));
+          }
+        }
+        let host_struct = QualifiedTypeName::new(path[0].clone(), path[1].clone());
+        match self.struct_def(&host_struct) {
+          Ok(struct_) => {
+            self.check_construction_fields(
+              env,
+              type_vars,
+              host_struct.to_string(),
+              &struct_.fields,
+              fields,
+            )?;
+            self
+              .constructions
+              .insert(ast_id, ConstructionInfo::Struct(host_struct.clone()));
+            Ok(Type::Struct(host_struct))
+          }
+          Err(_) if self.types.contains_key(&source_enum) => Err(TypeError::new(format!(
+            "unknown variant `{}` for enum `{source_enum}`",
+            path[1]
+          ))),
+          Err(other) => Err(other),
+        }
+      }
+      3 => {
+        let type_name = QualifiedTypeName::new(path[0].clone(), path[1].clone());
+        let enum_ = self.enum_def(&type_name)?;
+        let variant = enum_
+          .variants
+          .iter()
+          .find(|candidate| candidate.name == path[2])
+          .ok_or_else(|| {
+            TypeError::new(format!(
+              "unknown variant `{}` for enum `{type_name}`",
+              path[2]
+            ))
+          })?
+          .clone();
+        self.check_construction_fields(
+          env,
+          type_vars,
+          format!("{type_name}::{}", variant.name),
+          &variant.fields,
+          fields,
+        )?;
+        self.constructions.insert(
+          ast_id,
+          ConstructionInfo::Enum {
+            type_name: type_name.clone(),
+            variant: variant.name.clone(),
+          },
+        );
+        Ok(Type::Enum(type_name))
+      }
+      _ => Err(TypeError::new(format!(
+        "type path `{}` has too many segments",
+        path.join("::")
+      ))),
+    }
+  }
+
+  /// Validate the field initializers of a `new` construction against the
+  /// declared fields. `label` is used in error messages, e.g. `Foo` for a
+  /// struct or `Foo::Some` for an enum variant.
+  fn check_construction_fields(
+    &mut self,
+    env: &mut Env,
+    type_vars: &TypeVars,
+    label: String,
+    declared: &[(String, TypeAst)],
+    provided: &[(String, AST)],
+  ) -> Result<(), TypeError> {
+    let mut seen = HashSet::new();
+    for (field, expr) in provided {
+      if !seen.insert(field.as_str()) {
         return Err(TypeError::new(format!(
           "duplicate initializer for field `{field}`"
         )));
       }
-      let expected = struct_
-        .fields
+      let expected = declared
         .iter()
-        .find(|(expected, _)| expected == field)
-        .ok_or_else(|| {
-          TypeError::new(format!("unknown field `{field}` for struct `{type_name}`"))
-        })?;
+        .find(|(name, _)| name == field)
+        .ok_or_else(|| TypeError::new(format!("unknown field `{field}` for `{label}`")))?;
       let actual = self.infer(env, type_vars, expr)?;
       let expected = self.resolve_type(&expected.1, type_vars)?;
       self.unify(actual, expected).map_err(|error| {
         error
           .at(expr.span.clone())
-          .context(format!("while checking field `{field}` of `{type_name}`"))
+          .context(format!("while checking field `{field}` of `{label}`"))
       })?;
     }
-    for (field, _) in &struct_.fields {
-      if !provided.contains(field.as_str()) {
+    for (field, _) in declared {
+      if !seen.contains(field.as_str()) {
         return Err(TypeError::new(format!(
-          "missing initializer for field `{field}` of `{type_name}`"
+          "missing initializer for field `{field}` of `{label}`"
         )));
       }
     }
-    Ok(Type::Struct(type_name))
-  }
-
-  fn infer_new_enum(
-    &mut self,
-    env: &mut Env,
-    type_vars: &TypeVars,
-    type_name: &TypeNameAst,
-    variant: &str,
-    fields: &[(String, AST)],
-  ) -> Result<Type, TypeError> {
-    let type_name = construction_type_name(type_name);
-    let enum_ = self.enum_def(&type_name)?;
-    let variant = enum_
-      .variants
-      .iter()
-      .find(|candidate| candidate.name == variant)
-      .ok_or_else(|| {
-        TypeError::new(format!(
-          "unknown variant `{variant}` for enum `{type_name}`"
-        ))
-      })?;
-    let mut provided = HashSet::new();
-    for (field, expr) in fields {
-      if !provided.insert(field.as_str()) {
-        return Err(TypeError::new(format!(
-          "duplicate initializer for field `{field}`"
-        )));
-      }
-      let expected = variant
-        .fields
-        .iter()
-        .find(|(expected, _)| expected == field)
-        .ok_or_else(|| {
-          TypeError::new(format!(
-            "unknown field `{field}` for variant `{type_name}::{}`",
-            variant.name
-          ))
-        })?;
-      let actual = self.infer(env, type_vars, expr)?;
-      let expected = self.resolve_type(&expected.1, type_vars)?;
-      self.unify(actual, expected).map_err(|error| {
-        error.at(expr.span.clone()).context(format!(
-          "while checking field `{field}` of `{type_name}::{}`",
-          variant.name
-        ))
-      })?;
-    }
-    for (field, _) in &variant.fields {
-      if !provided.contains(field.as_str()) {
-        return Err(TypeError::new(format!(
-          "missing initializer for field `{field}` of `{type_name}::{}`",
-          variant.name
-        )));
-      }
-    }
-    Ok(Type::Enum(type_name))
+    Ok(())
   }
 
   fn infer_match(
@@ -1795,16 +1893,6 @@ fn resolve_user_type<'a>(
         }
       }
     }
-  }
-}
-
-/// Resolve the type name in a `new` construction form to a qualified type
-/// name. Bare names refer to source-defined types (the `main` module);
-/// qualified names refer to library-defined types in their own module.
-fn construction_type_name(name: &TypeNameAst) -> QualifiedTypeName {
-  match name {
-    TypeNameAst::Bare(name) => QualifiedTypeName::source(name.clone()),
-    TypeNameAst::Qualified(type_name) => type_name.clone(),
   }
 }
 

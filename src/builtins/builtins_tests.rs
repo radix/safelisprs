@@ -116,6 +116,37 @@ fn maybe_int_library() -> Library {
     ))
 }
 
+/// A `host::Box` struct plus an `unbox` builtin that reads it, used to verify
+/// that values constructed from source with `new` interoperate with host
+/// builtins.
+fn box_library() -> Library {
+  Library::new()
+    .with_type(CustomTypeSpec::struct_(
+      "host",
+      "Box",
+      vec![("value", Signature::Int)],
+    ))
+    .with_builtin(Builtin::contextual_value(
+      "host",
+      "unbox",
+      Some(1),
+      sig(
+        &[],
+        vec![Signature::named("host", "Box")],
+        None,
+        Signature::Int,
+      ),
+      |ctx, args| {
+        let struct_ = ctx.struct_type("host", "Box")?;
+        let instance = ctx.args("host::unbox", args).struct_instance(0, struct_)?;
+        match instance.fields.first() {
+          Some(Value::Int(value)) => Ok(Value::Int(*value)),
+          _ => Err("invalid host::Box value".to_string()),
+        }
+      },
+    ))
+}
+
 #[test]
 fn host_defined_enums_can_be_constructed_by_builtins_and_matched() {
   let library = maybe_int_library();
@@ -194,6 +225,41 @@ fn source_constructed_host_enums_can_be_consumed_by_builtins() {
 
   assert_eq!(some.run_until_done().unwrap(), SLValue::Int(42));
   assert_eq!(none.run_until_done().unwrap(), SLValue::Int(0));
+}
+
+/// A host struct built with `new module::Struct` from source is consumable by
+/// a host builtin that reads it via `struct_instance`, just like one allocated
+/// by a builtin.
+#[test]
+fn source_constructed_host_struct_can_be_consumed_by_builtins() {
+  let library = box_library();
+  let package = compile_executable_from_source(
+    "(fn main () ->Int
+       (host::unbox (new host::Box value:42)))",
+    ("main", "main"),
+    &library,
+  )
+  .unwrap_or_else(|e| panic!("compile failed: {e}"));
+  let mut exec = Interpreter::with_library(package, library)
+    .call_main()
+    .unwrap_or_else(|e| panic!("call_main failed: {e}"));
+  assert_eq!(exec.run_until_done().unwrap(), SLValue::Int(42));
+}
+
+/// Constructing a host struct with the wrong field type is a compile-time
+/// type error.
+#[test]
+fn source_constructed_host_struct_rejects_wrong_field_type() {
+  let library = box_library();
+  let error = compile_executable_from_source(
+    "(fn main () ->host::Box
+       (new host::Box value:\"nope\"))",
+    ("main", "main"),
+    &library,
+  )
+  .unwrap_err();
+  assert!(error.contains("expected `Int`"), "{error}");
+  assert!(error.contains("got `String`"), "{error}");
 }
 
 /// Constructing a host enum variant with the wrong field type is a

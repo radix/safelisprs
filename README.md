@@ -392,22 +392,30 @@ SafeLisp ships with a default host library containing these prelude functions:
 ### Host-Defined Types
 
 A `Library` may also declare custom types with `with_type`. Source code refers to
-them by their qualified `module::Type` name and constructs enum variants with the
-fully-qualified `new module::Type::Variant` form. The resulting values are
-indistinguishable from those produced by host builtin allocators, so builtins
-and `match` work across both.
+them by their qualified `module::Type` name and constructs them with `new`:
+
+- `new module::Struct` constructs a library-defined struct.
+- `new module::Enum::Variant` constructs a library-defined enum variant.
+
+The resulting values are indistinguishable from those produced by host builtin
+allocators, so builtins, `match`, and field access work across both. For a
+2-segment `new T::V`, the typechecker resolves it to a source enum variant
+`T::V` when one exists, and otherwise falls back to a library struct `T::V`.
 
 ```rust
-let library = Library::new().with_type(CustomTypeSpec::enum_(
-  "host",
-  "MaybeInt",
-  vec![("Some", vec![("value", Signature::Int)]), ("None", vec![])],
-));
+let library = Library::new()
+  .with_type(CustomTypeSpec::enum_(
+    "host",
+    "MaybeInt",
+    vec![("Some", vec![("value", Signature::Int)]), ("None", vec![])],
+  ))
+  .with_type(CustomTypeSpec::struct_("host", "Box", vec![("value", Signature::Int)]));
 ```
 
 ```lisp
 fn main () -> Int
   let maybe (new host::MaybeInt::Some value: 42)
+  let boxed (new host::Box value: maybe)
   match maybe
     (Some value) => value
     (None) => 0

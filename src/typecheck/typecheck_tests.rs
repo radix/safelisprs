@@ -24,6 +24,25 @@ fn host_enum_library() -> Library {
   ))
 }
 
+fn host_struct_library() -> Library {
+  Library::new().with_type(CustomTypeSpec::struct_(
+    "host",
+    "Box",
+    vec![("value", Signature::Int)],
+  ))
+}
+
+/// A library that declares a host struct `Shape::Circle` (module `Shape`,
+/// name `Circle`) with a field `area`, used alongside a source enum `Shape`
+/// with a `Circle` variant to exercise 2-segment disambiguation.
+fn shape_library() -> Library {
+  Library::new().with_type(CustomTypeSpec::struct_(
+    "Shape",
+    "Circle",
+    vec![("area", Signature::Int)],
+  ))
+}
+
 #[test]
 fn polymorphic_identity_can_be_used_at_two_types() {
   check(
@@ -248,6 +267,91 @@ fn host_defined_enum_construction_rejects_unknown_type() {
   )
   .unwrap_err();
   assert!(error.message.contains("unknown type"), "{error}");
+}
+
+#[test]
+fn host_defined_struct_can_be_constructed_from_source() {
+  let library = host_struct_library();
+  check_with(
+    "(fn main () ->host::Box
+       (new host::Box value:42))",
+    &library,
+  )
+  .unwrap();
+}
+
+#[test]
+fn host_defined_struct_construction_supports_field_access() {
+  let library = host_struct_library();
+  check_with(
+    "(fn main () ->Int
+       (let b (new host::Box value:42))
+       b.value)",
+    &library,
+  )
+  .unwrap();
+}
+
+#[test]
+fn host_defined_struct_construction_rejects_wrong_field_type() {
+  let library = host_struct_library();
+  let error = check_with(
+    "(fn main () ->host::Box
+       (new host::Box value:false))",
+    &library,
+  )
+  .unwrap_err();
+  assert!(error.message.contains("Int"), "{error}");
+  assert!(error.message.contains("Bool"), "{error}");
+}
+
+/// A 2-segment `new Shape::Circle` resolves to the source enum variant when one
+/// exists, even if a host struct with the same `module::name` is also declared.
+#[test]
+fn source_enum_variant_takes_precedence_over_host_struct() {
+  let library = shape_library();
+  // The source enum `Shape` variant `Circle` has field `r`; the host struct
+  // `Shape::Circle` has field `area`. Using the enum's field succeeds.
+  check_with(
+    "(enum Shape (Circle r:Int))
+     (fn main () ->Shape (new Shape::Circle r:3))",
+    &library,
+  )
+  .unwrap();
+  // Using the host struct's field fails: the source enum takes precedence, so
+  // `area` is an unknown field for the enum variant.
+  let error = check_with(
+    "(enum Shape (Circle r:Int))
+     (fn main () ->Shape (new Shape::Circle area:3))",
+    &library,
+  )
+  .unwrap_err();
+  assert!(error.message.contains("unknown field `area`"), "{error}");
+}
+
+/// A 2-segment `new` with no matching source enum falls back to a host struct.
+#[test]
+fn new_falls_back_to_host_struct_without_source_enum() {
+  let library = shape_library();
+  check_with(
+    "(fn main () ->Shape::Circle
+       (new Shape::Circle area:3))",
+    &library,
+  )
+  .unwrap();
+}
+
+/// When a source enum exists but the named variant does not, and no library
+/// struct matches, the error names the unknown variant (not an unknown
+/// struct), preserving the long-standing behavior for `new Enum::Variant`.
+#[test]
+fn unknown_variant_of_source_enum_reports_variant_error() {
+  let error = check(
+    "(enum Foo (A))
+     (fn main () ->Foo (new Foo::B x:1))",
+  )
+  .unwrap_err();
+  assert!(error.message.contains("unknown variant `B`"), "{error}");
 }
 
 #[test]

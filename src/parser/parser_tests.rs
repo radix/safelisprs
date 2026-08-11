@@ -508,8 +508,7 @@ fn parses_enum_definitions_and_construction() {
   };
   assert!(matches!(
     main.code[0].kind,
-    ASTKind::NewEnum(ref enum_name, ref variant, _)
-      if *enum_name == TypeNameAst::bare("Foo") && variant == "Var2"
+    ASTKind::New { ref path, .. } if path == &["Foo".to_string(), "Var2".to_string()]
   ));
 }
 
@@ -522,8 +521,8 @@ fn parses_qualified_library_enum_construction() {
   };
   assert!(matches!(
     main.code[0].kind,
-    ASTKind::NewEnum(ref type_name, ref variant, _)
-      if *type_name == TypeNameAst::qualified("host", "MaybeInt") && variant == "Some"
+    ASTKind::New { ref path, .. }
+      if path == &["host".to_string(), "MaybeInt".to_string(), "Some".to_string()]
   ));
 }
 

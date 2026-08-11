@@ -2,10 +2,9 @@ use std::collections::HashMap;
 
 use crate::builtins::{CustomTypeKind, CustomTypeSpec, Library};
 use crate::closure::transform_closures_in_module;
-use crate::parser::{
-  self, ASTKind, BindingId, Identifier, MatchPattern, ResolvedName, TypeNameAst, AST,
-};
+use crate::parser::{self, ASTKind, BindingId, Identifier, MatchPattern, ResolvedName, AST};
 use crate::prelude::resolve_module_names;
+use crate::typecheck::ConstructionInfo;
 use crate::typecheck::{CheckedModule, MatchArmInfo, TypecheckInfo};
 
 /// A compiled SafeLisp package.
@@ -734,36 +733,47 @@ impl<'module, 'types> FunctionCompiler<'module, 'types> {
         self.compile_expr(callable)?;
         self.emit(Instruction::PartialApply(args.len() as u16));
       }
-      ASTKind::NewStruct(type_name, fields) => {
-        let (module, name) = construction_target(self.module, type_name);
-        let field_names = self.module.struct_def(&module, &name)?.fields.clone();
-        for field_name in field_names {
-          let expression = fields
-            .iter()
-            .find(|(field, _)| field == &field_name)
-            .map(|(_, expression)| expression)
-            .ok_or_else(|| format!("missing initializer for field `{field_name}` of `{name}`"))?;
-          self.compile_expr(expression)?;
+      ASTKind::New { path: _, fields } => {
+        let info = self
+          .module
+          .type_info
+          .construction(ast.id())
+          .ok_or_else(|| format!("construction has no typechecking information: {ast:?}"))?;
+        let type_name = info.type_name();
+        let (module, name) = (type_name.module().to_string(), type_name.name().to_string());
+        match info {
+          ConstructionInfo::Struct(_) => {
+            let field_names = self.module.struct_def(&module, &name)?.fields.clone();
+            for field_name in field_names {
+              let expression = fields
+                .iter()
+                .find(|(field, _)| field == &field_name)
+                .map(|(_, expression)| expression)
+                .ok_or_else(|| {
+                  format!("missing initializer for field `{field_name}` of `{name}`")
+                })?;
+              self.compile_expr(expression)?;
+            }
+            self.emit(Instruction::NewStruct((module, name)));
+          }
+          ConstructionInfo::Enum { variant, .. } => {
+            let (variant_index, variant_def) = self.module.enum_variant(&module, &name, variant)?;
+            let field_names = variant_def.fields.clone();
+            for field_name in field_names {
+              let expression = fields
+                .iter()
+                .find(|(field, _)| field == &field_name)
+                .map(|(_, expression)| expression)
+                .ok_or_else(|| {
+                  format!(
+                    "missing initializer for field `{field_name}` of `{module}::{name}::{variant}`"
+                  )
+                })?;
+              self.compile_expr(expression)?;
+            }
+            self.emit(Instruction::NewEnum((module, name), variant_index));
+          }
         }
-        self.emit(Instruction::NewStruct((module, name)));
-      }
-      ASTKind::NewEnum(type_name, variant, fields) => {
-        let (module, name) = construction_target(self.module, type_name);
-        let (variant_index, variant_def) = self.module.enum_variant(&module, &name, variant)?;
-        let field_names = variant_def.fields.clone();
-        for field_name in field_names {
-          let expression = fields
-            .iter()
-            .find(|(field, _)| field == &field_name)
-            .map(|(_, expression)| expression)
-            .ok_or_else(|| {
-              format!(
-                "missing initializer for field `{field_name}` of `{module}::{name}::{variant}`"
-              )
-            })?;
-          self.compile_expr(expression)?;
-        }
-        self.emit(Instruction::NewEnum((module, name), variant_index));
       }
       ASTKind::NewTuple(elements) => {
         for element in elements {
@@ -937,18 +947,6 @@ fn compile_modules_from_source(
   let checked =
     crate::typecheck::typecheck(asts, library).map_err(|error| error.render(module_source))?;
   Ok(vec![compile_resolved_module("main", &checked, library)?])
-}
-
-/// Resolve a `new` construction type name to the `(module, name)` pair the
-/// interpreter uses to locate the type definition. Bare names refer to the
-/// source module being compiled; qualified names carry their own module.
-fn construction_target(module: &ModuleCompiler, name: &TypeNameAst) -> (String, String) {
-  match name {
-    TypeNameAst::Bare(name) => (module.module_name.clone(), name.clone()),
-    TypeNameAst::Qualified(type_name) => {
-      (type_name.module().to_string(), type_name.name().to_string())
-    }
-  }
 }
 
 fn type_def_from_custom(type_: &CustomTypeSpec) -> TypeDef {
