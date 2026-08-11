@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use anyhow::{anyhow, Result};
 use clap::Parser;
 
-use safelisp::{compile_executable_from_source, Library};
+use safelisp::{compile_executable_from_source_with_options, CompileOptions, Library};
 
 #[derive(Parser)]
 #[clap(author, version, about, long_about = None)]
@@ -18,6 +18,12 @@ struct Args {
 
   #[clap(long, default_value = "main", help = "name of the main function")]
   main_function: String,
+
+  #[clap(
+    long,
+    help = "maximum parse nesting depth before the compiler returns an error"
+  )]
+  max_parse_depth: Option<usize>,
 
   #[clap(help = "Main .sl file")]
   input_file: String,
@@ -43,8 +49,17 @@ fn main() -> Result<()> {
 
   let library = Library::default();
   let main_func = args.main_function;
-  let package = compile_executable_from_source(&input_data, ("main", &main_func), &library)
-    .map_err(|e| anyhow!("{}", e))?;
+  let options = match args.max_parse_depth {
+    Some(depth) => CompileOptions::default().max_parse_depth(depth),
+    None => CompileOptions::default(),
+  };
+  let package = compile_executable_from_source_with_options(
+    &input_data,
+    ("main", &main_func),
+    &library,
+    &options,
+  )
+  .map_err(|e| anyhow!("{}", e))?;
 
   let output = match format.as_str() {
     "yaml" => serde_yaml::to_string(&package)?.into_bytes(),

@@ -27,10 +27,12 @@ pub use builtins::{
   sig, Builtin, BuiltinSignature, BuiltinSpec, CustomFieldSpec, CustomTypeKind, CustomTypeSpec,
   CustomVariantSpec, Library, Trait,
 };
-pub use compiler::{compile_executable_from_source, Package};
+pub use compiler::{
+  compile_executable_from_source, compile_executable_from_source_with_options, CompileOptions,
+  Package,
+};
 pub use interpreter::{
-  Accounted, Args, CellContents, EnumInstance, Execution, HostCtx, HostPoll,
-  Interpreter, MemoryReservation, Partial, SLVal, SLValue, Status, StructInstance,
-  Value,
+  Accounted, Args, CellContents, EnumInstance, Execution, HostCtx, HostPoll, Interpreter,
+  MemoryReservation, Partial, SLVal, SLValue, Status, StructInstance, Value,
 };
 pub use types::{QualifiedTypeName, Signature};

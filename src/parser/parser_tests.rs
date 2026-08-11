@@ -694,10 +694,14 @@ fn special_form_arity_errors_are_positioned() {
 
 #[test]
 fn ast_nodes_keep_full_byte_spans() {
-  let atom = parse_internal("  42").unwrap().remove(0);
+  let atom = parse_internal("  42", DEFAULT_MAX_PARSE_DEPTH)
+    .unwrap()
+    .remove(0);
   assert_eq!(atom.span, 2..4);
 
-  let conditional = parse_internal("(if true (f 1) 2)").unwrap().remove(0);
+  let conditional = parse_internal("(if true (f 1) 2)", DEFAULT_MAX_PARSE_DEPTH)
+    .unwrap()
+    .remove(0);
   assert_eq!(conditional.span, 0..17);
   let ASTKind::If(condition, then_branch, else_branch) = &conditional.kind else {
     panic!("expected if, got {conditional:?}");
@@ -718,7 +722,9 @@ fn ast_nodes_keep_full_byte_spans() {
 #[test]
 fn layout_preserves_real_token_spans() {
   let source = "fn main () -> Int\n    (+ 1\n       \"bad\")";
-  let function = parse_internal(source).unwrap().remove(0);
+  let function = parse_internal(source, DEFAULT_MAX_PARSE_DEPTH)
+    .unwrap()
+    .remove(0);
   let ASTKind::DefineFn(function) = function.kind else {
     panic!("expected function");
   };
@@ -777,7 +783,7 @@ fn semantic_equality_ignores_spans() {
 #[test]
 fn eof_errors_use_an_empty_span_at_source_end() {
   let source = "(f 1";
-  let error = parse_internal(source).unwrap_err();
+  let error = parse_internal(source, DEFAULT_MAX_PARSE_DEPTH).unwrap_err();
   assert_eq!(error.span, source.len()..source.len());
 }
 
@@ -862,9 +868,53 @@ fn bind_desugars_to_a_block_of_let_and_shd_field_accesses() {
 
 #[test]
 fn bind_requires_parenthesized_pattern_group() {
-  let err = parse_internal("bind (shd list) (Tuple 1 2)").unwrap_err();
+  let err = parse_internal("bind (shd list) (Tuple 1 2)", DEFAULT_MAX_PARSE_DEPTH).unwrap_err();
   assert!(
     format!("{err:?}").contains("binding pattern must be parenthesized"),
     "{err:?}"
   );
+}
+
+/// Deep nesting well within the budget parses fine.
+#[test]
+fn nesting_at_max_parse_depth_succeeds() {
+  // Dynamic calls (`(((...)))`) consume a couple of depth frames per paren
+  // level, so give a generous budget relative to the nesting.
+  let depth = 32;
+  let source = "(".repeat(depth) + "0" + &")".repeat(depth);
+  let asts = read_multiple_with_depth(&source, 512).unwrap();
+  assert_eq!(asts.len(), 1);
+}
+
+/// Nesting far past the budget yields a clean error mentioning the limit,
+/// rather than aborting the process with a stack overflow.
+#[test]
+fn nesting_past_max_parse_depth_returns_a_clean_error() {
+  let depth = 512;
+  let source = "(".repeat(depth) + "0" + &")".repeat(depth);
+  let error = read_multiple_with_depth(&source, 8).unwrap_err();
+  assert!(
+    error.contains("nesting too deep"),
+    "expected a depth error, got: {error}"
+  );
+  assert!(
+    error.contains(&format!("maximum parse depth of {}", 8)),
+    "expected the limit in the message, got: {error}"
+  );
+}
+
+/// Deeply nested *types* are also bounded by the same budget.
+#[test]
+fn deeply_nested_types_are_bounded_by_the_depth_budget() {
+  let depth = 64;
+  let mut ty = String::from("Int");
+  for _ in 0..depth {
+    ty = format!("(Wrap {ty})");
+  }
+  let program = format!("(fn f (x: {ty}) -> Int 0)");
+  // Generous budget: parses.
+  read_multiple_with_depth(&program, 512).unwrap();
+  // Tiny budget: clean depth error.
+  let error = read_multiple_with_depth(&program, 8).unwrap_err();
+  assert!(error.contains("nesting too deep"), "got: {error}");
 }

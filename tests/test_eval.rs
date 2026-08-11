@@ -2,7 +2,10 @@
 //!
 
 use rstest::rstest;
-use safelisp::{compile_executable_from_source, Interpreter, Library, SLValue};
+use safelisp::{
+  compile_executable_from_source, compile_executable_from_source_with_options, CompileOptions,
+  Interpreter, Library, SLValue,
+};
 
 /// Run `source` through the SLC compiler + interpreter and return the result
 /// as an [`SLValue`]. Panics on compile or runtime errors.
@@ -183,4 +186,90 @@ fn main () -> Int
 )]
 fn interpreter_matches_expected(#[case] source: &str, #[case] expected: SLValue) {
   assert_eq!(eval_interpreter(source), expected, "interpreter: {source}");
+}
+
+/// Regression reproducer: compiling deeply nested expressions must not abort
+/// the process with a stack overflow. The parser caps nesting at
+/// [`CompileOptions::DEFAULT_MAX_PARSE_DEPTH`] by default and returns a clean
+/// error past that. Raising the budget (on a thread with a large stack) lets
+/// the same deeply nested program compile, proving the default rejection is a
+/// depth-budget guard rather than a logic bug.
+#[test]
+fn compile_deeply_nested_addition_does_not_overflow_on_large_stack() {
+  // A depth far above the default budget, but well within reach of a large
+  // stack once the budget is raised.
+  let depth = 2_000;
+  let mut inner = "0".to_string();
+  for _ in 0..depth {
+    inner = format!("(+ 1 {inner})");
+  }
+  let source = format!("fn main () -> Int\n  {inner}\n");
+
+  // Default budget rejects depth 2,000 with a clean error (no abort).
+  let default_err =
+    compile_executable_from_source(&source, ("main", "main"), &Library::default()).unwrap_err();
+  assert!(
+    default_err.contains("nesting too deep"),
+    "expected a depth error, got: {default_err}"
+  );
+
+  // Raising the budget and giving the compile a large stack lets it succeed.
+  let options = CompileOptions::default().max_parse_depth(depth + 32);
+  let handle = std::thread::Builder::new()
+    .stack_size(512 * 1024 * 1024)
+    .spawn(move || {
+      compile_executable_from_source_with_options(
+        &source,
+        ("main", "main"),
+        &Library::default(),
+        &options,
+      )
+    })
+    .expect("spawn");
+  let result = handle.join().expect("compile thread panicked");
+  assert!(
+    result.is_ok(),
+    "deeply nested program should compile: {result:?}"
+  );
+}
+
+/// The default budget must reject deeply nested source with a clean error
+/// instead of aborting the process with a stack overflow. This runs on the
+/// default (2 MiB) test-thread stack in both debug and release.
+#[test]
+fn default_budget_rejects_deeply_nested_source_with_a_clean_error() {
+  let depth = 5_000;
+  let mut inner = "0".to_string();
+  for _ in 0..depth {
+    inner = format!("(+ 1 {inner})");
+  }
+  let source = format!("fn main () -> Int\n  {inner}\n");
+  let error =
+    compile_executable_from_source(&source, ("main", "main"), &Library::default()).unwrap_err();
+  assert!(
+    error.contains("nesting too deep"),
+    "expected a depth error, got: {error}"
+  );
+  assert!(
+    error.contains("maximum parse depth of"),
+    "expected the limit in the message, got: {error}"
+  );
+}
+
+/// Programs with ordinary nesting still compile under the default budget.
+#[test]
+fn default_budget_compiles_moderately_nested_programs() {
+  let mut inner = "0".to_string();
+  for _ in 0..16 {
+    inner = format!("(+ 1 {inner})");
+  }
+  let source = format!("fn main () -> Int\n  {inner}\n");
+  let package = compile_executable_from_source(&source, ("main", "main"), &Library::default())
+    .expect("moderately nested program should compile under the default budget");
+  let result = Interpreter::new(package)
+    .call_main()
+    .unwrap()
+    .run_until_done()
+    .unwrap();
+  assert_eq!(result, SLValue::Int(16));
 }

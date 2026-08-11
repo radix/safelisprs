@@ -78,7 +78,7 @@ impl Resolver<'_> {
     let mut scope = outer_scope.clone();
     scope.insert(name.name.clone(), name.binding);
 
-    // `locals` tracks bindings minted within the *current* function. Reset it
+    // `locals` tracks bindings in the *current* function. Reset it
     // at the function boundary so that `let`/`shd` checks only see locals of
     // this function: a `let` may shadow bindings from enclosing functions or
     // module-level functions, while `shd` may only reassign current-function

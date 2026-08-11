@@ -118,7 +118,7 @@ impl MemoryTracker {
 }
 
 /// A `MemoryTracker` shared via `Rc` so it can live inside a GC'd `Accounted`
-/// box. Each `Execution` mints one `Rc<MemoryTracker>`; every value allocated
+/// box. Each `Execution` creates one `Rc<MemoryTracker>`; every value allocated
 /// in that execution receives a clone. The tracker stays alive until the last
 /// `Accounted` box is swept (which releases its `Rc`).
 type SharedTracker = Rc<MemoryTracker>;

@@ -6,6 +6,13 @@ use crate::types::QualifiedTypeName;
 
 pub(crate) type Span = Range<usize>;
 
+/// Default maximum nesting depth the parser will accept before returning a
+/// clean error instead of risking a native stack overflow. The value is kept
+/// conservative so that, at the default budget, the produced AST is shallow
+/// enough that the *downstream* passes (typecheck and codegen, which still walk
+/// the AST recursively) also stay within a typical 2 MiB thread stack.
+pub const DEFAULT_MAX_PARSE_DEPTH: usize = 128;
+
 /// Stable identity for one AST node across compiler passes.
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
 pub(crate) struct AstId(u64);
@@ -18,7 +25,7 @@ impl AstId {
   }
 }
 
-/// Monotonic counter for unique temporary names minted when desugaring `bind`
+/// Monotonic counter for unique temporary names created when desugaring `bind`
 /// forms. Each `bind` introduces a fresh local to hold the destructured value
 /// so that nested or repeated `bind`s never collide.
 static NEXT_BIND_TEMP: AtomicU64 = AtomicU64::new(0);
@@ -1204,11 +1211,41 @@ struct FnHeader {
 struct Parser {
   tokens: Vec<Token>,
   current: usize,
+  max_depth: usize,
+  depth: usize,
 }
 
 impl Parser {
-  fn new(tokens: Vec<Token>) -> Self {
-    Self { tokens, current: 0 }
+  fn new(tokens: Vec<Token>, max_depth: usize) -> Self {
+    Self {
+      tokens,
+      current: 0,
+      max_depth,
+      depth: 0,
+    }
+  }
+
+  /// Record one level of nesting, returning a `ParseError` if it exceeds the
+  /// configured `max_depth` budget. Make sure to call leave_depth() after.
+  fn enter_depth(&mut self) -> Result<(), ParseError> {
+    self.depth += 1;
+    if self.depth > self.max_depth {
+      let span = self.peek().span.clone();
+      return Err(ParseError::new(
+        span,
+        format!(
+          "nesting too deep: exceeds maximum parse depth of {} \
+           (raise `max_parse_depth` in `CompileOptions` to allow more)",
+          self.max_depth
+        ),
+      ));
+    }
+    Ok(())
+  }
+
+  /// Remove a level of nesting.
+  fn leave_depth(&mut self) {
+    self.depth -= 1;
   }
 
   fn parse_multiple(&mut self) -> Result<Vec<AST>, ParseError> {
@@ -1222,6 +1259,13 @@ impl Parser {
   }
 
   fn parse_expr(&mut self) -> Result<AST, ParseError> {
+    self.enter_depth()?;
+    let result = self.parse_expr_inner();
+    self.leave_depth();
+    result
+  }
+
+  fn parse_expr_inner(&mut self) -> Result<AST, ParseError> {
     let layout_line_start = self.at_layout_line_start();
     let token = self.advance();
     match token.kind {
@@ -2087,6 +2131,13 @@ impl Parser {
   }
 
   fn parse_type(&mut self) -> Result<TypeAst, ParseError> {
+    self.enter_depth()?;
+    let result = self.parse_type_inner();
+    self.leave_depth();
+    result
+  }
+
+  fn parse_type_inner(&mut self) -> Result<TypeAst, ParseError> {
     let token = self.advance();
     match token.kind {
       TokenKind::Sym(name) => {
@@ -2345,13 +2396,25 @@ fn nonempty_expr_eof_expected(context: NonemptyExprContext) -> &'static str {
   }
 }
 
-fn parse_internal(source: &str) -> Result<Vec<AST>, ParseError> {
+fn parse_internal(source: &str, max_depth: usize) -> Result<Vec<AST>, ParseError> {
   let tokens = Lexer::new(source).lex()?;
-  Parser::new(tokens).parse_multiple()
+  Parser::new(tokens, max_depth).parse_multiple()
 }
 
+/// Parse `source` into top-level ASTs using the default maximum nesting depth.
+///
+/// Used by the test suites for convenience; the compiler itself goes through
+/// [`read_multiple_with_depth`].
+#[allow(dead_code)]
 pub(crate) fn read_multiple(source: &str) -> Result<Vec<AST>, String> {
-  parse_internal(source).map_err(|error| error.render(source))
+  read_multiple_with_depth(source, DEFAULT_MAX_PARSE_DEPTH)
+}
+
+/// Parse `source` into top-level ASTs using a caller-chosen maximum nesting
+/// depth. Returns a rendered error string when the nesting exceeds `max_depth`
+/// instead of risking a native stack overflow.
+pub(crate) fn read_multiple_with_depth(source: &str, max_depth: usize) -> Result<Vec<AST>, String> {
+  parse_internal(source, max_depth).map_err(|error| error.render(source))
 }
 
 #[cfg(test)]

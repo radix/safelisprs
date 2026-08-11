@@ -95,6 +95,25 @@ let error = execution.run_until_done().unwrap_err();
 assert!(error.contains("memory limit exceeded"));
 ```
 
+### Parse Depth Limits
+
+The parser is recursive descent, so deeply nested source (for example, many
+thousands of nested parentheses) would otherwise overflow the native stack while
+*compiling*. `CompileOptions::max_parse_depth` caps the nesting depth the parser
+will accept, returning an error instead.
+
+```rust
+use safelisp::CompileOptions;
+
+let options = CompileOptions::default().max_parse_depth(1024);
+let package = safelisp::compile_executable_from_source_with_options(
+  source,
+  ("main", "main"),
+  &library,
+  &options,
+)?;
+```
+
 ## Language Tour
 
 SafeLisp has a Lisp core with an indentation-based layout syntax for the common
@@ -396,11 +415,6 @@ them by their qualified `module::Type` name and constructs them with `new`:
 
 - `new module::Struct` constructs a library-defined struct.
 - `new module::Enum::Variant` constructs a library-defined enum variant.
-
-The resulting values are indistinguishable from those produced by host builtin
-allocators, so builtins, `match`, and field access work across both. For a
-2-segment `new T::V`, the typechecker resolves it to a source enum variant
-`T::V` when one exists, and otherwise falls back to a library struct `T::V`.
 
 ```rust
 let library = Library::new()

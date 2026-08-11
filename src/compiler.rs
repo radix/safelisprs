@@ -2,10 +2,46 @@ use std::collections::HashMap;
 
 use crate::builtins::{CustomTypeKind, CustomTypeSpec, Library};
 use crate::closure::transform_closures_in_module;
-use crate::parser::{self, ASTKind, BindingId, Identifier, MatchPattern, ResolvedName, AST};
+use crate::parser::{
+  self, ASTKind, BindingId, Identifier, MatchPattern, ResolvedName, AST, DEFAULT_MAX_PARSE_DEPTH,
+};
 use crate::prelude::resolve_module_names;
 use crate::typecheck::ConstructionInfo;
 use crate::typecheck::{CheckedModule, MatchArmInfo, TypecheckInfo};
+
+/// Tunable knobs for compiling SafeLisp source.
+#[derive(Clone, Debug)]
+pub struct CompileOptions {
+  /// Maximum nesting depth the parser will accept before returning a clean
+  /// error instead of risking a native stack overflow.
+  pub max_parse_depth: usize,
+}
+
+impl CompileOptions {
+  /// Create options with all fields set to their defaults.
+  pub const fn new() -> Self {
+    Self {
+      max_parse_depth: DEFAULT_MAX_PARSE_DEPTH,
+    }
+  }
+
+  /// Set the maximum parse nesting depth.
+  ///
+  /// Larger values allow more deeply nested source at the cost of using more
+  /// native stack during compilation. Environments running untrusted source
+  /// should keep this at or below the default; environments with a larger
+  /// available stack (or stricter source provenance) may raise it.
+  pub fn max_parse_depth(mut self, max_parse_depth: usize) -> Self {
+    self.max_parse_depth = max_parse_depth;
+    self
+  }
+}
+
+impl Default for CompileOptions {
+  fn default() -> Self {
+    Self::new()
+  }
+}
 
 /// A compiled SafeLisp package.
 /// If a `main` is present, the interpreter can execute it directly.
@@ -926,8 +962,27 @@ pub fn compile_executable_from_source(
   main: (&str, &str),
   library: &Library,
 ) -> Result<Package, String> {
+  compile_executable_from_source_with_options(
+    module_source,
+    main,
+    library,
+    &CompileOptions::default(),
+  )
+}
+
+/// Compile SafeLisp source into an executable [`Package`] with the named main
+/// function and caller-supplied [`CompileOptions`].
+///
+/// This is the entry point to use when an environment needs a non-default
+/// parse depth budget; see [`CompileOptions::max_parse_depth`].
+pub fn compile_executable_from_source_with_options(
+  module_source: &str,
+  main: (&str, &str),
+  library: &Library,
+  options: &CompileOptions,
+) -> Result<Package, String> {
   Package::from_modules_with_main(
-    compile_modules_from_source(module_source, library)?,
+    compile_modules_from_source(module_source, library, options.max_parse_depth)?,
     main,
     library,
   )
@@ -936,8 +991,9 @@ pub fn compile_executable_from_source(
 fn compile_modules_from_source(
   module_source: &str,
   library: &Library,
+  max_parse_depth: usize,
 ) -> Result<CompiledModules, String> {
-  let asts = parser::read_multiple(module_source)?;
+  let asts = parser::read_multiple_with_depth(module_source, max_parse_depth)?;
   let module_symbols = library
     .builtins()
     .filter(|builtin| builtin.spec().module == "main")

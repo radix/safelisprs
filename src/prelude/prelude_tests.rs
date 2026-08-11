@@ -72,7 +72,7 @@ fn shd_accepts_a_local_let_binding() {
 #[test]
 fn let_in_nested_fn_shadows_enclosing_binding() {
   // A `let` inside a nested function may shadow a binding from an enclosing
-  // function: it mints a fresh binding rather than reusing the outer one, so
+  // function: it creates a fresh binding rather than reusing the outer one, so
   // the outer variable is not captured.
   resolve_with_bindings("(fn outer () (let a 1) (fn inner () (let a 2) a))");
 }
@@ -89,7 +89,7 @@ fn shd_of_enclosing_binding_is_rejected() {
 #[test]
 fn let_shadows_a_module_level_function() {
   // A `let` may shadow a same-module top-level function name: the function
-  // binding is not a current-function local, so the `let` mints a fresh
+  // binding is not a current-function local, so the `let` creates a fresh
   // binding instead of erroring.
   resolve_with_bindings(
     "(fn transform (x:Int) ->Int (std::+ x x))
