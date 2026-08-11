@@ -981,3 +981,135 @@ fn host_builtins_can_receive_and_return_tuples() {
     .unwrap_or_else(|e| panic!("call_main failed: {e}"));
   assert_eq!(exec.run_until_done().unwrap(), SLValue::Int(9));
 }
+
+/// `std::remove-idx` returns the element at `index` paired with the list with
+/// that element removed, as a `(Tuple A (List A))`. Negative indices count from
+/// the end, mirroring `std::idx`.
+#[test]
+fn remove_idx_returns_first_element_and_remaining_list() {
+  assert_eq!(
+    eval_builtin_main(
+      "(fn main () -> (Tuple Int (List Int)) (std::remove-idx (std::list 1 2 3) 0))"
+    )
+    .unwrap(),
+    SLValue::Tuple(vec![
+      SLValue::Int(1),
+      SLValue::List(vec![SLValue::Int(2), SLValue::Int(3)]),
+    ])
+  );
+}
+
+#[test]
+fn remove_idx_removes_from_the_middle() {
+  assert_eq!(
+    eval_builtin_main(
+      "(fn main () -> (Tuple Int (List Int)) (std::remove-idx (std::list 1 2 3) 1))"
+    )
+    .unwrap(),
+    SLValue::Tuple(vec![
+      SLValue::Int(2),
+      SLValue::List(vec![SLValue::Int(1), SLValue::Int(3)]),
+    ])
+  );
+}
+
+#[test]
+fn remove_idx_negative_index_counts_from_end() {
+  assert_eq!(
+    eval_builtin_main(
+      "(fn main () -> (Tuple Int (List Int)) (std::remove-idx (std::list 1 2 3) -1))"
+    )
+    .unwrap(),
+    SLValue::Tuple(vec![
+      SLValue::Int(3),
+      SLValue::List(vec![SLValue::Int(1), SLValue::Int(2)]),
+    ])
+  );
+}
+
+#[test]
+fn remove_idx_negative_index_minus_two() {
+  assert_eq!(
+    eval_builtin_main(
+      "(fn main () -> (Tuple Int (List Int)) (std::remove-idx (std::list 1 2 3) -2))"
+    )
+    .unwrap(),
+    SLValue::Tuple(vec![
+      SLValue::Int(2),
+      SLValue::List(vec![SLValue::Int(1), SLValue::Int(3)]),
+    ])
+  );
+}
+
+#[test]
+fn remove_idx_single_element_list_yields_empty_list() {
+  assert_eq!(
+    eval_builtin_main(
+      "(fn main () -> (Tuple Int (List Int)) (std::remove-idx (std::list 7) 0))"
+    )
+    .unwrap(),
+    SLValue::Tuple(vec![SLValue::Int(7), SLValue::List(vec![])])
+  );
+}
+
+#[test]
+fn remove_idx_leaves_original_list_unchanged() {
+  let source = "(fn main () -> (List Int)
+    (let xs (std::list 1 2 3))
+    (std::remove-idx xs 1)
+    xs)";
+  assert_eq!(
+    eval_builtin_main(source).unwrap(),
+    SLValue::List(vec![SLValue::Int(1), SLValue::Int(2), SLValue::Int(3)])
+  );
+}
+
+#[test]
+fn remove_idx_out_of_range_errors() {
+  let err = eval_builtin_main(
+    "(fn main () -> (Tuple Int (List Int)) (std::remove-idx (std::list 1 2 3) 3))",
+  )
+  .unwrap_err();
+  assert!(err.contains("remove-idx"), "got: {}", err);
+  assert!(err.contains("out of range"), "got: {}", err);
+}
+
+#[test]
+fn remove_idx_negative_out_of_range_errors() {
+  let err = eval_builtin_main(
+    "(fn main () -> (Tuple Int (List Int)) (std::remove-idx (std::list 1 2 3) -4))",
+  )
+  .unwrap_err();
+  assert!(err.contains("remove-idx"), "got: {}", err);
+  assert!(err.contains("out of range"), "got: {}", err);
+}
+
+#[test]
+fn remove_idx_on_empty_list_errors() {
+  let err = eval_builtin_main(
+    "(fn main () -> (Tuple Int (List Int)) (std::remove-idx (std::list) 0))",
+  )
+  .unwrap_err();
+  assert!(err.contains("remove-idx"), "got: {}", err);
+  assert!(err.contains("out of range"), "got: {}", err);
+}
+
+#[test]
+fn remove_idx_non_list_errors() {
+  let err = eval_builtin_main(
+    "(fn main () -> (Tuple Int (List Int)) (std::remove-idx 5 0))",
+  )
+  .unwrap_err();
+  assert!(err.contains("expected"), "got: {}", err);
+  assert!(err.contains("List"), "got: {}", err);
+}
+
+#[test]
+fn remove_idx_non_int_index_errors() {
+  let err = eval_builtin_main(
+    "(fn main () -> (Tuple Int (List Int)) (std::remove-idx (std::list 1 2 3) \"x\"))",
+  )
+  .unwrap_err();
+  assert!(err.contains("expected"), "got: {}", err);
+  assert!(err.contains("Int"), "got: {}", err);
+}

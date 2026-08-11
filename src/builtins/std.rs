@@ -126,6 +126,21 @@ pub fn library() -> Library {
       ),
       idx,
     ))
+    .with_builtin(Builtin::contextual_value(
+      "std",
+      "remove-idx",
+      Some(2),
+      sig(
+        &[("A", &[])],
+        vec![Signature::list(Signature::var("A")), Signature::Int],
+        None,
+        Signature::tuple(vec![
+          Signature::var("A"),
+          Signature::list(Signature::var("A")),
+        ]),
+      ),
+      remove_idx,
+    ))
     .with_builtin(Builtin::contextual(
       "std",
       "push",
@@ -422,6 +437,41 @@ fn idx<'gc, 'call>(
     items
       .get(normalized as usize)
       .ok_or_else(|| "idx: normalized index is out of range".to_string())
+  }
+}
+
+fn remove_idx<'gc, 'call>(
+  ctx: &mut HostCtx<'gc, 'call>,
+  args: &[Value<'gc>],
+) -> Result<Value<'gc>, String> {
+  let (list, index_value) = (args[0], args[1]);
+  let items = list.as_list().map_err(|_| {
+    format!(
+      "remove-idx: expected (List, Int), got ({}, {})",
+      list.type_name(),
+      index_value.type_name()
+    )
+  })?;
+  let index = index_value.as_int().map_err(|_| {
+    format!(
+      "remove-idx: expected (List, Int), got ({}, {})",
+      list.type_name(),
+      index_value.type_name()
+    )
+  })?;
+  let len = items.len() as i64;
+  let normalized = if index < 0 { index + len } else { index };
+  if normalized < 0 || normalized >= len {
+    Err(format!(
+      "remove-idx: index {} out of range for list of length {}",
+      index, len
+    ))
+  } else {
+    let r = items
+      .remove(ctx.mc(), normalized as usize)
+      .ok_or_else(|| "remove-idx: normalized index is out of range".to_string())?;
+    let new_list = ctx.alloc_heap(SLVal::List(r.1));
+    ctx.alloc_tuple(vec![r.0, new_list])
   }
 }
 
