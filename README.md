@@ -490,6 +490,16 @@ fn main () -> Int
 
 Omitting the annotation on a positional field is a compile error.
 
+`from_value` guards against deeply-nested guest values by limiting the depth.
+This can be important to avoid blowing the stack both during the `from_value`
+call and during later recursive processing of your data structures. The default
+limit is `SafelispValue::DEFAULT_FROM_VALUE_DEPTH`; pass an explicit limit via
+`from_value_with_depth` when you need more or less:
+
+```rust
+let back: Dice = Dice::from_value_with_depth(ctx, value, 16)?;
+```
+
 ## Features
 
 Security:

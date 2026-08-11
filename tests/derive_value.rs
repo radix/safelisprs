@@ -40,6 +40,19 @@ enum Dice {
   Crit,
 }
 
+/// Build a left-leaning `Plus` chain of `n` nested levels (a `Flat` at the
+/// bottom), small enough that `to_value`/`from_value` recursion stays shallow
+/// for the test.
+fn deep_dice(n: u32) -> Dice {
+  match n {
+    0 => Dice::Flat { value: 0 },
+    _ => Dice::Plus(
+      Box::new(deep_dice(n - 1)),
+      Box::new(Dice::Flat { value: 0 }),
+    ),
+  }
+}
+
 fn library() -> Library {
   Library::new()
     .with_type(Point::type_spec())
@@ -132,6 +145,27 @@ fn library() -> Library {
         Ok(Value::Int(count))
       },
     ))
+    .with_builtin(Builtin::contextual_value(
+      "host",
+      "depth-check",
+      Some(2),
+      sig(
+        &[],
+        vec![Signature::Int, Signature::Int],
+        None,
+        Signature::Int,
+      ),
+      |ctx, args| {
+        let n = ctx.args("host::depth-check", args).int(0)? as u32;
+        let budget = ctx.args("host::depth-check", args).int(1)? as usize;
+        let dice = deep_dice(n);
+        let value = dice.to_value(ctx)?;
+        match Dice::from_value_with_depth(ctx, value, budget) {
+          Ok(back) => Ok(Value::Int(if back == dice { 1 } else { 0 })),
+          Err(_) => Ok(Value::Int(2)),
+        }
+      },
+    ))
 }
 
 fn run(source: &str) -> Result<SLValue, String> {
@@ -198,9 +232,29 @@ fn tuple_variant_is_constructible_in_source() {
 fn readme_match_example_compiles() {
   // Mirrors the match example in README.md's "Deriving Conversions" section:
   // constructs a tuple variant by name and matches it (with a default arm).
-  let source = "(fn main () ->Int
-  (match (new arp::Dice::BestOf count:2 dice:(new arp::Dice::Flat value:-1))
+  // Mirrors the layout-form match example in README.md exactly.
+  let source = "fn main () -> Int
+  let flat (new arp::Dice::Flat value:3)
+  match (new arp::Dice::BestOf count:2 dice:flat)
     (BestOf count dice) => count
-    _ => 0))";
+    _ => 0";
   assert_eq!(run(source), Ok(SLValue::Int(2)));
+}
+
+#[test]
+fn from_value_exceeding_depth_budget_errors() {
+  // A depth-5 chain decoded with a budget of 3 must hit the depth limit.
+  assert_eq!(
+    run("(fn main () ->Int (host::depth-check 5 3))"),
+    Ok(SLValue::Int(2))
+  );
+}
+
+#[test]
+fn from_value_within_depth_budget_succeeds() {
+  // The same depth-5 chain decoded with a budget of 10 round-trips fine.
+  assert_eq!(
+    run("(fn main () ->Int (host::depth-check 5 10))"),
+    Ok(SLValue::Int(1))
+  );
 }

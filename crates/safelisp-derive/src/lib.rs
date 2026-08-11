@@ -204,7 +204,11 @@ fn from_value_stmts(fields: &[Field], qualified: &str) -> TokenStream {
     let err = format!("{qualified} missing field {i}");
     quote! {
       let #binding = fields.get(#i).copied().ok_or_else(|| #err.to_string())?;
-      let #binding = <#ty as ::safelisp::SafelispValue>::from_value(ctx, #binding)?;
+      let #binding = <#ty as ::safelisp::SafelispValue>::from_value_with_depth(
+        ctx,
+        #binding,
+        depth - 1,
+      )?;
     }
   });
   quote! { #(#stmts)* }
@@ -311,10 +315,17 @@ fn expand_struct(module: &str, name: &Ident, fields: &Fields) -> syn::Result<Tok
           }
         }
       }
-      fn from_value<'gc>(
+      fn from_value_with_depth<'gc>(
         ctx: &::safelisp::HostCtx<'gc, '_>,
         value: ::safelisp::Value<'gc>,
+        depth: usize,
       ) -> Result<Self, String> {
+        if depth == 0 {
+          return Err(format!(
+            "{}::{} conversion depth limit exceeded",
+            #module, stringify!(#name),
+          ));
+        }
         let instance = ctx.struct_instance(&value, #module, stringify!(#name))?;
         let fields = &instance.fields;
         #decode
@@ -390,10 +401,17 @@ fn expand_enum(
           #(#to_arms)*
         }
       }
-      fn from_value<'gc>(
+      fn from_value_with_depth<'gc>(
         ctx: &::safelisp::HostCtx<'gc, '_>,
         value: ::safelisp::Value<'gc>,
+        depth: usize,
       ) -> Result<Self, String> {
+        if depth == 0 {
+          return Err(format!(
+            "{}::{} conversion depth limit exceeded",
+            #module, stringify!(#name),
+          ));
+        }
         let instance = ctx.enum_instance(&value, #module, stringify!(#name))?;
         let fields = &instance.fields;
         match instance.variant {

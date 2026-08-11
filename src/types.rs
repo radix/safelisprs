@@ -156,8 +156,29 @@ pub trait SafelispValue: Sized {
   fn sl_signature() -> Signature;
   /// Convert `self` into an in-arena SafeLisp value.
   fn to_value<'gc>(&self, ctx: &mut HostCtx<'gc, '_>) -> Result<Value<'gc>, String>;
-  /// Convert an in-arena SafeLisp value back into this Rust type.
-  fn from_value<'gc>(ctx: &HostCtx<'gc, '_>, value: Value<'gc>) -> Result<Self, String>;
+
+  /// Default depth allowed when converting data structures with
+  /// [`Self::from_value`]. A type may override this if it routinely appears
+  /// deeper or shallower than the default.
+  const DEFAULT_FROM_VALUE_DEPTH: usize = 128;
+
+  /// Convert a SafeLisp value back into this Rust type using
+  /// [`Self::DEFAULT_FROM_VALUE_DEPTH`] as the depth limit. Equivalent to
+  /// calling [`Self::from_value_with_depth`] with that limit.
+  fn from_value<'gc>(ctx: &HostCtx<'gc, '_>, value: Value<'gc>) -> Result<Self, String> {
+    Self::from_value_with_depth(ctx, value, Self::DEFAULT_FROM_VALUE_DEPTH)
+  }
+
+  /// Convert a SafeLisp value back into this Rust type with an explicit depth
+  /// limit.
+  ///
+  /// Each level of nested derived struct or enum consumes one unit of `depth`;
+  /// the conversion returns an error once `depth` reaches zero.
+  fn from_value_with_depth<'gc>(
+    ctx: &HostCtx<'gc, '_>,
+    value: Value<'gc>,
+    depth: usize,
+  ) -> Result<Self, String>;
 }
 
 /// A named SafeLisp type that can describe itself to the compiler.
@@ -185,9 +206,10 @@ macro_rules! impl_int {
         fn to_value<'gc>(&self, _ctx: &mut HostCtx<'gc, '_>) -> Result<Value<'gc>, String> {
           Ok(Value::Int(i64::from(*self)))
         }
-        fn from_value<'gc>(
+        fn from_value_with_depth<'gc>(
           _ctx: &HostCtx<'gc, '_>,
           value: Value<'gc>,
+          _depth: usize,
         ) -> Result<Self, String> {
           let n = value.as_int()?;
           <$ty>::try_from(n).map_err(|_| {
@@ -211,9 +233,10 @@ macro_rules! impl_float {
         fn to_value<'gc>(&self, _ctx: &mut HostCtx<'gc, '_>) -> Result<Value<'gc>, String> {
           Ok(Value::Float(f64::from(*self)))
         }
-        fn from_value<'gc>(
+        fn from_value_with_depth<'gc>(
           _ctx: &HostCtx<'gc, '_>,
           value: Value<'gc>,
+          _depth: usize,
         ) -> Result<Self, String> {
           Ok(value.as_float()? as $ty)
         }
@@ -231,7 +254,11 @@ impl SafelispValue for bool {
   fn to_value<'gc>(&self, _ctx: &mut HostCtx<'gc, '_>) -> Result<Value<'gc>, String> {
     Ok(Value::Bool(*self))
   }
-  fn from_value<'gc>(_ctx: &HostCtx<'gc, '_>, value: Value<'gc>) -> Result<Self, String> {
+  fn from_value_with_depth<'gc>(
+    _ctx: &HostCtx<'gc, '_>,
+    value: Value<'gc>,
+    _depth: usize,
+  ) -> Result<Self, String> {
     value.as_bool()
   }
 }
@@ -243,7 +270,11 @@ impl SafelispValue for () {
   fn to_value<'gc>(&self, _ctx: &mut HostCtx<'gc, '_>) -> Result<Value<'gc>, String> {
     Ok(Value::Void)
   }
-  fn from_value<'gc>(_ctx: &HostCtx<'gc, '_>, value: Value<'gc>) -> Result<Self, String> {
+  fn from_value_with_depth<'gc>(
+    _ctx: &HostCtx<'gc, '_>,
+    value: Value<'gc>,
+    _depth: usize,
+  ) -> Result<Self, String> {
     value.as_void()
   }
 }
@@ -255,7 +286,11 @@ impl SafelispValue for String {
   fn to_value<'gc>(&self, ctx: &mut HostCtx<'gc, '_>) -> Result<Value<'gc>, String> {
     Ok(ctx.alloc_heap(SLVal::String(self.clone())))
   }
-  fn from_value<'gc>(_ctx: &HostCtx<'gc, '_>, value: Value<'gc>) -> Result<Self, String> {
+  fn from_value_with_depth<'gc>(
+    _ctx: &HostCtx<'gc, '_>,
+    value: Value<'gc>,
+    _depth: usize,
+  ) -> Result<Self, String> {
     Ok(value.as_string()?.to_string())
   }
 }
@@ -267,8 +302,14 @@ impl<T: SafelispValue> SafelispValue for Box<T> {
   fn to_value<'gc>(&self, ctx: &mut HostCtx<'gc, '_>) -> Result<Value<'gc>, String> {
     (**self).to_value(ctx)
   }
-  fn from_value<'gc>(ctx: &HostCtx<'gc, '_>, value: Value<'gc>) -> Result<Self, String> {
-    Ok(Box::new(T::from_value(ctx, value)?))
+  fn from_value_with_depth<'gc>(
+    ctx: &HostCtx<'gc, '_>,
+    value: Value<'gc>,
+    depth: usize,
+  ) -> Result<Self, String> {
+    // `Box<T>` is a transparent host-side indirection over the same SafeLisp
+    // value as `T`, so it forwards the depth limit unchanged.
+    Ok(Box::new(T::from_value_with_depth(ctx, value, depth)?))
   }
 }
 
@@ -284,8 +325,15 @@ impl<T: SafelispValue> SafelispValue for Vec<T> {
     let list = ctx.list_from_vec(items);
     Ok(ctx.alloc_heap(SLVal::List(list)))
   }
-  fn from_value<'gc>(ctx: &HostCtx<'gc, '_>, value: Value<'gc>) -> Result<Self, String> {
+  fn from_value_with_depth<'gc>(
+    ctx: &HostCtx<'gc, '_>,
+    value: Value<'gc>,
+    depth: usize,
+  ) -> Result<Self, String> {
     let list = value.as_list()?;
-    list.iter().map(|item| T::from_value(ctx, item)).collect()
+    list
+      .iter()
+      .map(|item| T::from_value_with_depth(ctx, item, depth))
+      .collect()
   }
 }
