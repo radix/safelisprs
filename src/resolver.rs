@@ -337,4 +337,4 @@ fn nested_function_group_end(expressions: &[AST], start: usize) -> usize {
 }
 
 #[cfg(test)]
-mod prelude_tests;
+mod resolver_tests;

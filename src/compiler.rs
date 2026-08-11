@@ -5,7 +5,7 @@ use crate::closure::transform_closures_in_module;
 use crate::parser::{
   self, ASTKind, BindingId, Identifier, MatchPattern, ResolvedName, AST, DEFAULT_MAX_PARSE_DEPTH,
 };
-use crate::prelude::resolve_module_names;
+use crate::resolver::resolve_module_names;
 use crate::typecheck::ConstructionInfo;
 use crate::typecheck::{CheckedModule, MatchArmInfo, TypecheckInfo};
 

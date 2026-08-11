@@ -57,7 +57,7 @@ impl BindingId {
 
 /// A source name paired with the lexical binding it resolves to.
 ///
-/// The parser creates unresolved names; [`crate::prelude::resolve_module_names`]
+/// The parser creates unresolved names; [`crate::resolver::resolve_module_names`]
 /// assigns binding IDs before typechecking and lowering.
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub(crate) struct ResolvedName {

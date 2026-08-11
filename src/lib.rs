@@ -19,7 +19,7 @@ mod closure;
 mod compiler;
 mod interpreter;
 mod parser;
-mod prelude;
+mod resolver;
 mod typecheck;
 mod types;
 

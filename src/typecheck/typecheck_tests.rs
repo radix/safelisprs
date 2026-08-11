@@ -1,7 +1,7 @@
 use super::*;
 use crate::builtins::{CustomTypeSpec, Library};
 use crate::parser::read_multiple;
-use crate::prelude::resolve_module_names;
+use crate::resolver::resolve_module_names;
 use crate::types::Signature;
 
 fn check(source: &str) -> Result<(), TypeError> {

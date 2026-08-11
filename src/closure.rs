@@ -6,7 +6,7 @@ use crate::parser::{
   try_map_ast_children, ASTKind, BindingId, Function, MatchArm, MatchPattern, ResolvedName, Span,
   AST,
 };
-use crate::prelude::resolve_module_names;
+use crate::resolver::resolve_module_names;
 
 pub fn transform_closures_in_module(module_name: &str, items: &[AST]) -> Result<Vec<AST>, String> {
   //! There isn't technically anything called a "closure" in either the runtime or compile time of
