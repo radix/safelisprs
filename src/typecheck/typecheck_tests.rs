@@ -706,6 +706,22 @@ fn map_accepts_top_level_function() {
 }
 
 #[test]
+fn filter_requires_a_bool_returning_predicate() {
+  check(
+    "[fn small [x:Int] ->Bool [std::< x 3]]
+       [fn main [] ->[List Int] [std::filter [std::range 0 5] small]]",
+  )
+  .unwrap();
+
+  let error = check(
+    "[fn sq [x:Int] ->Int [std::* x x]]
+       [fn main [] ->[List Int] [std::filter [std::range 0 5] sq]]",
+  )
+  .unwrap_err();
+  assert!(error.message.contains("expected `Bool`"), "{error}");
+}
+
+#[test]
 fn rigid_variable_cannot_be_replaced_by_a_concrete_type() {
   let error = check("[fn bad [a:A] ->A 5]").unwrap_err();
   assert!(error.message.contains("rigid type variable `A`"), "{error}");

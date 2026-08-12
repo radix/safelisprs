@@ -967,6 +967,97 @@ fn map_non_list_errors() {
   assert!(err.contains("expected `[List"), "got: {}", err);
 }
 
+/// `std::filter` keeps the elements the predicate accepts, in order.
+#[test]
+fn filter_keeps_matching_elements() {
+  assert_eq!(
+    eval_builtin_main(
+      "[fn main [] ->[List Int]
+           [fn small [x:Int] ->Bool [std::< x 3]]
+           [std::filter [std::list 1 5 2 4 3] small]]"
+    )
+    .unwrap(),
+    SLValue::List(vec![SLValue::Int(1), SLValue::Int(2)])
+  );
+}
+
+#[test]
+fn filter_empty_list() {
+  assert_eq!(
+    eval_builtin_main(
+      "[fn main [] ->[List Int]
+           [fn yes [_x:Int] ->Bool true]
+           [std::filter [std::list] yes]]"
+    )
+    .unwrap(),
+    SLValue::List(vec![])
+  );
+}
+
+#[test]
+fn filter_keeps_none_and_all() {
+  assert_eq!(
+    eval_builtin_main(
+      "[fn main [] ->[List Int]
+           [fn no [_x:Int] ->Bool false]
+           [std::filter [std::list 1 2 3] no]]"
+    )
+    .unwrap(),
+    SLValue::List(vec![])
+  );
+  assert_eq!(
+    eval_builtin_main(
+      "[fn main [] ->[List Int]
+           [fn yes [_x:Int] ->Bool true]
+           [std::filter [std::list 1 2 3] yes]]"
+    )
+    .unwrap(),
+    SLValue::List(vec![SLValue::Int(1), SLValue::Int(2), SLValue::Int(3)])
+  );
+}
+
+#[test]
+fn filter_on_strings() {
+  assert_eq!(
+    eval_builtin_main(
+      "[fn main [] ->[List String]
+           [fn is-a [x:String] ->Bool [std::== x \"a\"]]
+           [std::filter [std::list \"a\" \"b\" \"a\"] is-a]]"
+    )
+    .unwrap(),
+    SLValue::List(vec![
+      SLValue::String("a".to_string()),
+      SLValue::String("a".to_string())
+    ])
+  );
+}
+
+#[test]
+fn filter_builds_large_persistent_list_in_order() {
+  let result = eval_builtin_main(
+    "[fn main [] ->[List Int]
+       [fn even [x:Int] ->Bool [std::== [std::- x [std::* [std::/ x 2] 2]] 0]]
+       [std::filter [std::range 0 1000] even]]",
+  )
+  .unwrap();
+  let expected = (0..1_000)
+    .filter(|x| x % 2 == 0)
+    .map(SLValue::Int)
+    .collect();
+  assert_eq!(result, SLValue::List(expected));
+}
+
+#[test]
+fn filter_non_list_errors() {
+  let err = eval_builtin_main(
+    "[fn main [] ->Int
+         [fn yes [_x:Int] ->Bool true]
+         [std::filter 5 yes]]",
+  )
+  .unwrap_err();
+  assert!(err.contains("expected `[List"), "got: {}", err);
+}
+
 /// `rand::roll!` rejects non-positive sides with a runtime error.
 #[test]
 fn rand_roll_rejects_non_positive_sides() {

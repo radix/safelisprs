@@ -272,6 +272,28 @@ pub fn library() -> Library {
       map_start,
       map_resume,
     ))
+    // (std::filter list pred) -> List
+    //   Calls `pred` (a callable value: FunctionRef or Partial) with each
+    //   element of `list` and collects the elements for which it returned
+    //   `true`, preserving their original order. Like [`map`], it is a
+    //   [`HostCtx`] builtin so the predicate runs through the ordinary
+    //   resumable interpreter loop.
+    .with_builtin(Builtin::resumable(
+      "std",
+      "filter",
+      Some(2),
+      sig(
+        &[("A", &[])],
+        vec![
+          Signature::list(Signature::var("A")),
+          Signature::function(vec![Signature::var("A")], Signature::Bool),
+        ],
+        None,
+        Signature::list(Signature::var("A")),
+      ),
+      filter_start,
+      filter_resume,
+    ))
     .with_builtin(Builtin::contextual(
       "std",
       "slice",
@@ -286,8 +308,16 @@ pub fn library() -> Library {
     ))
 }
 
-fn map_start<'gc, 'call>(ctx: &mut HostCtx<'gc, 'call>, args: &[Value<'gc>]) -> Result<(), String> {
-  ctx.args("std::map", args).list(0)?;
+/// Set up the durable stack state shared by the list-walking builtins
+/// (`std::map`, `std::filter`): the source list, the callback, the index we're
+/// currently working on, and the results accumulated so far. `op` labels the
+/// operation for error messages.
+fn iteration_start<'gc, 'call>(
+  ctx: &mut HostCtx<'gc, 'call>,
+  op: &'static str,
+  args: &[Value<'gc>],
+) -> Result<(), String> {
+  ctx.args(op, args).list(0)?;
   let (list, func) = (args[0], args[1]);
   let results = ctx.empty_list();
   let results = ctx.alloc_heap(SLVal::List(results));
@@ -298,23 +328,21 @@ fn map_start<'gc, 'call>(ctx: &mut HostCtx<'gc, 'call>, args: &[Value<'gc>]) -> 
   Ok(())
 }
 
-fn pop_map_state<'gc, 'call>(
+fn pop_iteration_state<'gc, 'call>(
   ctx: &mut HostCtx<'gc, 'call>,
+  op: &str,
 ) -> Result<(Value<'gc>, Value<'gc>, usize, Value<'gc>), String> {
   let results = ctx.pop()?;
-  results.as_list().map_err(|_| {
-    format!(
-      "std::map: expected result List, got {}",
-      results.type_name()
-    )
-  })?;
+  results
+    .as_list()
+    .map_err(|_| format!("{op}: expected result List, got {}", results.type_name()))?;
   let index = match ctx.pop()? {
     Value::Int(value) if value >= 0 => {
-      usize::try_from(value).map_err(|_| "std::map: index does not fit usize".to_string())?
+      usize::try_from(value).map_err(|_| format!("{op}: index does not fit usize"))?
     }
     other => {
       return Err(format!(
-        "std::map: expected index Int, got {}",
+        "{op}: expected index Int, got {}",
         other.type_name()
       ))
     }
@@ -324,14 +352,15 @@ fn pop_map_state<'gc, 'call>(
   Ok((source_list, func, index, results))
 }
 
-fn push_map_state<'gc, 'call>(
+fn push_iteration_state<'gc, 'call>(
   ctx: &mut HostCtx<'gc, 'call>,
+  op: &str,
   source_list: Value<'gc>,
   func: Value<'gc>,
   index: usize,
   results: Value<'gc>,
 ) -> Result<(), String> {
-  let index = i64::try_from(index).map_err(|_| "std::map: index overflow".to_string())?;
+  let index = i64::try_from(index).map_err(|_| format!("{op}: index overflow"))?;
   ctx.push(source_list);
   ctx.push(func);
   ctx.push(Value::Int(index));
@@ -339,19 +368,39 @@ fn push_map_state<'gc, 'call>(
   Ok(())
 }
 
-fn append_map_result<'gc, 'call>(
+fn append_iteration_result<'gc, 'call>(
   ctx: &mut HostCtx<'gc, 'call>,
+  op: &str,
   results: Value<'gc>,
   value: Value<'gc>,
 ) -> Result<Value<'gc>, String> {
-  let items = results.as_list().map_err(|_| {
-    format!(
-      "std::map: expected result List, got {}",
-      results.type_name()
-    )
-  })?;
+  let items = results
+    .as_list()
+    .map_err(|_| format!("{op}: expected result List, got {}", results.type_name()))?;
   let appended = items.append(ctx.mc(), value);
   Ok(ctx.alloc_heap(SLVal::List(appended)))
+}
+
+/// Fetch the element the walk is currently positioned on, or `None` when the
+/// index is one past the end (the walk is finished).
+fn iteration_item<'gc>(
+  source_list: Value<'gc>,
+  op: &str,
+  index: usize,
+) -> Result<Option<Value<'gc>>, String> {
+  let items = source_list.as_list().map_err(|e| format!("{op}: {e}"))?;
+  let len = items.len();
+  if index == len {
+    return Ok(None);
+  }
+  items
+    .get(index)
+    .ok_or_else(|| format!("{op}: index {index} out of range for list of length {len}"))
+    .map(Some)
+}
+
+fn map_start<'gc, 'call>(ctx: &mut HostCtx<'gc, 'call>, args: &[Value<'gc>]) -> Result<(), String> {
+  iteration_start(ctx, "std::map", args)
 }
 
 fn map_resume<'gc, 'call>(
@@ -359,30 +408,67 @@ fn map_resume<'gc, 'call>(
   pending_result: Option<Value<'gc>>,
 ) -> Result<HostPoll<'gc>, String> {
   if let Some(callback_result) = pending_result {
-    let (source_list, func, index, results) = pop_map_state(ctx)?;
+    let (source_list, func, index, results) = pop_iteration_state(ctx, "std::map")?;
     let next_index = index
       .checked_add(1)
       .ok_or_else(|| "std::map: index overflow".to_string())?;
-    let results = append_map_result(ctx, results, callback_result)?;
-    push_map_state(ctx, source_list, func, next_index, results)?;
+    let results = append_iteration_result(ctx, "std::map", results, callback_result)?;
+    push_iteration_state(ctx, "std::map", source_list, func, next_index, results)?;
     return Ok(HostPoll::Pending);
   }
 
-  let (source_list, func, index, results) = pop_map_state(ctx)?;
-  let items = source_list
-    .as_list()
-    .map_err(|e| format!("std::map: {e}"))?;
-  let item = items.get(index);
-  let len = items.len();
+  let (source_list, func, index, results) = pop_iteration_state(ctx, "std::map")?;
+  match iteration_item(source_list, "std::map", index)? {
+    None => Ok(HostPoll::Ready(results)),
+    Some(item) => {
+      push_iteration_state(ctx, "std::map", source_list, func, index, results)?;
+      ctx.call(func, &[item])?;
+      Ok(HostPoll::Pending)
+    }
+  }
+}
 
-  if index == len {
-    Ok(HostPoll::Ready(results))
-  } else {
-    let item = item
-      .ok_or_else(|| format!("std::map: index {index} out of range for list of length {len}"))?;
-    push_map_state(ctx, source_list, func, index, results)?;
-    ctx.call(func, &[item])?;
-    Ok(HostPoll::Pending)
+fn filter_start<'gc, 'call>(
+  ctx: &mut HostCtx<'gc, 'call>,
+  args: &[Value<'gc>],
+) -> Result<(), String> {
+  iteration_start(ctx, "std::filter", args)
+}
+
+fn filter_resume<'gc, 'call>(
+  ctx: &mut HostCtx<'gc, 'call>,
+  pending_result: Option<Value<'gc>>,
+) -> Result<HostPoll<'gc>, String> {
+  if let Some(callback_result) = pending_result {
+    let (source_list, func, index, results) = pop_iteration_state(ctx, "std::filter")?;
+    let keep = callback_result
+      .as_bool()
+      .map_err(|e| format!("std::filter: predicate {e}"))?;
+    // The predicate result decides whether the element at `index` — not the
+    // predicate's own return value — is kept.
+    let results = if keep {
+      let item = iteration_item(source_list, "std::filter", index)?.ok_or_else(|| {
+        format!("std::filter: index {index} out of range while collecting result")
+      })?;
+      append_iteration_result(ctx, "std::filter", results, item)?
+    } else {
+      results
+    };
+    let next_index = index
+      .checked_add(1)
+      .ok_or_else(|| "std::filter: index overflow".to_string())?;
+    push_iteration_state(ctx, "std::filter", source_list, func, next_index, results)?;
+    return Ok(HostPoll::Pending);
+  }
+
+  let (source_list, func, index, results) = pop_iteration_state(ctx, "std::filter")?;
+  match iteration_item(source_list, "std::filter", index)? {
+    None => Ok(HostPoll::Ready(results)),
+    Some(item) => {
+      push_iteration_state(ctx, "std::filter", source_list, func, index, results)?;
+      ctx.call(func, &[item])?;
+      Ok(HostPoll::Pending)
+    }
   }
 }
 
