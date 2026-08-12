@@ -162,6 +162,38 @@ fn bump-if-zero [x: Int] -> Int
   result
 ```
 
+### Infix notation
+
+Arithmetic and comparison operators may also be written with parentheses in
+infix notation. A parenthesized infix expression desugars to exactly the same
+call form, so the two are interchangeable:
+
+```lisp
+fn main [] -> Int
+  (1 + (3 * 7))    # same as [+ 1 [* 3 7]]]
+```
+
+Operators follow PEMDAS, with `*` and `/` binding tighter than `+` and `-`, and
+comparisons binding looser than all arithmetic.
+
+```lisp
+fn main [] -> Int
+  (3 * 7 + 3)    # [+ [* 3 7] 3]
+```
+
+And you can call functions with normal bracket syntax inside of parentheses.
+
+```lisp
+fn main [] -> String
+    let x 2
+    let rng [rand::rng 0 "rolls"]
+    if (x == 1 + [rand::roll! rng 2])
+      "yay"
+    else
+      "boo"
+```
+
+
 ### Boolean forms
 
 `and` and `or` accept only Boolean operands and evaluate them left to right,

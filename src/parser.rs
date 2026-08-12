@@ -608,6 +608,8 @@ pub(crate) struct Bound {
 enum TokenKind {
   LBracket,
   RBracket,
+  LParen,
+  RParen,
   Colon,
   DoubleColon,
   Arrow,
@@ -653,6 +655,8 @@ impl fmt::Display for TokenKind {
     match self {
       TokenKind::LBracket => write!(formatter, "["),
       TokenKind::RBracket => write!(formatter, "]"),
+      TokenKind::LParen => write!(formatter, "("),
+      TokenKind::RParen => write!(formatter, ")"),
       TokenKind::Colon => write!(formatter, ":"),
       TokenKind::DoubleColon => write!(formatter, "::"),
       TokenKind::Arrow => write!(formatter, "->"),
@@ -840,6 +844,20 @@ impl<'a> Lexer<'a> {
             span: start..self.offset,
           }
         }
+        '(' => {
+          self.bump_char();
+          Token {
+            kind: TokenKind::LParen,
+            span: start..self.offset,
+          }
+        }
+        ')' => {
+          self.bump_char();
+          Token {
+            kind: TokenKind::RParen,
+            span: start..self.offset,
+          }
+        }
         ':' if self.source[self.offset..].starts_with("::") => {
           self.bump_char();
           self.bump_char();
@@ -887,11 +905,11 @@ impl<'a> Lexer<'a> {
       match token.kind {
         TokenKind::Newline if self.bracket_depth == 0 => self.finish_line(Some(token.span)),
         TokenKind::Newline => {}
-        TokenKind::LBracket => {
+        TokenKind::LBracket | TokenKind::LParen => {
           self.push_line_token(token)?;
           self.bracket_depth += 1;
         }
-        TokenKind::RBracket => {
+        TokenKind::RBracket | TokenKind::RParen => {
           self.push_line_token(token)?;
           self.bracket_depth = self.bracket_depth.saturating_sub(1);
         }
@@ -1155,7 +1173,7 @@ fn identifier_token_kind(text: &str) -> TokenKind {
 }
 
 fn is_delimiter(ch: char) -> bool {
-  ch.is_whitespace() || matches!(ch, '[' | ']' | '"' | '#' | ':')
+  ch.is_whitespace() || matches!(ch, '[' | ']' | '(' | ')' | '"' | '#' | ':')
 }
 
 fn is_numeric_candidate(text: &str) -> bool {
@@ -1293,6 +1311,7 @@ impl Parser {
     let token = self.advance();
     match token.kind {
       TokenKind::LBracket => self.parse_list(token.span.start, FormMode::Bracket),
+      TokenKind::LParen => self.parse_infix(token.span.start),
       kind @ (TokenKind::Let
       | TokenKind::Shd
       | TokenKind::Assign
@@ -1340,6 +1359,51 @@ impl Parser {
         "an expression",
       )),
     }
+  }
+
+  /// Parse a parenthesized infix expression.
+  fn parse_infix(&mut self, start: usize) -> Result<AST, ParseError> {
+    self.enter_depth()?;
+    let result = self.parse_infix_climb(0);
+    self.leave_depth();
+    let mut left = result?;
+    if let Some(close) = self.check_token(TokenKind::RParen) {
+      left.span = start..close.span.end;
+      Ok(left)
+    } else {
+      Err(
+        ParseError::new(
+          self.peek().span.clone(),
+          "expected `)` to close infix expression",
+        )
+        .expected("an infix operator")
+        .expected("`)`"),
+      )
+    }
+  }
+
+  /// Precedence-climbing core for [`parse_infix`].
+  fn parse_infix_climb(&mut self, min_prec: u8) -> Result<AST, ParseError> {
+    let mut left = self.parse_expr()?;
+    // A lower-precedence operator belongs to an enclosing call, so we must
+    // leave it in the token stream.
+    while let TokenKind::Sym(name) = &self.peek().kind {
+      let op = name.clone();
+      let Some(prec) = infix_precedence(&op) else {
+        break;
+      };
+      if prec < min_prec {
+        break;
+      }
+      self.advance();
+      let right = self.parse_infix_climb(prec + 1)?;
+      let span = left.span.start..right.span.end;
+      left = AST::new(
+        ASTKind::CallFixed(Identifier::Bare(op.into()), vec![left, right]),
+        span,
+      );
+    }
+    Ok(left)
   }
 
   fn parse_list(&mut self, start: usize, mode: FormMode) -> Result<AST, ParseError> {
@@ -2389,6 +2453,17 @@ fn is_form_head_token(kind: &TokenKind) -> bool {
       | TokenKind::For
       | TokenKind::Bind
   )
+}
+
+/// The fixed set of infix operators accepted inside parentheses, paired with
+/// their binding precedence. Higher numbers bind tighter.
+fn infix_precedence(op: &str) -> Option<u8> {
+  match op {
+    "*" | "/" => Some(3),
+    "+" | "-" => Some(2),
+    "==" => Some(1),
+    _ => None,
+  }
 }
 
 fn layout_requires_indent_message(form: &'static str) -> &'static str {

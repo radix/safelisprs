@@ -918,3 +918,182 @@ fn deeply_nested_types_are_bounded_by_the_depth_budget() {
   let error = read_multiple_with_depth(&program, 8).unwrap_err();
   assert!(error.contains("nesting too deep"), "got: {error}");
 }
+
+#[test]
+fn infix_addition_in_parens_desugars_to_prefix_call() {
+  let result = read_multiple("(3 + 3)").unwrap();
+  assert_eq!(
+    result,
+    vec![AST::CallFixed(
+      Identifier::Bare("+".into()),
+      vec![AST::Int(3), AST::Int(3)],
+    )]
+  );
+}
+
+#[test]
+fn infix_follows_pemdas_precedence() {
+  // (3 * 7 + 3) == (+ (* 3 7) 3)
+  let result = read_multiple("(3 * 7 + 3)").unwrap();
+  assert_eq!(
+    result,
+    vec![AST::CallFixed(
+      Identifier::Bare("+".into()),
+      vec![
+        AST::CallFixed(Identifier::Bare("*".into()), vec![AST::Int(3), AST::Int(7)],),
+        AST::Int(3),
+      ],
+    )]
+  );
+}
+
+#[test]
+fn infix_equality_evaluates_to_a_comparison() {
+  let result = read_multiple("(x == 1)").unwrap();
+  assert_eq!(
+    result,
+    vec![AST::CallFixed(
+      Identifier::Bare("==".into()),
+      vec![AST::Variable("x".to_string()), AST::Int(1)],
+    )]
+  );
+}
+
+#[test]
+fn infix_equality_is_lower_precedence_than_arithmetic() {
+  // (x == 1 + y) == (== x (+ 1 y))
+  let result = read_multiple("(x == 1 + y)").unwrap();
+  assert_eq!(
+    result,
+    vec![AST::CallFixed(
+      Identifier::Bare("==".into()),
+      vec![
+        AST::Variable("x".to_string()),
+        AST::CallFixed(
+          Identifier::Bare("+".into()),
+          vec![AST::Int(1), AST::Variable("y".to_string())],
+        ),
+      ],
+    )]
+  );
+}
+
+#[test]
+fn infix_is_left_associative() {
+  // (1 - 2 - 3) == (- (- 1 2) 3)
+  let result = read_multiple("(1 - 2 - 3)").unwrap();
+  assert_eq!(
+    result,
+    vec![AST::CallFixed(
+      Identifier::Bare("-".into()),
+      vec![
+        AST::CallFixed(Identifier::Bare("-".into()), vec![AST::Int(1), AST::Int(2)],),
+        AST::Int(3),
+      ],
+    )]
+  );
+}
+
+#[test]
+fn parens_group_a_single_atom() {
+  assert_eq!(read_multiple("(3)").unwrap(), vec![AST::Int(3)]);
+  assert_eq!(
+    read_multiple("(x)").unwrap(),
+    vec![AST::Variable("x".to_string())]
+  );
+}
+
+#[test]
+fn nested_infix_parens() {
+  // (2 * (1 + 1)) == (* 2 (+ 1 1))
+  let result = read_multiple("(2 * (1 + 1))").unwrap();
+  assert_eq!(
+    result,
+    vec![AST::CallFixed(
+      Identifier::Bare("*".into()),
+      vec![
+        AST::Int(2),
+        AST::CallFixed(Identifier::Bare("+".into()), vec![AST::Int(1), AST::Int(1)],),
+      ],
+    )]
+  );
+}
+
+#[test]
+fn infix_as_a_call_argument() {
+  // [f (3 + 3)]
+  let result = read_multiple("[f (3 + 3)]").unwrap();
+  assert_eq!(
+    result,
+    vec![AST::CallFixed(
+      Identifier::Bare("f".into()),
+      vec![AST::CallFixed(
+        Identifier::Bare("+".into()),
+        vec![AST::Int(3), AST::Int(3)],
+      )],
+    )]
+  );
+}
+
+#[test]
+fn infix_spans_multiple_lines_inside_parens() {
+  let result = read_multiple("(\n  3\n  +\n  3\n)").unwrap();
+  assert_eq!(
+    result,
+    vec![AST::CallFixed(
+      Identifier::Bare("+".into()),
+      vec![AST::Int(3), AST::Int(3)],
+    )]
+  );
+}
+
+#[test]
+fn infix_in_layout_function_body() {
+  let source = "fn main [] -> Int\n  (3 + 3)";
+  let result = read_multiple(source).unwrap();
+  assert_eq!(result.len(), 1);
+  assert!(
+    matches!(
+      &result[0].kind,
+      ASTKind::DefineFn(_) | ASTKind::CallFixed(_, _)
+    ),
+    "expected a function definition or call, got {:?}",
+    result[0].kind
+  );
+}
+
+#[test]
+fn infix_as_an_if_condition() {
+  let source = "fn main [] -> Int\n  if (x == 1)\n    0\n  else\n    1";
+  let result = read_multiple(source).unwrap();
+  assert_eq!(result.len(), 1);
+  let ASTKind::DefineFn(function) = &result[0].kind else {
+    panic!("expected a function definition, got {:?}", result[0].kind);
+  };
+  let ASTKind::If(condition, _, _) = &function.code[0].kind else {
+    panic!("expected an `if`, got {:?}", function.code[0].kind);
+  };
+  assert_eq!(
+    condition.kind,
+    ASTKind::CallFixed(
+      Identifier::Bare("==".into()),
+      vec![AST::Variable("x".to_string()), AST::Int(1),],
+    )
+  );
+}
+
+#[test]
+fn unmatched_close_paren_is_an_error() {
+  assert!(read_multiple("3)").is_err());
+}
+
+#[test]
+fn missing_close_paren_is_an_error() {
+  assert!(read_multiple("(3 + 3").is_err());
+}
+
+#[test]
+fn prefix_call_in_parens_without_operator_is_an_error() {
+  // `+` with no left operand: parens are infix-only grouping.
+  assert!(read_multiple("(+ 3 3)").is_err());
+}

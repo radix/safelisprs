@@ -192,6 +192,31 @@ fn main [] -> Int
   "[fn main [] ->Int [let a 0] [if true [block [let b 10] [= a b]] [= a 20]] a]",
   SLValue::Int(10)
 )]
+#[case::infix_addition("[fn main [] ->Int (3 + 3)]", SLValue::Int(6))]
+#[case::infix_pemdas("[fn main [] ->Int (3 * 7 + 3)]", SLValue::Int(24))]
+#[case::infix_left_assoc_sub("[fn main [] ->Int (1 - 2 - 3)]", SLValue::Int(-4))]
+#[case::infix_nested_parens("[fn main [] ->Int (2 * (1 + 1))]", SLValue::Int(4))]
+#[case::infix_equality_true("[fn main [] ->Bool (1 == 1)]", SLValue::Bool(true))]
+#[case::infix_equality_with_arith(
+  "[fn main [] ->Int [let x 2] [let y 1] [if (x == 1 + y) 0 1]]",
+  SLValue::Int(0)
+)]
+#[case::infix_as_argument(
+  "[fn id [n:Int] ->Int n] [fn main [] ->Int [id (3 + 3)]]",
+  SLValue::Int(6)
+)]
+#[case::infix_in_layout_body(
+  "fn main [] -> Int
+     (3 * 7 + 3)",
+  SLValue::Int(24)
+)]
+#[case::infix_multiline_parens(
+  "fn main [] -> Int
+     (3
+       +
+       3)",
+  SLValue::Int(6)
+)]
 fn interpreter_matches_expected(#[case] source: &str, #[case] expected: SLValue) {
   assert_eq!(eval_interpreter(source), expected, "interpreter: {source}");
 }
