@@ -3,8 +3,9 @@
 An experimental language implementation which tries very hard to restrict the
 executed code to the point that you can safely run untrusted code from randos.
 
-Safelisp is kinda like a lisp but not really. It is statically typed
-and has whitespace layout. Sorry, haters!
+Safelisp is kinda like a lisp but not really. It uses square brackets for
+function calls, parentheses for infix notation, and worst of all: whitespace
+layout 🤮. It's also statically typed.
 
 ## Rust API
 
