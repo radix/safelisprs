@@ -133,6 +133,11 @@ fn main [] -> Int
 #[case::std_eq_float_false("[fn main [] ->Bool [std::== 1.5 2.5]]", SLValue::Bool(false))]
 #[case::std_eq_bool_true("[fn main [] ->Bool [std::== true true]]", SLValue::Bool(true))]
 #[case::std_eq_bool_false("[fn main [] ->Bool [std::== true false]]", SLValue::Bool(false))]
+#[case::std_ne_int_true("[fn main [] ->Bool [std::!= 3 4]]", SLValue::Bool(true))]
+#[case::std_ne_int_false("[fn main [] ->Bool [std::!= 4 4]]", SLValue::Bool(false))]
+#[case::std_ne_float_true("[fn main [] ->Bool [std::!= 1.5 2.5]]", SLValue::Bool(true))]
+#[case::std_ne_bool_true("[fn main [] ->Bool [std::!= true false]]", SLValue::Bool(true))]
+#[case::prelude_std_ne("[fn main [] ->Bool [!= 3 4]]", SLValue::Bool(true))]
 #[case::std_lt_int_true("[fn main [] ->Bool [std::< 3 4]]", SLValue::Bool(true))]
 #[case::std_lt_int_false("[fn main [] ->Bool [std::< 4 4]]", SLValue::Bool(false))]
 #[case::std_gt_int_true("[fn main [] ->Bool [std::> 4 3]]", SLValue::Bool(true))]
@@ -210,6 +215,12 @@ fn main [] -> Int
 #[case::infix_left_assoc_sub("[fn main [] ->Int (1 - 2 - 3)]", SLValue::Int(-4))]
 #[case::infix_nested_parens("[fn main [] ->Int (2 * (1 + 1))]", SLValue::Int(4))]
 #[case::infix_equality_true("[fn main [] ->Bool (1 == 1)]", SLValue::Bool(true))]
+#[case::infix_not_equal_true("[fn main [] ->Bool (1 != 2)]", SLValue::Bool(true))]
+#[case::infix_not_equal_false("[fn main [] ->Bool (1 != 1)]", SLValue::Bool(false))]
+#[case::infix_not_equal_with_arith(
+  "[fn main [] ->Int [let x 2] [let y 1] [if (x != 1 + y) 0 1]]",
+  SLValue::Int(1)
+)]
 #[case::infix_equality_with_arith(
   "[fn main [] ->Int [let x 2] [let y 1] [if (x == 1 + y) 0 1]]",
   SLValue::Int(0)

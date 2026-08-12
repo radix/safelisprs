@@ -1003,6 +1003,18 @@ fn infix_greater_or_equal_desugars_to_prefix_call() {
 }
 
 #[test]
+fn infix_not_equal_desugars_to_prefix_call() {
+  let result = read_multiple("(1 != 2)").unwrap();
+  assert_eq!(
+    result,
+    vec![AST::CallFixed(
+      Identifier::Bare("!=".into()),
+      vec![AST::Int(1), AST::Int(2)],
+    )]
+  );
+}
+
+#[test]
 fn infix_comparisons_share_the_lowest_precedence() {
   // Comparisons all bind at the same (lowest) precedence, so they are
   // left-associative: (1 < 2) parses as [< 1 2], and arithmetic binds tighter.

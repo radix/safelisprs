@@ -67,6 +67,17 @@ pub fn library() -> Library {
     ))
     .with_builtin(Builtin::binary(
       "std",
+      "!=",
+      sig(
+        &[("A", &[Trait::Eq])],
+        vec![Signature::var("A"), Signature::var("A")],
+        None,
+        Signature::Bool,
+      ),
+      not_equal,
+    ))
+    .with_builtin(Builtin::binary(
+      "std",
       "<",
       sig(
         &[("A", &[Trait::Ord])],
@@ -442,6 +453,10 @@ fn divide<'gc>(a: Value<'gc>, b: Value<'gc>) -> Result<Value<'gc>, String> {
 
 fn equal<'gc>(a: Value<'gc>, b: Value<'gc>) -> Result<Value<'gc>, String> {
   Ok(Value::Bool(a == b))
+}
+
+fn not_equal<'gc>(a: Value<'gc>, b: Value<'gc>) -> Result<Value<'gc>, String> {
+  Ok(Value::Bool(a != b))
 }
 
 /// Compare two orderable values, returning the [`std::cmp::Ordering`]. Ints

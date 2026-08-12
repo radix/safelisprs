@@ -78,7 +78,7 @@ as strings, lists, closures, and interpreter stack/frame vectors.
 ```rust
 let source = r#"
 fn grow [s: String n: Int] -> String
-  if [== n 0]
+  if (n == 0)
     s
   else
     [grow [concat s s] (n - 1)]
@@ -158,7 +158,7 @@ then branch for side effects only and produces `Void`:
 ```lisp
 fn bump-if-zero [x: Int] -> Int
   let result x
-  if [== x 0]
+  if (x == 0)
     [= result 1]
   result
 ```
@@ -387,7 +387,7 @@ fn main [] -> Creature
 fn find-three [] -> Bool
   let found false
   for x in [range 0 10]
-    if [== x 3]
+    if (x == 3)
       [= found true]
   found
 ```
@@ -454,7 +454,7 @@ let library = Library::default()
 
 Safelisp ships with a default host library containing these prelude functions:
 
-- arithmetic and equality: `+`, `-`, `*`, `/`, `==`
+- arithmetic and equality: `+`, `-`, `*`, `/`, `==`, `!=`
 - ordering comparisons: `<`, `>`, `<=`, `>=` (work on `Int`, `Float`, and `String`)
 - strings and lists: `concat`, `list`, `len`, `idx`, `push`, `range`, `slice`
 - mutable cells: `cell`, `get`, `set!`

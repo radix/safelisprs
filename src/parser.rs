@@ -2481,7 +2481,7 @@ fn infix_precedence(op: &TokenKind) -> Option<u8> {
     TokenKind::Sym(s) => match s.as_str() {
       "*" | "/" => Some(4),
       "+" | "-" => Some(3),
-      "==" | "<" | ">" | "<=" | ">=" => Some(2),
+      "==" | "!=" | "<" | ">" | "<=" | ">=" => Some(2),
       _ => None,
     },
     TokenKind::And => Some(1),
