@@ -37,7 +37,7 @@ struct Args {
     value_name = "SOURCE",
     conflicts_with = "input_file",
     required_unless_present = "input_file",
-    help = "compile and execute a SafeLisp source string"
+    help = "compile and execute a Safelisp source string"
   )]
   code: Option<String>,
 

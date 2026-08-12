@@ -9,7 +9,7 @@ use crate::resolver::resolve_module_names;
 use crate::typecheck::ConstructionInfo;
 use crate::typecheck::{CheckedModule, MatchArmInfo, TypecheckInfo};
 
-/// Tunable knobs for compiling SafeLisp source.
+/// Tunable knobs for compiling Safelisp source.
 #[derive(Clone, Debug)]
 pub struct CompileOptions {
   /// Maximum nesting depth the parser will accept before returning a clean
@@ -43,7 +43,7 @@ impl Default for CompileOptions {
   }
 }
 
-/// A compiled SafeLisp package.
+/// A compiled Safelisp package.
 /// If a `main` is present, the interpreter can execute it directly.
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Package {
@@ -955,7 +955,7 @@ impl<'module, 'types> FunctionCompiler<'module, 'types> {
   }
 }
 
-/// Compile SafeLisp source into an executable [`Package`] with the named main
+/// Compile Safelisp source into an executable [`Package`] with the named main
 /// function.
 pub fn compile_executable_from_source(
   module_source: &str,
@@ -970,7 +970,7 @@ pub fn compile_executable_from_source(
   )
 }
 
-/// Compile SafeLisp source into an executable [`Package`] with the named main
+/// Compile Safelisp source into an executable [`Package`] with the named main
 /// function and caller-supplied [`CompileOptions`].
 ///
 /// This is the entry point to use when an environment needs a non-default

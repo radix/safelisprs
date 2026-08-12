@@ -1,4 +1,4 @@
-//! Derive macros for converting Rust structs and enums to and from SafeLisp
+//! Derive macros for converting Rust structs and enums to and from Safelisp
 //! values.
 //!
 //! See [`safelisp::SafelispValue`] and [`safelisp::SafelispType`] for the
@@ -13,7 +13,7 @@ use syn::{
 /// Derive `SafelispValue` and `SafelispType` for a Rust struct or enum.
 ///
 /// The type must be non-generic and carry a `#[safelisp(module = "name")]`
-/// attribute naming the SafeLisp module the type belongs to. Every field type
+/// attribute naming the Safelisp module the type belongs to. Every field type
 /// must itself implement `SafelispValue`; the `safelisp` crate provides impls
 /// for the integer and float primitives, `bool`, `String`, `()`, `Box<T>`, and
 /// `Vec<T>`.
@@ -92,7 +92,7 @@ fn field_name_attr(attrs: &[Attribute]) -> Option<syn::Result<String>> {
 }
 
 /// Collect fields from a struct or a single enum variant. Positional (tuple)
-/// fields must carry `#[safelisp(field = "name")]` to name them in SafeLisp;
+/// fields must carry `#[safelisp(field = "name")]` to name them in Safelisp;
 /// named fields use their own identifier and must not carry the attribute.
 fn collect_fields(fields: &Fields) -> syn::Result<Vec<Field>> {
   match fields {
@@ -124,7 +124,7 @@ fn collect_fields(fields: &Fields) -> syn::Result<Vec<Field>> {
           None => {
             return Err(syn::Error::new_spanned(
               f,
-              "positional field requires `#[safelisp(field = \"name\")]` to name it in SafeLisp",
+              "positional field requires `#[safelisp(field = \"name\")]` to name it in Safelisp",
             ))
           }
         };

@@ -1,6 +1,6 @@
-//! SafeLisp parser, compiler, and interpreter APIs.
+//! Safelisp parser, compiler, and interpreter APIs.
 //!
-//! The crate exposes the pieces needed to compile SafeLisp source into an
+//! The crate exposes the pieces needed to compile Safelisp source into an
 //! executable [`Package`], run it with [`Interpreter`], and extend the runtime
 //! with host-provided [`Builtin`] functions.
 #![deny(missing_docs)]

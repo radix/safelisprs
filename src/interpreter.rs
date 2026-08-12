@@ -239,7 +239,7 @@ fn external_bytes_of<'gc>(value: &SLVal<'gc>) -> usize {
   }
 }
 
-/// A garbage-collected SafeLisp value wrapped with per-execution memory
+/// A garbage-collected Safelisp value wrapped with per-execution memory
 /// accounting. The `value: SLVal` is the actual payload; `charge` holds the
 /// byte count of the Rust-heap storage `value` directly owns (string bytes,
 /// partial `Vec` backings) and releases it to the execution's memory tracker
@@ -257,7 +257,7 @@ fn external_bytes_of<'gc>(value: &SLVal<'gc>) -> usize {
 #[derive(Collect)]
 #[collect(no_drop)]
 pub struct Accounted<'gc> {
-  /// The actual SafeLisp heap value being accounted.
+  /// The actual Safelisp heap value being accounted.
   pub value: SLVal<'gc>,
   /// Held only for its `Drop` (which releases the charge to the tracker); the
   /// byte count is read via `MemoryCharge::bytes()` only on `TrackedVec`.
@@ -305,7 +305,7 @@ impl<'gc> Accounted<'gc> {
 #[derive(Debug, Copy, Clone, PartialEq, Collect)]
 #[collect(no_drop)]
 pub enum Value<'gc> {
-  /// The SafeLisp void value.
+  /// The Safelisp void value.
   Void,
   /// A boolean value stored inline.
   Bool(bool),
@@ -568,7 +568,7 @@ enum FrameKind<'gc> {
   Host(HostFrame),
 }
 
-/// A SafeLisp function frame. The shared frame's callable is looked up via
+/// A Safelisp function frame. The shared frame's callable is looked up via
 /// `package.get_function(...)` at `step` time.
 #[derive(Collect)]
 #[collect(no_drop)]
@@ -578,7 +578,7 @@ struct FunctionFrame<'gc> {
 }
 
 /// A frame representing a resumable builtin function that may be waiting for a
-/// SafeLisp call to finish.
+/// Safelisp call to finish.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Collect)]
 #[collect(no_drop)]
 struct HostFrame {
@@ -626,7 +626,7 @@ impl<'gc> CellContents<'gc> {
   }
 }
 
-/// A SafeLisp value. This is the in-arena representation: anything that needs
+/// A Safelisp value. This is the in-arena representation: anything that needs
 /// sharing or cycle-detection is held behind a `Gc` pointer.
 #[derive(Debug, PartialEq, Collect)]
 #[collect(no_drop)]
@@ -645,7 +645,7 @@ pub enum SLVal<'gc> {
   Tuple(Vec<Value<'gc>>),
 }
 
-/// A partially applied SafeLisp function.
+/// A partially applied Safelisp function.
 #[derive(Debug, PartialEq, Collect)]
 #[collect(no_drop)]
 pub struct Partial<'gc> {
@@ -705,7 +705,7 @@ pub enum SLValue {
   },
   /// A mutable cell value represented by its current contents.
   Cell(Box<SLValue>),
-  /// A list of values. This is stored as a Vec even though SafeLisp represents
+  /// A list of values. This is stored as a Vec even though Safelisp represents
   /// these internally as an efficient "persistent" data structure. We'd have to
   /// make that List data structure have a non-GC variant in order to maintain
   /// that efficiency here...
@@ -947,7 +947,7 @@ impl<'gc> Value<'gc> {
 }
 
 impl<'gc> SLVal<'gc> {
-  /// A bounded-size description of this heap value's SafeLisp type.
+  /// A bounded-size description of this heap value's Safelisp type.
   pub fn type_name(&self) -> &'static str {
     match self {
       SLVal::String(_) => "String",
@@ -984,7 +984,7 @@ impl<'gc> SLVal<'gc> {
   }
 }
 
-/// A compiled SafeLisp package paired with the builtin registry used to run it.
+/// A compiled Safelisp package paired with the builtin registry used to run it.
 pub struct Interpreter {
   package: Package,
   library: Library,
@@ -1071,7 +1071,7 @@ pub enum HostPoll<'gc> {
   Ready(Value<'gc>),
 }
 
-/// A single, independent SafeLisp execution. Each `Execution` owns its own
+/// A single, independent Safelisp execution. Each `Execution` owns its own
 /// garbage-collected `Arena`, so multiple executions are fully independent
 /// and may be run in parallel (cooperatively interleaved by the caller). The
 /// `Arena` holds the value stack and call frames branded with an invariant
@@ -1986,7 +1986,7 @@ impl<'gc> ExecRoot<'gc> {
     Ok(())
   }
 
-  /// Either pushes a frame for the function if it's defined in SafeLisp, or
+  /// Either pushes a frame for the function if it's defined in Safelisp, or
   /// just call it immediately if it's a builtin. `arity` is the number of args
   /// pushed at the call site (carried on [`Instruction::Call`]); it is used to
   /// pop the right number of args for the callee and to arity-check at the call
@@ -2296,7 +2296,7 @@ impl<'a, 'gc> Args<'a, 'gc> {
 /// The runtime context passed to a builtin handler. It carries the GC
 /// `Mutation` context, the `Package` / [`Library`] registries, and a
 /// short-lived mutable borrow of the execution root — enough for a builtin to
-/// allocate values, push results, and invoke SafeLisp callables.
+/// allocate values, push results, and invoke Safelisp callables.
 ///
 /// # Lifetimes
 ///
@@ -2312,7 +2312,7 @@ impl<'a, 'gc> Args<'a, 'gc> {
 /// # Trust boundary
 ///
 /// Host functions are trusted runtime extensions. They may allocate, block,
-/// panic, or otherwise interact with the process outside SafeLisp's control.
+/// panic, or otherwise interact with the process outside Safelisp's control.
 /// A host function that allocates guest-sized Rust-heap memory must use
 /// [`Self::reserve_memory`] and keep the returned guard alive with the
 /// allocation. The memory limit cannot account for allocations a host
@@ -2530,7 +2530,7 @@ impl<'gc, 'call> HostCtx<'gc, 'call> {
     self.root.reconcile_reservation(self.mc, reservation, bytes)
   }
 
-  /// Schedule a SafeLisp callable (`FunctionRef` or `Partial`) with the given
+  /// Schedule a Safelisp callable (`FunctionRef` or `Partial`) with the given
   /// arguments and return immediately. The callback result will be left on top
   /// of the VM stack before this host frame is resumed again.
   pub fn call(&mut self, callable: Value<'gc>, args: &[Value<'gc>]) -> Result<(), String> {

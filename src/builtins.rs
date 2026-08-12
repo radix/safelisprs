@@ -74,7 +74,7 @@ pub struct CustomVariantSpec {
   pub fields: Vec<CustomFieldSpec>,
 }
 
-/// The declaration kind of a custom SafeLisp type.
+/// The declaration kind of a custom Safelisp type.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CustomTypeKind {
   /// A struct type.
@@ -89,7 +89,7 @@ pub enum CustomTypeKind {
   },
 }
 
-/// A custom SafeLisp type supplied by a host library.
+/// A custom Safelisp type supplied by a host library.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CustomTypeSpec {
   /// Module name containing the type.
@@ -248,7 +248,7 @@ impl Builtin {
   /// Construct a builtin that receives the full execution context and raw
   /// argument slice. `num_params` is `None` for a variadic builtin.
   ///
-  /// Contextual host functions are trusted runtime extensions: SafeLisp
+  /// Contextual host functions are trusted runtime extensions: Safelisp
   /// cannot prevent them from allocating untracked memory, blocking, or
   /// otherwise affecting the process. Implementations must reserve
   /// guest-sized Rust-heap allocations through [`HostCtx::reserve_memory`].
@@ -296,7 +296,7 @@ impl Builtin {
     }
   }
 
-  /// Construct a builtin whose callback into SafeLisp can pause and resume
+  /// Construct a builtin whose callback into Safelisp can pause and resume
   /// through the ordinary interpreter loop. The start function stores durable
   /// state on the VM stack; the resume function advances that state by one
   /// host scheduling step.
@@ -412,7 +412,7 @@ impl Builtins {
   }
 }
 
-/// A complete host library: custom SafeLisp type declarations plus the builtin
+/// A complete host library: custom Safelisp type declarations plus the builtin
 /// functions whose signatures and runtime behavior may depend on them.
 #[derive(Clone)]
 pub struct Library {

@@ -11,7 +11,7 @@ authors = ["Christopher Armstrong <radix@twistedmatrix.com>"]
 
 [features]
 default = ["derive"]
-# Derive macros for converting Rust structs/enums to and from SafeLisp values.
+# Derive macros for converting Rust structs/enums to and from Safelisp values.
 derive = ["dep:safelisp-derive"]
 
 [dependencies]

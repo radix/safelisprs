@@ -12,7 +12,7 @@ struct Point {
   y: i64,
 }
 
-/// A tuple struct. Positional fields require explicit SafeLisp names.
+/// A tuple struct. Positional fields require explicit Safelisp names.
 #[derive(Debug, PartialEq, SafelispValue)]
 #[safelisp(module = "arp")]
 struct Vec2(#[safelisp(field = "x")] f64, #[safelisp(field = "y")] f64);

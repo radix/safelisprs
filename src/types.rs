@@ -50,7 +50,7 @@ impl fmt::Display for QualifiedTypeName {
   }
 }
 
-/// A host-authored SafeLisp type expression used in function signatures.
+/// A host-authored Safelisp type expression used in function signatures.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Signature {
   /// The integer type.
@@ -117,7 +117,7 @@ impl Signature {
   }
 }
 
-/// A Rust type that can be converted to and from in-arena SafeLisp values.
+/// A Rust type that can be converted to and from in-arena Safelisp values.
 ///
 /// Every field type of a `#[derive(SafelispValue)]` struct or enum must
 /// implement this trait. The crate provides impls for the integer and float
@@ -125,7 +125,7 @@ impl Signature {
 /// impls cover user-defined structs and enums.
 ///
 /// Positional (tuple) fields have no Rust name, so the derive requires an
-/// explicit SafeLisp name via `#[safelisp(field = "name")]` on each one:
+/// explicit Safelisp name via `#[safelisp(field = "name")]` on each one:
 ///
 /// ```
 /// use safelisp::SafelispValue;
@@ -152,9 +152,9 @@ impl Signature {
 /// }
 /// ```
 pub trait SafelispValue: Sized {
-  /// The SafeLisp type expression describing this Rust type.
+  /// The Safelisp type expression describing this Rust type.
   fn sl_signature() -> Signature;
-  /// Convert `self` into an in-arena SafeLisp value.
+  /// Convert `self` into an in-arena Safelisp value.
   fn to_value<'gc>(&self, ctx: &mut HostCtx<'gc, '_>) -> Result<Value<'gc>, String>;
 
   /// Default depth allowed when converting data structures with
@@ -162,14 +162,14 @@ pub trait SafelispValue: Sized {
   /// deeper or shallower than the default.
   const DEFAULT_FROM_VALUE_DEPTH: usize = 128;
 
-  /// Convert a SafeLisp value back into this Rust type using
+  /// Convert a Safelisp value back into this Rust type using
   /// [`Self::DEFAULT_FROM_VALUE_DEPTH`] as the depth limit. Equivalent to
   /// calling [`Self::from_value_with_depth`] with that limit.
   fn from_value<'gc>(ctx: &HostCtx<'gc, '_>, value: Value<'gc>) -> Result<Self, String> {
     Self::from_value_with_depth(ctx, value, Self::DEFAULT_FROM_VALUE_DEPTH)
   }
 
-  /// Convert a SafeLisp value back into this Rust type with an explicit depth
+  /// Convert a Safelisp value back into this Rust type with an explicit depth
   /// limit.
   ///
   /// Each level of nested derived struct or enum consumes one unit of `depth`;
@@ -181,7 +181,7 @@ pub trait SafelispValue: Sized {
   ) -> Result<Self, String>;
 }
 
-/// A named SafeLisp type that can describe itself to the compiler.
+/// A named Safelisp type that can describe itself to the compiler.
 ///
 /// The `#[derive(SafelispValue)]` macro implements this alongside
 /// [`SafelispValue`] for structs and enums; pass [`SafelispType::type_spec`]
@@ -307,7 +307,7 @@ impl<T: SafelispValue> SafelispValue for Box<T> {
     value: Value<'gc>,
     depth: usize,
   ) -> Result<Self, String> {
-    // `Box<T>` is a transparent host-side indirection over the same SafeLisp
+    // `Box<T>` is a transparent host-side indirection over the same Safelisp
     // value as `T`, so it forwards the depth limit unchanged.
     Ok(Box::new(T::from_value_with_depth(ctx, value, depth)?))
   }

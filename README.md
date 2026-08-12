@@ -8,7 +8,7 @@ and has whitespace layout. Sorry, haters!
 
 ## Rust API
 
-SafeLisp is primarily exposed as a Rust library. Build a `Library` of your
+Safelisp is primarily exposed as a Rust library. Build a `Library` of your
 custom host builtins, then you can compile source to bytecode and execute the
 bytecode.
 
@@ -116,7 +116,7 @@ let package = safelisp::compile_executable_from_source_with_options(
 
 ## Language Tour
 
-SafeLisp has a Lisp core with an indentation-based layout syntax for the common
+Safelisp has a Lisp core with an indentation-based layout syntax for the common
 special forms. Function calls use square brackets, but special forms (`fn`, `if`,
 `else`, `match`, `let`, `struct`, `enum`, `new`, `block`, `return`, `and`,
 `or`, `for`, and `bind`) can be written without outer brackets.
@@ -297,7 +297,7 @@ fn main [] -> Int
 
 ### Variable Bindings: `let`, `shd`, and `=`
 
-SafeLisp has three binding forms:
+Safelisp has three binding forms:
 
 - `let` introduces a new binding. Once a name is bound in the current
   function, `let` cannot bind it again.
@@ -416,7 +416,7 @@ let library = Library::default()
   ));
 ```
 
-SafeLisp ships with a default host library containing these prelude functions:
+Safelisp ships with a default host library containing these prelude functions:
 
 - arithmetic and equality: `+`, `-`, `*`, `/`, `==`
 - strings and lists: `concat`, `list`, `len`, `idx`, `push`, `range`, `slice`
@@ -453,7 +453,7 @@ fn main [] -> Int
 
 ### Deriving Conversions for Rust Types
 
-When a host type needs to round-trip through SafeLisp values, derive
+When a host type needs to round-trip through Safelisp values, derive
 `SafelispValue` on a Rust struct or enum instead of hand-writing the
 `CustomTypeSpec` and conversion functions. The derive is available when the
 `derive` feature is enabled (it is on by default):
@@ -493,7 +493,7 @@ Every field type must itself implement `SafelispValue`; the crate provides impls
 for basic Rust types.
 
 Safelisp doesn't support positional fields in enum variants, so each one must be
-given an explicit SafeLisp name with `#[safelisp(field = "name")]`. This lets
+given an explicit Safelisp name with `#[safelisp(field = "name")]`. This lets
 source code construct and match the variant by those names:
 
 ```lisp

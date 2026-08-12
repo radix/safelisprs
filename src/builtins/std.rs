@@ -1,4 +1,4 @@
-//! The standard SafeLisp builtin library.
+//! The standard Safelisp builtin library.
 
 use gc_arena::{Gc, RefLock};
 

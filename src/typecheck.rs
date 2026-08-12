@@ -129,7 +129,7 @@ impl fmt::Debug for Type {
 /// This is the generalized type assigned to callables. `quantified` contains
 /// the rigid type variables that are freshly instantiated each time the
 /// function is referenced (e.g., the `forall A.` part, though this is not
-/// actually exposed as a feature in SafeLisp yet).
+/// actually exposed as a feature in Safelisp yet).
 #[derive(Clone)]
 struct FnScheme {
   params: Vec<Type>,
