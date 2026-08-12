@@ -76,6 +76,12 @@ pub fn library() -> Library {
       ),
       not_equal,
     ))
+    .with_builtin(Builtin::unary(
+      "std",
+      "not",
+      sig(&[], vec![Signature::Bool], None, Signature::Bool),
+      not,
+    ))
     .with_builtin(Builtin::binary(
       "std",
       "<",
@@ -457,6 +463,11 @@ fn equal<'gc>(a: Value<'gc>, b: Value<'gc>) -> Result<Value<'gc>, String> {
 
 fn not_equal<'gc>(a: Value<'gc>, b: Value<'gc>) -> Result<Value<'gc>, String> {
   Ok(Value::Bool(a != b))
+}
+
+fn not<'gc>(value: Value<'gc>) -> Result<Value<'gc>, String> {
+  let value = value.as_bool().map_err(|e| format!("std::not: {e}"))?;
+  Ok(Value::Bool(!value))
 }
 
 /// Compare two orderable values, returning the [`std::cmp::Ordering`]. Ints

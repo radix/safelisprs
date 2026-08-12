@@ -456,6 +456,7 @@ Safelisp ships with a default host library containing these prelude functions:
 
 - arithmetic and equality: `+`, `-`, `*`, `/`, `==`, `!=`
 - ordering comparisons: `<`, `>`, `<=`, `>=` (work on `Int`, `Float`, and `String`)
+- boolean negation: `not`
 - strings and lists: `concat`, `list`, `len`, `idx`, `push`, `range`, `slice`
 - mutable cells: `cell`, `get`, `set!`
 - higher-order helpers: `map`
