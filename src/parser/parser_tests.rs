@@ -933,7 +933,7 @@ fn infix_addition_in_parens_desugars_to_prefix_call() {
 
 #[test]
 fn infix_follows_pemdas_precedence() {
-  // (3 * 7 + 3) == (+ (* 3 7) 3)
+  // (3 * 7 + 3) == [+ [* 3 7] 3]
   let result = read_multiple("(3 * 7 + 3)").unwrap();
   assert_eq!(
     result,
@@ -961,7 +961,7 @@ fn infix_equality_evaluates_to_a_comparison() {
 
 #[test]
 fn infix_equality_is_lower_precedence_than_arithmetic() {
-  // (x == 1 + y) == (== x (+ 1 y))
+  // (x == 1 + y) == [== x [+ 1 y]]
   let result = read_multiple("(x == 1 + y)").unwrap();
   assert_eq!(
     result,
@@ -1005,7 +1005,7 @@ fn infix_greater_or_equal_desugars_to_prefix_call() {
 #[test]
 fn infix_comparisons_share_the_lowest_precedence() {
   // Comparisons all bind at the same (lowest) precedence, so they are
-  // left-associative: (1 < 2) parses as (< 1 2), and arithmetic binds tighter.
+  // left-associative: (1 < 2) parses as [< 1 2], and arithmetic binds tighter.
   let result = read_multiple("(1 + 1 < 3)").unwrap();
   assert_eq!(
     result,
@@ -1021,7 +1021,7 @@ fn infix_comparisons_share_the_lowest_precedence() {
 
 #[test]
 fn infix_is_left_associative() {
-  // (1 - 2 - 3) == (- (- 1 2) 3)
+  // (1 - 2 - 3) == [- [- 1 2] 3]
   let result = read_multiple("(1 - 2 - 3)").unwrap();
   assert_eq!(
     result,
@@ -1046,7 +1046,7 @@ fn parens_group_a_single_atom() {
 
 #[test]
 fn nested_infix_parens() {
-  // (2 * (1 + 1)) == (* 2 (+ 1 1))
+  // (2 * (1 + 1)) == [* 2 [+ 1 1]]
   let result = read_multiple("(2 * (1 + 1))").unwrap();
   assert_eq!(
     result,
