@@ -34,6 +34,28 @@ pub fn library() -> Library {
     ))
     .with_builtin(Builtin::binary(
       "std",
+      "*",
+      sig(
+        &[("A", &[Trait::Mul])],
+        vec![Signature::var("A"), Signature::var("A")],
+        None,
+        Signature::var("A"),
+      ),
+      multiply,
+    ))
+    .with_builtin(Builtin::binary(
+      "std",
+      "/",
+      sig(
+        &[("A", &[Trait::Div])],
+        vec![Signature::var("A"), Signature::var("A")],
+        None,
+        Signature::var("A"),
+      ),
+      divide,
+    ))
+    .with_builtin(Builtin::binary(
+      "std",
       "==",
       sig(
         &[("A", &[Trait::Eq])],
@@ -305,7 +327,9 @@ fn map_resume<'gc, 'call>(
 
 fn add<'gc>(a: Value<'gc>, b: Value<'gc>) -> Result<Value<'gc>, String> {
   if let (Ok(x), Ok(y)) = (a.as_int(), b.as_int()) {
-    Ok(Value::Int(x + y))
+    x.checked_add(y)
+      .map(Value::Int)
+      .ok_or_else(|| format!("+: integer overflow adding {x} and {y}"))
   } else if let (Ok(x), Ok(y)) = (a.as_float(), b.as_float()) {
     Ok(Value::Float(x + y))
   } else {
@@ -320,12 +344,52 @@ fn add<'gc>(a: Value<'gc>, b: Value<'gc>) -> Result<Value<'gc>, String> {
 fn subtract<'gc>(a: Value<'gc>, b: Value<'gc>) -> Result<Value<'gc>, String> {
   if let (Ok(x), Ok(y)) = (a.as_int(), b.as_int()) {
     // `a` is the left operand, `b` is the right operand: left - right.
-    Ok(Value::Int(x - y))
+    x.checked_sub(y)
+      .map(Value::Int)
+      .ok_or_else(|| format!("-: integer underflow subtracting {y} from {x}"))
   } else if let (Ok(x), Ok(y)) = (a.as_float(), b.as_float()) {
     Ok(Value::Float(x - y))
   } else {
     Err(format!(
       "Couldn't sub {} and {}",
+      a.type_name(),
+      b.type_name()
+    ))
+  }
+}
+
+fn multiply<'gc>(a: Value<'gc>, b: Value<'gc>) -> Result<Value<'gc>, String> {
+  if let (Ok(x), Ok(y)) = (a.as_int(), b.as_int()) {
+    x.checked_mul(y)
+      .map(Value::Int)
+      .ok_or_else(|| format!("*: integer overflow multiplying {x} by {y}"))
+  } else if let (Ok(x), Ok(y)) = (a.as_float(), b.as_float()) {
+    Ok(Value::Float(x * y))
+  } else {
+    Err(format!(
+      "Couldn't mul {} and {}",
+      a.type_name(),
+      b.type_name()
+    ))
+  }
+}
+
+fn divide<'gc>(a: Value<'gc>, b: Value<'gc>) -> Result<Value<'gc>, String> {
+  if let (Ok(x), Ok(y)) = (a.as_int(), b.as_int()) {
+    if y == 0 {
+      return Err(format!("/: integer division by zero dividing {x} by {y}"));
+    }
+    x.checked_div(y)
+      .map(Value::Int)
+      .ok_or_else(|| format!("/: integer overflow dividing {x} by {y}"))
+  } else if let (Ok(x), Ok(y)) = (a.as_float(), b.as_float()) {
+    if y == 0.0 {
+      return Err(format!("/: float division by zero dividing {x} by {y}"));
+    }
+    Ok(Value::Float(x / y))
+  } else {
+    Err(format!(
+      "Couldn't div {} and {}",
       a.type_name(),
       b.type_name()
     ))

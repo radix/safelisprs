@@ -1899,6 +1899,8 @@ fn parse_trait(name: &str) -> Result<Trait, TypeError> {
   match name {
     "Add" => Ok(Trait::Add),
     "Sub" => Ok(Trait::Sub),
+    "Mul" => Ok(Trait::Mul),
+    "Div" => Ok(Trait::Div),
     "Eq" => Ok(Trait::Eq),
     "Concat" => Ok(Trait::Concat),
     "Slice" => Ok(Trait::Slice),
@@ -1912,7 +1914,7 @@ pub fn satisfies(ty: &Type, trait_: Trait) -> bool {
     return true;
   }
   match (&ty, trait_) {
-    (Type::Int | Type::Float, Trait::Add | Trait::Sub) => true,
+    (Type::Int | Type::Float, Trait::Add | Trait::Sub | Trait::Mul | Trait::Div) => true,
     (Type::String | Type::List(_), Trait::Concat | Trait::Slice) => true,
     (Type::Var(var), required) => match &*var.borrow() {
       TypeVar::Rigid { bounds, .. } | TypeVar::Unbound { bounds, .. } => bounds.contains(&required),

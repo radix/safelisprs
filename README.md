@@ -418,7 +418,7 @@ let library = Library::default()
 
 SafeLisp ships with a default host library containing these prelude functions:
 
-- arithmetic and equality: `+`, `-`, `==`
+- arithmetic and equality: `+`, `-`, `*`, `/`, `==`
 - strings and lists: `concat`, `list`, `len`, `idx`, `push`, `range`, `slice`
 - mutable cells: `cell`, `get`, `set!`
 - higher-order helpers: `map`

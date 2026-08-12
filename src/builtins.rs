@@ -17,6 +17,10 @@ pub enum Trait {
   Add,
   /// Values support subtraction through the `-` builtin.
   Sub,
+  /// Values support multiplication through the `*` builtin.
+  Mul,
+  /// Values support division through the `/` builtin.
+  Div,
   /// Values support equality comparison.
   Eq,
   /// Values support concatenation.

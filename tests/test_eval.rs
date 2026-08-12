@@ -120,6 +120,13 @@ fn main () -> Int
 )]
 #[case::std_sub("(fn main () ->Int (std::- 1 2))", SLValue::Int(-1))]
 #[case::std_add_floats("(fn main () ->Float (std::+ 1.5 2.5))", SLValue::Float(4.0))]
+#[case::std_mul("(fn main () ->Int (std::* 3 4))", SLValue::Int(12))]
+#[case::prelude_std_mul("(fn main () ->Int (* 3 4))", SLValue::Int(12))]
+#[case::std_mul_floats("(fn main () ->Float (std::* 1.5 2.0))", SLValue::Float(3.0))]
+#[case::std_div("(fn main () ->Int (std::/ 7 2))", SLValue::Int(3))]
+#[case::prelude_std_div("(fn main () ->Int (/ 7 2))", SLValue::Int(3))]
+#[case::std_div_floats("(fn main () ->Float (std::/ 5.0 2.0))", SLValue::Float(2.5))]
+#[case::std_div_negative("(fn main () ->Int (std::/ -7 2))", SLValue::Int(-3))]
 #[case::std_eq_int_true("(fn main () ->Bool (std::== 3 3))", SLValue::Bool(true))]
 #[case::std_eq_int_false("(fn main () ->Bool (std::== 3 4))", SLValue::Bool(false))]
 #[case::std_eq_float_true("(fn main () ->Bool (std::== 1.5 1.5))", SLValue::Bool(true))]
@@ -273,4 +280,51 @@ fn default_budget_compiles_moderately_nested_programs() {
     .run_until_done()
     .unwrap();
   assert_eq!(result, SLValue::Int(16));
+}
+
+/// Integer arithmetic that would overflow `i64` produces a clean runtime
+/// error instead of panicking or silently wrapping.
+#[test]
+fn arithmetic_out_of_bounds_errors() {
+  let cases: &[(&str, &str, &str)] = &[
+    (
+      "(fn main () ->Int (+ 9223372036854775807 1))",
+      "+",
+      "overflow",
+    ),
+    (
+      "(fn main () ->Int (- -9223372036854775808 1))",
+      "-",
+      "underflow",
+    ),
+    (
+      "(fn main () ->Int (* 3037000500 3037000500))",
+      "*",
+      "overflow",
+    ),
+    (
+      "(fn main () ->Int (/ -9223372036854775808 -1))",
+      "/",
+      "overflow",
+    ),
+    ("(fn main () ->Int (/ 1 0))", "/", "division by zero"),
+    ("(fn main () ->Float (/ 1.0 0.0))", "/", "division by zero"),
+  ];
+  for (source, operator, needle) in cases {
+    let package = compile_executable_from_source(source, ("main", "main"), &Library::default())
+      .unwrap_or_else(|e| panic!("`{source}` should compile, got: {e}"));
+    let error = Interpreter::new(package)
+      .call_main()
+      .unwrap()
+      .run_until_done()
+      .unwrap_err();
+    assert!(
+      error.contains(operator),
+      "`{source}`: expected the `{operator}` operator in the error, got: {error}"
+    );
+    assert!(
+      error.contains(needle),
+      "`{source}`: expected `{needle}` in the error, got: {error}"
+    );
+  }
 }
