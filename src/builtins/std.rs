@@ -581,7 +581,7 @@ fn slice<'gc, 'call>(
     return Ok(SLVal::String(result));
   }
   Err(format!(
-    "std::slice: expected (List, Int, Int) or (String, Int, Int), got ({}, {}, {})",
+    "std::slice: expected [List, Int, Int] or [String, Int, Int], got [{}, {}, {}]",
     args[0].type_name(),
     args[1].type_name(),
     args[2].type_name()

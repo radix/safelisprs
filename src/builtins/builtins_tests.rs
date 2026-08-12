@@ -151,12 +151,12 @@ fn box_library() -> Library {
 fn host_defined_enums_can_be_constructed_by_builtins_and_matched() {
   let library = maybe_int_library();
   let package = compile_executable_from_source(
-    "(fn main (use_some:Bool) ->Int
-       (let maybe
-         (if use_some (host::some 42) (host::none)))
-       (match maybe
-         (Some value) => value
-         (None) => 0))",
+    "[fn main [use_some:Bool] ->Int
+       [let maybe
+         [if use_some [host::some 42] [host::none]]]
+       [match maybe
+         [Some value] => value
+         [None] => 0]]",
     ("main", "main"),
     &library,
   )
@@ -178,14 +178,14 @@ fn host_defined_enums_can_be_constructed_by_builtins_and_matched() {
 fn host_defined_enums_can_be_constructed_from_source() {
   let library = maybe_int_library();
   let package = compile_executable_from_source(
-    "(fn main (use_some:Bool) ->Int
-       (let maybe
-         (if use_some
-           (new host::MaybeInt::Some value:42)
-           (new host::MaybeInt::None)))
-       (match maybe
-         (Some value) => value
-         (None) => 0))",
+    "[fn main [use_some:Bool] ->Int
+       [let maybe
+         [if use_some
+           [new host::MaybeInt::Some value:42]
+           [new host::MaybeInt::None]]]
+       [match maybe
+         [Some value] => value
+         [None] => 0]]",
     ("main", "main"),
     &library,
   )
@@ -207,11 +207,11 @@ fn host_defined_enums_can_be_constructed_from_source() {
 fn source_constructed_host_enums_can_be_consumed_by_builtins() {
   let library = maybe_int_library();
   let package = compile_executable_from_source(
-    "(fn main (use_some:Bool) ->Int
-       (host::get-or-zero
-         (if use_some
-           (new host::MaybeInt::Some value:42)
-           (new host::MaybeInt::None))))",
+    "[fn main [use_some:Bool] ->Int
+       [host::get-or-zero
+         [if use_some
+           [new host::MaybeInt::Some value:42]
+           [new host::MaybeInt::None]]]]",
     ("main", "main"),
     &library,
   )
@@ -234,8 +234,8 @@ fn source_constructed_host_enums_can_be_consumed_by_builtins() {
 fn source_constructed_host_struct_can_be_consumed_by_builtins() {
   let library = box_library();
   let package = compile_executable_from_source(
-    "(fn main () ->Int
-       (host::unbox (new host::Box value:42)))",
+    "[fn main [] ->Int
+       [host::unbox [new host::Box value:42]]]",
     ("main", "main"),
     &library,
   )
@@ -252,8 +252,8 @@ fn source_constructed_host_struct_can_be_consumed_by_builtins() {
 fn source_constructed_host_struct_rejects_wrong_field_type() {
   let library = box_library();
   let error = compile_executable_from_source(
-    "(fn main () ->host::Box
-       (new host::Box value:\"nope\"))",
+    "[fn main [] ->host::Box
+       [new host::Box value:\"nope\"]]",
     ("main", "main"),
     &library,
   )
@@ -268,8 +268,8 @@ fn source_constructed_host_struct_rejects_wrong_field_type() {
 fn source_constructed_host_enum_rejects_wrong_field_type() {
   let library = maybe_int_library();
   let error = compile_executable_from_source(
-    "(fn main () ->host::MaybeInt
-       (new host::MaybeInt::Some value:\"nope\"))",
+    "[fn main [] ->host::MaybeInt
+       [new host::MaybeInt::Some value:\"nope\"]]",
     ("main", "main"),
     &library,
   )
@@ -282,9 +282,9 @@ fn source_constructed_host_enum_rejects_wrong_field_type() {
 fn builtins_can_consume_host_defined_enums() {
   let library = maybe_int_library();
   let package = compile_executable_from_source(
-    "(fn main (use_some:Bool) ->Int
-       (host::get-or-zero
-         (if use_some (host::some 42) (host::none))))",
+    "[fn main [use_some:Bool] ->Int
+       [host::get-or-zero
+         [if use_some [host::some 42] [host::none]]]]",
     ("main", "main"),
     &library,
   )
@@ -338,7 +338,7 @@ fn host_allocators_reject_the_wrong_custom_type_kind() {
       |ctx, args| ctx.alloc_enum("host", "Box", "Box", vec![args[0]]),
     ));
   let package = compile_executable_from_source(
-    "(fn main () ->host::MaybeInt (host::bad 42))",
+    "[fn main [] ->host::MaybeInt [host::bad 42]]",
     ("main", "main"),
     &library,
   )
@@ -354,7 +354,7 @@ fn host_allocators_reject_the_wrong_custom_type_kind() {
   );
 
   let package = compile_executable_from_source(
-    "(fn main () ->host::Box (host::bad-enum 42))",
+    "[fn main [] ->host::Box [host::bad-enum 42]]",
     ("main", "main"),
     &library,
   )
@@ -381,7 +381,7 @@ fn custom_interpreter_builtins_are_public_api() {
     },
   ));
   let package =
-    compile_executable_from_source("(fn main () ->Int (add2 3))", ("main", "main"), &builtins)
+    compile_executable_from_source("[fn main [] ->Int [add2 3]]", ("main", "main"), &builtins)
       .unwrap_or_else(|e| panic!("compile failed: {e}"));
   let mut exec = Interpreter::with_library(package, builtins)
     .call_main()
@@ -430,7 +430,7 @@ fn libraries_can_be_composed_with_custom_types() {
     .with_prelude("box", "unbox");
   let library = types.merge(funcs);
   let package = compile_executable_from_source(
-    "(fn main () ->Int (unbox (box 40)))",
+    "[fn main [] ->Int [unbox [box 40]]]",
     ("main", "main"),
     &library,
   )
@@ -485,7 +485,7 @@ fn custom_types_are_distinct_across_modules() {
     ));
 
   let err = compile_executable_from_source(
-    "(fn main () ->Int (left::unbox (right::box \"nope\")))",
+    "[fn main [] ->Int [left::unbox [right::box \"nope\"]]]",
     ("main", "main"),
     &library,
   )
@@ -512,7 +512,7 @@ fn bare_custom_type_annotations_must_be_unambiguous() {
     ));
 
   let err =
-    compile_executable_from_source("(fn main () ->Box 1)", ("main", "main"), &types).unwrap_err();
+    compile_executable_from_source("[fn main [] ->Box 1]", ("main", "main"), &types).unwrap_err();
 
   assert!(err.contains("ambiguous type `Box`"), "{err}");
   assert!(err.contains("left::Box"), "{err}");
@@ -531,7 +531,7 @@ fn bare_custom_type_annotations_must_be_unambiguous() {
     |ctx, args| ctx.alloc_struct("left", "Box", vec![args[0]]),
   ));
   compile_executable_from_source(
-    "(fn main () -> left::Box (left::box 1))",
+    "[fn main [] -> left::Box [left::box 1]]",
     ("main", "main"),
     &library,
   )
@@ -541,7 +541,7 @@ fn bare_custom_type_annotations_must_be_unambiguous() {
 #[test]
 fn call_main_with_args_is_public_api() {
   let package = compile_executable_from_source(
-    "(fn main (a:Int b:Int) ->Int (+ a b))",
+    "[fn main [a:Int b:Int] ->Int [+ a b]]",
     ("main", "main"),
     &Library::default(),
   )
@@ -556,7 +556,7 @@ fn call_main_with_args_is_public_api() {
 #[test]
 fn call_main_with_checks_arity() {
   let package = compile_executable_from_source(
-    "(fn main (a:Int) ->Int a)",
+    "[fn main [a:Int] ->Int a]",
     ("main", "main"),
     &Library::default(),
   )
@@ -576,10 +576,10 @@ fn call_main_with_checks_arity() {
 fn call_value_with_args_is_public_api() {
   let package = compile_executable_from_source(
     "
-      (fn main () ->(Fn (Int) -> Int)
-        (let base 10)
-        (fn add-base (x:Int) ->Int (+ base x))
-        add-base)
+      [fn main [] ->[Fn [Int] -> Int]
+        [let base 10]
+        [fn add-base [x:Int] ->Int [+ base x]]
+        add-base]
     ",
     ("main", "main"),
     &Library::default(),
@@ -656,27 +656,27 @@ fn allocating_builtins_check_memory_before_building_results() {
   let ptr = ::std::mem::size_of::<Value<'static>>();
   let cases = [
     (
-      format!("(fn main () ->String (std::concat \"{large}\" \"{large}\"))"),
+      format!("[fn main [] ->String [std::concat \"{large}\" \"{large}\"]]"),
       2,
       1024,
     ),
     (
-      "(fn main () ->(List Int) (std::list 1 2 3 4))".to_string(),
+      "[fn main [] ->[List Int] [std::list 1 2 3 4]]".to_string(),
       4,
       4 * ptr,
     ),
     (
-      "(fn main () ->(List Int) (std::push (std::list 1 2 3) 4))".to_string(),
+      "[fn main [] ->[List Int] [std::push [std::list 1 2 3] 4]]".to_string(),
       2,
       4 * ptr,
     ),
     (
-      "(fn main () ->(List Int) (std::slice (std::list 1 2 3 4) 1 3))".to_string(),
+      "[fn main [] ->[List Int] [std::slice [std::list 1 2 3 4] 1 3]]".to_string(),
       3,
       2 * ptr,
     ),
     (
-      format!("(fn main () ->String (std::slice \"{large}\" 0 512))"),
+      format!("[fn main [] ->String [std::slice \"{large}\" 0 512]]"),
       3,
       large.len(),
     ),
@@ -690,7 +690,7 @@ fn allocating_builtins_check_memory_before_building_results() {
 #[test]
 fn list_idx_returns_the_existing_value_without_cloning() {
   let large = "x".repeat(64 * 1024);
-  let source = format!("(fn main () ->String (std::idx (std::list \"{large}\") 0))");
+  let source = format!("[fn main [] ->String [std::idx [std::list \"{large}\"] 0]]");
   let mut exec = before_final_call(&source);
   let scratch_bytes = 2 * ::std::mem::size_of::<Value<'static>>();
   exec.set_memory_limit(Some(exec.memory_usage() + scratch_bytes));
@@ -707,7 +707,7 @@ fn list_idx_returns_the_existing_value_without_cloning() {
 #[test]
 fn builtin_argument_buffer_is_reserved_before_allocation() {
   let source = format!(
-    "(fn main () ->(List Int) (std::list {}))",
+    "[fn main [] ->[List Int] [std::list {}]]",
     (0..128)
       .map(|i| i.to_string())
       .collect::<Vec<_>>()
@@ -725,7 +725,7 @@ fn builtin_argument_buffer_is_reserved_before_allocation() {
 
 #[test]
 fn range_native_builder_enforces_memory_limit() {
-  let mut exec = before_final_call("(fn main () ->(List Int) (std::range 0 10000))");
+  let mut exec = before_final_call("[fn main [] ->[List Int] [std::range 0 10000]]");
   let value_bytes = ::std::mem::size_of::<Value<'static>>();
   let scratch_bytes = 2 * value_bytes;
   let result_value_bytes = 10_000 * value_bytes;
@@ -739,21 +739,21 @@ fn range_native_builder_enforces_memory_limit() {
 #[test]
 fn string_slicing_uses_character_indices() {
   assert_eq!(
-    eval_builtin_main("(fn main () ->String (std::slice \"aé🦀z\" 1 3))").unwrap(),
+    eval_builtin_main("[fn main [] ->String [std::slice \"aé🦀z\" 1 3]]").unwrap(),
     SLValue::String("é🦀".to_string())
   );
   assert_eq!(
-    eval_builtin_main("(fn main () ->String (std::slice \"aé🦀z\" -3 -1))").unwrap(),
+    eval_builtin_main("[fn main [] ->String [std::slice \"aé🦀z\" -3 -1]]").unwrap(),
     SLValue::String("é🦀".to_string())
   );
   assert_eq!(
-    eval_builtin_main("(fn main () ->String (std::slice \"aé🦀z\" -2 -1))").unwrap(),
+    eval_builtin_main("[fn main [] ->String [std::slice \"aé🦀z\" -2 -1]]").unwrap(),
     SLValue::String("🦀".to_string())
   );
 }
 
 /// End-to-end: the surface `(rand::rng seed "name")` returns an `Rng`
-/// wrapping a `Cell(Int)` whose contents match the seed derivation directly.
+/// wrapping a `Cell[Int]` whose contents match the seed derivation directly.
 #[rstest]
 #[case::alpha(0, "alpha", -1438303955140652998)]
 #[case::beta(1, "beta", 6165243067257761546)]
@@ -766,7 +766,7 @@ fn string_slicing_uses_character_indices() {
 #[case::big(123_456_789, "big", -7499502896394584729)]
 #[case::huge(-8_589_934_592, "huge", 5640261956235639084)]
 fn rand_rng_surface(#[case] seed: i64, #[case] name: &str, #[case] expected: i64) {
-  let source = format!("(fn main () ->Rng (rand::rng {} \"{}\"))", seed, name);
+  let source = format!("[fn main [] ->Rng [rand::rng {} \"{}\"]]", seed, name);
   let result = eval_builtin_main(&source).unwrap();
   match result {
     SLValue::Struct { fields, .. } => match fields.as_slice() {
@@ -803,7 +803,7 @@ fn host_builtins_can_construct_rng_values() {
     },
   ));
   let package = compile_executable_from_source(
-    "(fn main () ->Int (rand::roll! (host::rng 42) 20))",
+    "[fn main [] ->Int [rand::roll! [host::rng 42] 20]]",
     ("main", "main"),
     &library,
   )
@@ -833,16 +833,16 @@ fn host_builtins_can_construct_rng_values() {
 #[case::big(123_456_789, "big", [17, 8, 18, 16, 14, 11, 11, 4, 10, 9])]
 #[case::huge(-8_589_934_592, "huge", [4, 18, 7, 17, 11, 14, 15, 18, 1, 9])]
 fn rand_roll_surface_chain(#[case] seed: i64, #[case] name: &str, #[case] expected: [i64; 10]) {
-  // (std::map (std::range 0 10) (fn roll (_idx:Int) ->Int (rand::roll! rng 20)))
+  // [std::map [std::range 0 10] [fn roll [_idx:Int] ->Int [rand::roll! rng 20]]]
   //
   // `std::map` applies `roll` to each element of `(std::range 0 10)` and
   // collects the rolls. `roll` ignores its argument (the index) and captures
   // the explicit `rng` cell, which `rand::roll!` mutates.
   let src = format!(
-    "(fn main () ->(List Int)\n\
-        (let rng (rand::rng {seed} \"{name}\"))\n\
-        (fn roll (_idx:Int) ->Int (rand::roll! rng 20))\n\
-        (std::map (std::range 0 10) roll))"
+    "[fn main [] ->[List Int]\n\
+        [let rng [rand::rng {seed} \"{name}\"]]\n\
+        [fn roll [_idx:Int] ->Int [rand::roll! rng 20]]\n\
+        [std::map [std::range 0 10] roll]]"
   );
   let result = eval_builtin_main(&src).unwrap();
   let got: Vec<i64> = match result {
@@ -862,7 +862,7 @@ fn rand_roll_surface_chain(#[case] seed: i64, #[case] name: &str, #[case] expect
 #[test]
 fn range_basic() {
   assert_eq!(
-    eval_builtin_main("(fn main () ->(List Int) (std::range 0 5))").unwrap(),
+    eval_builtin_main("[fn main [] ->[List Int] [std::range 0 5]]").unwrap(),
     SLValue::List(vec![
       SLValue::Int(0),
       SLValue::Int(1),
@@ -876,11 +876,11 @@ fn range_basic() {
 #[test]
 fn range_empty() {
   assert_eq!(
-    eval_builtin_main("(fn main () ->(List Int) (std::range 3 3))").unwrap(),
+    eval_builtin_main("[fn main [] ->[List Int] [std::range 3 3]]").unwrap(),
     SLValue::List(vec![])
   );
   assert_eq!(
-    eval_builtin_main("(fn main () ->(List Int) (std::range 5 2))").unwrap(),
+    eval_builtin_main("[fn main [] ->[List Int] [std::range 5 2]]").unwrap(),
     SLValue::List(vec![])
   );
 }
@@ -888,7 +888,7 @@ fn range_empty() {
 #[test]
 fn range_negative_start() {
   assert_eq!(
-    eval_builtin_main("(fn main () ->(List Int) (std::range -2 2))").unwrap(),
+    eval_builtin_main("[fn main [] ->[List Int] [std::range -2 2]]").unwrap(),
     SLValue::List(vec![
       SLValue::Int(-2),
       SLValue::Int(-1),
@@ -903,9 +903,9 @@ fn range_negative_start() {
 fn map_doubles() {
   assert_eq!(
     eval_builtin_main(
-      "(fn main () ->(List Int)
-           (fn dbl (x:Int) ->Int (std::+ x x))
-           (std::map (std::list 1 2 3) dbl))"
+      "[fn main [] ->[List Int]
+           [fn dbl [x:Int] ->Int [std::+ x x]]
+           [std::map [std::list 1 2 3] dbl]]"
     )
     .unwrap(),
     SLValue::List(vec![SLValue::Int(2), SLValue::Int(4), SLValue::Int(6)])
@@ -916,9 +916,9 @@ fn map_doubles() {
 fn map_empty_list() {
   assert_eq!(
     eval_builtin_main(
-      "(fn main () ->(List Int)
-           (fn id (x:Int) ->Int x)
-           (std::map (std::list) id))"
+      "[fn main [] ->[List Int]
+           [fn id [x:Int] ->Int x]
+           [std::map [std::list] id]]"
     )
     .unwrap(),
     SLValue::List(vec![])
@@ -929,9 +929,9 @@ fn map_empty_list() {
 fn map_with_local_closure() {
   assert_eq!(
     eval_builtin_main(
-      "(fn main () ->(List Int)
-           (fn inc (x:Int) ->Int (std::+ x 1))
-           (std::map (std::range 0 5) inc))"
+      "[fn main [] ->[List Int]
+           [fn inc [x:Int] ->Int [std::+ x 1]]
+           [std::map [std::range 0 5] inc]]"
     )
     .unwrap(),
     SLValue::List(vec![
@@ -947,9 +947,9 @@ fn map_with_local_closure() {
 #[test]
 fn map_builds_large_persistent_list_in_order() {
   let result = eval_builtin_main(
-    "(fn main () ->(List Int)
-       (fn id (x:Int) ->Int x)
-       (std::map (std::range 0 1000) id))",
+    "[fn main [] ->[List Int]
+       [fn id [x:Int] ->Int x]
+       [std::map [std::range 0 1000] id]]",
   )
   .unwrap();
   let expected = (0..1_000).map(SLValue::Int).collect();
@@ -959,33 +959,33 @@ fn map_builds_large_persistent_list_in_order() {
 #[test]
 fn map_non_list_errors() {
   let err = eval_builtin_main(
-    "(fn main () ->Int
-         (fn id (x:Int) ->Int x)
-         (std::map 5 id))",
+    "[fn main [] ->Int
+         [fn id [x:Int] ->Int x]
+         [std::map 5 id]]",
   )
   .unwrap_err();
-  assert!(err.contains("expected `(List"), "got: {}", err);
+  assert!(err.contains("expected `[List"), "got: {}", err);
 }
 
 /// `rand::roll!` rejects non-positive sides with a runtime error.
 #[test]
 fn rand_roll_rejects_non_positive_sides() {
   let err =
-    eval_builtin_main("(fn main () ->Int (rand::roll! (rand::rng 0 \"x\") 0))").unwrap_err();
+    eval_builtin_main("[fn main [] ->Int [rand::roll! [rand::rng 0 \"x\"] 0]]").unwrap_err();
   assert!(err.contains("sides must be positive"), "got: {}", err);
 }
 
 /// `rand::roll!` rejects a non-Rng value.
 #[test]
 fn rand_roll_rejects_non_rng() {
-  let err = eval_builtin_main("(fn main () ->Int (rand::roll! \"not-a-cell\" 6))").unwrap_err();
+  let err = eval_builtin_main("[fn main [] ->Int [rand::roll! \"not-a-cell\" 6]]").unwrap_err();
   assert!(err.contains("expected `rand::Rng`"), "got: {}", err);
 }
 
 /// `rand::rng` rejects non-Int seeds.
 #[test]
 fn rand_rng_rejects_non_int_seed() {
-  let err = eval_builtin_main("(fn main () ->Int (rand::rng \"x\" \"name\"))").unwrap_err();
+  let err = eval_builtin_main("[fn main [] ->Int [rand::rng \"x\" \"name\"]]").unwrap_err();
   assert!(err.contains("expected `Int`"), "got: {}", err);
 }
 
@@ -1003,14 +1003,14 @@ fn rand_choice_surface_chain_advances_rng_state() {
     })
     .collect::<Vec<_>>();
   let source = format!(
-    "(fn main () ->(List Int)
-       (let rng (rand::rng {seed} \"{name}\"))
-       (let items (std::list 10 20 30))
-       (std::list
-         (rand::choice! rng items) (rand::choice! rng items)
-         (rand::choice! rng items) (rand::choice! rng items)
-         (rand::choice! rng items) (rand::choice! rng items)
-         (rand::choice! rng items) (rand::choice! rng items)))"
+    "[fn main [] ->[List Int]
+       [let rng [rand::rng {seed} \"{name}\"]]
+       [let items [std::list 10 20 30]]
+       [std::list
+         [rand::choice! rng items] [rand::choice! rng items]
+         [rand::choice! rng items] [rand::choice! rng items]
+         [rand::choice! rng items] [rand::choice! rng items]
+         [rand::choice! rng items] [rand::choice! rng items]]]"
   );
 
   assert_eq!(eval_builtin_main(&source).unwrap(), SLValue::List(expected));
@@ -1024,11 +1024,11 @@ fn rand_choice_of_singleton_still_advances_rng_state() {
   let (_, next) = rand_roll(initial, 1);
   let expected_roll = rand_roll(next, 20).0;
   let source = format!(
-    "(fn main () ->(List Int)
-       (let rng (rand::rng {seed} \"{name}\"))
-       (std::list
-         (rand::choice! rng (std::list 99))
-         (rand::roll! rng 20)))"
+    "[fn main [] ->[List Int]
+       [let rng [rand::rng {seed} \"{name}\"]]
+       [std::list
+         [rand::choice! rng [std::list 99]]
+         [rand::roll! rng 20]]]"
   );
 
   assert_eq!(
@@ -1040,7 +1040,7 @@ fn rand_choice_of_singleton_still_advances_rng_state() {
 #[test]
 fn rand_choice_rejects_an_empty_list() {
   let err =
-    eval_builtin_main("(fn main () ->Int (rand::choice! (rand::rng 0 \"empty\") (std::list)))")
+    eval_builtin_main("[fn main [] ->Int [rand::choice! [rand::rng 0 \"empty\"] [std::list]]]")
       .unwrap_err();
   assert!(err.contains("empty list"), "got: {err}");
 }
@@ -1086,8 +1086,8 @@ fn host_builtins_can_receive_and_return_tuples() {
     ));
 
   let package = compile_executable_from_source(
-    "(fn main () -> (Tuple String Int)
-       (host::swap (Tuple 7 \"hi\")))",
+    "[fn main [] -> [Tuple String Int]
+       [host::swap [Tuple 7 \"hi\"]]]",
     ("main", "main"),
     &library,
   )
@@ -1101,8 +1101,8 @@ fn host_builtins_can_receive_and_return_tuples() {
   );
 
   let package = compile_executable_from_source(
-    "(fn main () -> Int
-       (host::first (Tuple 9 2)))",
+    "[fn main [] -> Int
+       [host::first [Tuple 9 2]]]",
     ("main", "main"),
     &library,
   )
@@ -1114,13 +1114,13 @@ fn host_builtins_can_receive_and_return_tuples() {
 }
 
 /// `std::remove-idx` returns the element at `index` paired with the list with
-/// that element removed, as a `(Tuple A (List A))`. Negative indices count from
+/// that element removed, as a `[Tuple A [List A]]`. Negative indices count from
 /// the end, mirroring `std::idx`.
 #[test]
 fn remove_idx_returns_first_element_and_remaining_list() {
   assert_eq!(
     eval_builtin_main(
-      "(fn main () -> (Tuple Int (List Int)) (std::remove-idx (std::list 1 2 3) 0))"
+      "[fn main [] -> [Tuple Int [List Int]] [std::remove-idx [std::list 1 2 3] 0]]"
     )
     .unwrap(),
     SLValue::Tuple(vec![
@@ -1134,7 +1134,7 @@ fn remove_idx_returns_first_element_and_remaining_list() {
 fn remove_idx_removes_from_the_middle() {
   assert_eq!(
     eval_builtin_main(
-      "(fn main () -> (Tuple Int (List Int)) (std::remove-idx (std::list 1 2 3) 1))"
+      "[fn main [] -> [Tuple Int [List Int]] [std::remove-idx [std::list 1 2 3] 1]]"
     )
     .unwrap(),
     SLValue::Tuple(vec![
@@ -1148,7 +1148,7 @@ fn remove_idx_removes_from_the_middle() {
 fn remove_idx_negative_index_counts_from_end() {
   assert_eq!(
     eval_builtin_main(
-      "(fn main () -> (Tuple Int (List Int)) (std::remove-idx (std::list 1 2 3) -1))"
+      "[fn main [] -> [Tuple Int [List Int]] [std::remove-idx [std::list 1 2 3] -1]]"
     )
     .unwrap(),
     SLValue::Tuple(vec![
@@ -1162,7 +1162,7 @@ fn remove_idx_negative_index_counts_from_end() {
 fn remove_idx_negative_index_minus_two() {
   assert_eq!(
     eval_builtin_main(
-      "(fn main () -> (Tuple Int (List Int)) (std::remove-idx (std::list 1 2 3) -2))"
+      "[fn main [] -> [Tuple Int [List Int]] [std::remove-idx [std::list 1 2 3] -2]]"
     )
     .unwrap(),
     SLValue::Tuple(vec![
@@ -1175,7 +1175,7 @@ fn remove_idx_negative_index_minus_two() {
 #[test]
 fn remove_idx_single_element_list_yields_empty_list() {
   assert_eq!(
-    eval_builtin_main("(fn main () -> (Tuple Int (List Int)) (std::remove-idx (std::list 7) 0))")
+    eval_builtin_main("[fn main [] -> [Tuple Int [List Int]] [std::remove-idx [std::list 7] 0]]")
       .unwrap(),
     SLValue::Tuple(vec![SLValue::Int(7), SLValue::List(vec![])])
   );
@@ -1183,10 +1183,10 @@ fn remove_idx_single_element_list_yields_empty_list() {
 
 #[test]
 fn remove_idx_leaves_original_list_unchanged() {
-  let source = "(fn main () -> (List Int)
-    (let xs (std::list 1 2 3))
-    (std::remove-idx xs 1)
-    xs)";
+  let source = "[fn main [] -> [List Int]
+    [let xs [std::list 1 2 3]]
+    [std::remove-idx xs 1]
+    xs]";
   assert_eq!(
     eval_builtin_main(source).unwrap(),
     SLValue::List(vec![SLValue::Int(1), SLValue::Int(2), SLValue::Int(3)])
@@ -1196,7 +1196,7 @@ fn remove_idx_leaves_original_list_unchanged() {
 #[test]
 fn remove_idx_out_of_range_errors() {
   let err = eval_builtin_main(
-    "(fn main () -> (Tuple Int (List Int)) (std::remove-idx (std::list 1 2 3) 3))",
+    "[fn main [] -> [Tuple Int [List Int]] [std::remove-idx [std::list 1 2 3] 3]]",
   )
   .unwrap_err();
   assert!(err.contains("remove-idx"), "got: {}", err);
@@ -1206,7 +1206,7 @@ fn remove_idx_out_of_range_errors() {
 #[test]
 fn remove_idx_negative_out_of_range_errors() {
   let err = eval_builtin_main(
-    "(fn main () -> (Tuple Int (List Int)) (std::remove-idx (std::list 1 2 3) -4))",
+    "[fn main [] -> [Tuple Int [List Int]] [std::remove-idx [std::list 1 2 3] -4]]",
   )
   .unwrap_err();
   assert!(err.contains("remove-idx"), "got: {}", err);
@@ -1216,7 +1216,7 @@ fn remove_idx_negative_out_of_range_errors() {
 #[test]
 fn remove_idx_on_empty_list_errors() {
   let err =
-    eval_builtin_main("(fn main () -> (Tuple Int (List Int)) (std::remove-idx (std::list) 0))")
+    eval_builtin_main("[fn main [] -> [Tuple Int [List Int]] [std::remove-idx [std::list] 0]]")
       .unwrap_err();
   assert!(err.contains("remove-idx"), "got: {}", err);
   assert!(err.contains("out of range"), "got: {}", err);
@@ -1225,7 +1225,7 @@ fn remove_idx_on_empty_list_errors() {
 #[test]
 fn remove_idx_non_list_errors() {
   let err =
-    eval_builtin_main("(fn main () -> (Tuple Int (List Int)) (std::remove-idx 5 0))").unwrap_err();
+    eval_builtin_main("[fn main [] -> [Tuple Int [List Int]] [std::remove-idx 5 0]]").unwrap_err();
   assert!(err.contains("expected"), "got: {}", err);
   assert!(err.contains("List"), "got: {}", err);
 }
@@ -1233,7 +1233,7 @@ fn remove_idx_non_list_errors() {
 #[test]
 fn remove_idx_non_int_index_errors() {
   let err = eval_builtin_main(
-    "(fn main () -> (Tuple Int (List Int)) (std::remove-idx (std::list 1 2 3) \"x\"))",
+    "[fn main [] -> [Tuple Int [List Int]] [std::remove-idx [std::list 1 2 3] \"x\"]]",
   )
   .unwrap_err();
   assert!(err.contains("expected"), "got: {}", err);

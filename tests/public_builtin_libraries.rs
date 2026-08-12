@@ -28,7 +28,7 @@ fn builtin_libraries_and_rng_allocator_are_public() {
       seeded_rng,
     ));
   let package = compile_executable_from_source(
-    "(fn main () ->Int (rand::roll! (host::rng 42) 20))",
+    "[fn main [] ->Int [rand::roll! [host::rng 42] 20]]",
     ("main", "main"),
     &library,
   )

@@ -178,7 +178,7 @@ fn run(source: &str) -> Result<SLValue, String> {
 #[test]
 fn point_roundtrips_through_arena() {
   assert_eq!(
-    run("(fn main () ->Int (host::point-roundtrip))"),
+    run("[fn main [] ->Int [host::point-roundtrip]]"),
     Ok(SLValue::Int(1))
   );
 }
@@ -186,7 +186,7 @@ fn point_roundtrips_through_arena() {
 #[test]
 fn tuple_struct_roundtrips_through_arena() {
   assert_eq!(
-    run("(fn main () ->Int (host::vec2-roundtrip))"),
+    run("[fn main [] ->Int [host::vec2-roundtrip]]"),
     Ok(SLValue::Int(1))
   );
 }
@@ -194,14 +194,14 @@ fn tuple_struct_roundtrips_through_arena() {
 #[test]
 fn recursive_enum_roundtrips_through_arena() {
   assert_eq!(
-    run("(fn main () ->Int (host::dice-roundtrip))"),
+    run("[fn main [] ->Int [host::dice-roundtrip]]"),
     Ok(SLValue::Int(1))
   );
 }
 
 #[test]
 fn from_value_reads_source_constructed_variant() {
-  let source = "(fn main () ->Int (host::dice-num (new arp::Dice::Expr num:2 size:6)))";
+  let source = "[fn main [] ->Int [host::dice-num [new arp::Dice::Expr num:2 size:6]]]";
   assert_eq!(run(source), Ok(SLValue::Int(2)));
 }
 
@@ -210,13 +210,13 @@ fn to_value_result_is_matchable_in_source() {
   // With `#[safelisp(field = "...")]` naming the positional fields, every
   // variant — including the tuple variants — is matchable by name in source,
   // so the match is fully exhaustive without a default arm.
-  let source = "(fn main () ->Int
-  (match (host::make-flat)
-    (Expr num size) => 0
-    (Plus left right) => 1
-    (Flat value) => value
-    (BestOf count dice) => 2
-    (Crit) => 3))";
+  let source = "[fn main [] ->Int
+  [match [host::make-flat]
+    [Expr num size] => 0
+    [Plus left right] => 1
+    [Flat value] => value
+    [BestOf count dice] => 2
+    [Crit] => 3]]";
   assert_eq!(run(source), Ok(SLValue::Int(-3)));
 }
 
@@ -224,7 +224,7 @@ fn to_value_result_is_matchable_in_source() {
 fn tuple_variant_is_constructible_in_source() {
   // A tuple variant with named positional fields can be built with `new` and
   // read back by the host via `from_value`.
-  let source = "(fn main () ->Int (host::dice-best-of-count (new arp::Dice::BestOf count:2 dice:(new arp::Dice::Crit))))";
+  let source = "[fn main [] ->Int [host::dice-best-of-count [new arp::Dice::BestOf count:2 dice:[new arp::Dice::Crit]]]]";
   assert_eq!(run(source), Ok(SLValue::Int(2)));
 }
 
@@ -233,10 +233,10 @@ fn readme_match_example_compiles() {
   // Mirrors the match example in README.md's "Deriving Conversions" section:
   // constructs a tuple variant by name and matches it (with a default arm).
   // Mirrors the layout-form match example in README.md exactly.
-  let source = "fn main () -> Int
-  let flat (new arp::Dice::Flat value:3)
-  match (new arp::Dice::BestOf count:2 dice:flat)
-    (BestOf count dice) => count
+  let source = "fn main [] -> Int
+  let flat [new arp::Dice::Flat value:3]
+  match [new arp::Dice::BestOf count:2 dice:flat]
+    [BestOf count dice] => count
     _ => 0";
   assert_eq!(run(source), Ok(SLValue::Int(2)));
 }
@@ -245,7 +245,7 @@ fn readme_match_example_compiles() {
 fn from_value_exceeding_depth_budget_errors() {
   // A depth-5 chain decoded with a budget of 3 must hit the depth limit.
   assert_eq!(
-    run("(fn main () ->Int (host::depth-check 5 3))"),
+    run("[fn main [] ->Int [host::depth-check 5 3]]"),
     Ok(SLValue::Int(2))
   );
 }
@@ -254,7 +254,7 @@ fn from_value_exceeding_depth_budget_errors() {
 fn from_value_within_depth_budget_succeeds() {
   // The same depth-5 chain decoded with a budget of 10 round-trips fine.
   assert_eq!(
-    run("(fn main () ->Int (host::depth-check 5 10))"),
+    run("[fn main [] ->Int [host::depth-check 5 10]]"),
     Ok(SLValue::Int(1))
   );
 }

@@ -3,7 +3,7 @@
 An experimental language implementation which tries very hard to restrict the
 executed code to the point that you can safely run untrusted code from randos.
 
- Safelisp is kinda like a lisp but not really. It is statically typed
+Safelisp is kinda like a lisp but not really. It is statically typed
 and has whitespace layout. Sorry, haters!
 
 ## Rust API
@@ -19,8 +19,8 @@ use safelisp::{
 };
 
 let source = r#"
-fn main () -> Int
-  (host::square 12)
+fn main [] -> Int
+  [host::square 12]
 "#;
 
 let library = Library::default().with_builtin(Builtin::unary(
@@ -49,11 +49,11 @@ execution can be resumed later with another call to `run`.
 
 ```rust
 let source = r#"
-fn loop () -> Int
-  (loop)
+fn loop [] -> Int
+  [loop]
 
-fn main () -> Int
-  (loop)
+fn main [] -> Int
+  [loop]
 "#;
 
 let package = compile_executable_from_source(source, ("main", "main"), &Library::default())?;
@@ -76,14 +76,14 @@ as strings, lists, closures, and interpreter stack/frame vectors.
 
 ```rust
 let source = r#"
-fn grow (s: String n: Int) -> String
-  if (== n 0)
+fn grow [s: String n: Int] -> String
+  if [== n 0]
     s
   else
-    (grow (concat s s) (- n 1))
+    [grow [concat s s] [- n 1]]
 
-fn main () -> String
-  (grow "x" 20)
+fn main [] -> String
+  [grow "x" 20]
 "#;
 
 let package = compile_executable_from_source(source, ("main", "main"), &Library::default())?;
@@ -98,7 +98,7 @@ assert!(error.contains("memory limit exceeded"));
 ### Parse Depth Limits
 
 The parser is recursive descent, so deeply nested source (for example, many
-thousands of nested parentheses) would otherwise overflow the native stack while
+thousands of nested brackets) would otherwise overflow the native stack while
 *compiling*. `CompileOptions::max_parse_depth` caps the nesting depth the parser
 will accept, returning an error instead.
 
@@ -117,9 +117,9 @@ let package = safelisp::compile_executable_from_source_with_options(
 ## Language Tour
 
 SafeLisp has a Lisp core with an indentation-based layout syntax for the common
-special forms. Function calls use parentheses, but special forms (`fn`, `if`,
+special forms. Function calls use square brackets, but special forms (`fn`, `if`,
 `else`, `match`, `let`, `struct`, `enum`, `new`, `block`, `return`, `and`,
-`or`, `for`, and `bind`) can be written without outer parens.
+`or`, `for`, and `bind`) can be written without outer brackets.
 
 ### Functions
 
@@ -128,24 +128,24 @@ function body may contain multiple expressions, and the final expression is the
 return value.
 
 ```lisp
-fn double (x: Int) -> Int
-  (+ x x)
+fn double [x: Int] -> Int
+  [+ x x]
 
-fn sum-to (n: Int) -> Int
-  if (== n 0)
+fn sum-to [n: Int] -> Int
+  if [== n 0]
     0
   else
-    (+ n (sum-to (- n 1)))
+    [+ n [sum-to [- n 1]]]
 
-fn main () -> Int
+fn main [] -> Int
   let x 21
-  (double x)
+  [double x]
 ```
 
-Functions may also return early. `(return)` returns `Void`; `(return value)` returns a value.
+Functions may also return early. `[return]` returns `Void`; `[return value]` returns a value.
 
 ```lisp
-fn first-or-zero (xs: (List Int)) -> Int
+fn first-or-zero [xs: [List Int]] -> Int
   for x in xs
     return x
   0
@@ -155,10 +155,10 @@ The `else` branch of an `if` is optional. An `if` with no `else` evaluates the
 then branch for side effects only and produces `Void`:
 
 ```lisp
-fn bump-if-zero (x: Int) -> Int
+fn bump-if-zero [x: Int] -> Int
   let result x
-  if (== x 0)
-    (= result 1)
+  if [== x 0]
+    [= result 1]
   result
 ```
 
@@ -169,8 +169,8 @@ stopping as soon as the result is known. They are variadic and require at least
 two operands.
 
 ```lisp
-fn should-send (enabled: Bool has-recipient: Bool) -> Bool
-  (and enabled has-recipient)
+fn should-send [enabled: Bool has-recipient: Bool] -> Bool
+  [and enabled has-recipient]
 ```
 
 ### List iteration
@@ -178,24 +178,24 @@ fn should-send (enabled: Bool has-recipient: Bool) -> Bool
 `for x in xs` is iteration for side-effects. It evaluates to `Void`.
 
 ```lisp
-fn visit-all (xs: (List Int))
+fn visit-all [xs: [List Int]]
   for x in xs
-    (host::visit x)
+    [host::visit x]
 
-fn visit-all-parenthesized (xs: (List Int))
-  (for x in xs
-    (host::visit x))
+fn visit-all-bracketed [xs: [List Int]]
+  [for x in xs
+    [host::visit x]]
 ```
 
 Function values are first class. Builtins and user functions can be passed to
 higher-order functions:
 
 ```lisp
-fn inc (x: Int) -> Int
-  (+ x 1)
+fn inc [x: Int] -> Int
+  [+ x 1]
 
-fn main () -> (List Int)
-  (map (list 1 2 3) inc)
+fn main [] -> [List Int]
+  [map [list 1 2 3] inc]
 ```
 
 ### Custom Types
@@ -207,16 +207,16 @@ struct Point
   x: Int
   y: Int
 
-fn length-ish (pt: Point) -> Int
-  (+ pt.x pt.y)
+fn length-ish [pt: Point] -> Int
+  [+ pt.x pt.y]
 
-fn origin () -> Point
+fn origin [] -> Point
   new Point
     x: 3
     y: 4
 
-fn main () -> Int
-  (length-ish (origin))
+fn main [] -> Int
+  [length-ish [origin]]
 ```
 
 And we have `enum` and `match`. Variant patterns list the fields to bind by
@@ -224,36 +224,36 @@ their declared names.
 
 ```lisp
 enum MaybeInt
-  (Some value: Int)
-  (None)
+  [Some value: Int]
+  [None]
 
-fn get-or-zero (maybe: MaybeInt) -> Int
+fn get-or-zero [maybe: MaybeInt] -> Int
   match maybe
-    (Some value) => # this has to be `value`, not some other name
-      let bumped (+ value 1)
+    [Some value] => # this has to be `value`, not some other name
+      let bumped [+ value 1]
       bumped
-    (None) => 0
+    [None] => 0
 
-fn answer () -> MaybeInt
+fn answer [] -> MaybeInt
   new MaybeInt::Some
     value: 41
 
-fn main () -> Int
-  (get-or-zero (answer))
+fn main [] -> Int
+  [get-or-zero [answer]]
 ```
 
 ### Tuples
 
 Anonymous tuples bundle two or more values of possibly different types. A tuple
-type is written `(Tuple T1 T2 ...)`, a value is constructed with `(Tuple v1 v2
-...)`, and elements are accessed positionally with `.0`, `.1`, and so on.
+type is written `[Tuple T1 T2 ...]`, a value is constructed with `[Tuple v1 v2
+...]`, and elements are accessed positionally with `.0`, `.1`, and so on.
 
 ```lisp
-fn foo () -> (Tuple Int String)
-  (Tuple 3 "foo")
+fn foo [] -> [Tuple Int String]
+  [Tuple 3 "foo"]
 
-fn main () -> Int
-  let result (foo)
+fn main [] -> Int
+  let result [foo]
   result.0
 ```
 
@@ -268,11 +268,11 @@ the only mutation primitive is `Cell`: create one with `cell`, read it with
 `get`, and update it with `set!`.
 
 ```lisp
-fn main () -> Int
-  let counter (cell 0)
-  (set! counter (+ (get counter) 1))
-  (set! counter (+ (get counter) 41))
-  (get counter)
+fn main [] -> Int
+  let counter [cell 0]
+  [set! counter [+ [get counter] 1]]
+  [set! counter [+ [get counter] 41]]
+  [get counter]
 ```
 
 ### Closures
@@ -281,18 +281,18 @@ Nested functions can capture values from their surrounding scope. A closure that
 needs mutable state captures a `Cell`.
 
 ```lisp
-fn counter () -> (Fn () -> Int)
-  let count (cell 0)
-  fn inc () -> Int
-    (set! count (+ 1 (get count)))
-    (get count)
+fn counter [] -> [Fn [] -> Int]
+  let count [cell 0]
+  fn inc [] -> Int
+    [set! count [+ 1 [get count]]]
+    [get count]
   inc
 
-fn main () -> Int
-  let next (counter)
-  (next) # returns 1
-  (next) # returns 2
-  (next) # returns 3
+fn main [] -> Int
+  let next [counter]
+  [next] # returns 1
+  [next] # returns 2
+  [next] # returns 3
 ```
 
 ### Variable Bindings: `let`, `shd`, and `=`
@@ -310,7 +310,7 @@ SafeLisp has three binding forms:
   existing binding.
 
 ```lisp
-fn main () -> Int
+fn main [] -> Int
   let x 1
   = x 2
   x  # 2
@@ -322,12 +322,12 @@ closure still sees the original captured value. In other words, neither `shd`
 nor `=` allows observable mutation through closures.
 
 ```lisp
-fn main () -> Int
+fn main [] -> Int
   let a 1
-  fn inner () -> Int
+  fn inner [] -> Int
     a  # sees the captured value 1, not 2
   shd a 2
-  (inner)
+  [inner]
 ```
 
 This returns 1, but if you move the `shd a 2` to before the `fn inner`, it will
@@ -337,9 +337,9 @@ mutation.
 `shd` may change a binding's type, to facilitate common patterns like:
 
 ```lisp
-fn main () -> Creature
-  let creature (load-file "creature.json")
-  shd creature (parse-json creature)
+fn main [] -> Creature
+  let creature [load-file "creature.json"]
+  shd creature [parse-json creature]
   creature
 ```
 
@@ -348,11 +348,11 @@ fn main () -> Creature
 `=` can be used to reassign a variable even inside `for`, `if`, and `match`:
 
 ```lisp
-fn find-three () -> Bool
+fn find-three [] -> Bool
   let found false
-  for x in (range 0 10)
-    if (== x 3)
-      (= found true)
+  for x in [range 0 10]
+    if [== x 3]
+      [= found true]
   found
 ```
 
@@ -366,16 +366,16 @@ agree on the type.
 `bind` destructures a tuple into positional bindings in one form. Each pattern
 is one of:
 
-- `(let name)` — introduce a new binding.
-- `(shd name)` — shadow an existing binding with a fresh one (may change type).
-- `(= name)` — reassign an existing binding (requires the same type).
+- `[let name]` — introduce a new binding.
+- `[shd name]` — shadow an existing binding with a fresh one (may change type).
+- `[= name]` — reassign an existing binding (requires the same type).
 
 Patterns are matched against the tuple elements in order.
 
 ```lisp
-fn main () -> Int
-  let list (std::list 1 2 3 4 5)
-  bind ((= list) (let result)) (remove-idx list 5)
+fn main [] -> Int
+  let list [std::list 1 2 3 4 5]
+  bind [[= list] [let result]] [remove-idx list 5]
   result
 ```
 
@@ -384,7 +384,7 @@ element positionally for its side effects, and then yields the whole tuple:
 
 ```lisp
 block
-  let __tmp (remove-idx list 5)
+  let __tmp [remove-idx list 5]
   = list __tmp.0
   let result __tmp.1
   __tmp
@@ -408,7 +408,7 @@ let library = Library::default()
     |value, minimum| match (value, minimum) {
       (Value::Int(value), Value::Int(minimum)) => Ok(Value::Int(value.max(minimum))),
       (value, minimum) => Err(format!(
-        "clamp-min expected (Int, Int), got ({}, {})",
+        "clamp-min expected [Int, Int], got [{}, {}]",
         value.type_name(),
         minimum.type_name(),
       )),
@@ -443,12 +443,12 @@ let library = Library::new()
 ```
 
 ```lisp
-fn main () -> Int
-  let maybe (new host::MaybeInt::Some value: 42)
-  let boxed (new host::Box value: maybe)
+fn main [] -> Int
+  let maybe [new host::MaybeInt::Some value: 42]
+  let boxed [new host::Box value: maybe]
   match maybe
-    (Some value) => value
-    (None) => 0
+    [Some value] => value
+    [None] => 0
 ```
 
 ### Deriving Conversions for Rust Types
@@ -497,10 +497,10 @@ given an explicit SafeLisp name with `#[safelisp(field = "name")]`. This lets
 source code construct and match the variant by those names:
 
 ```lisp
-fn main () -> Int
-  let flat (new arp::Dice::Flat value:3)
-  match (new arp::Dice::BestOf count:2 dice:flat)
-    (BestOf count dice) => count
+fn main [] -> Int
+  let flat [new arp::Dice::Flat value:3]
+  match [new arp::Dice::BestOf count:2 dice:flat]
+    [BestOf count dice] => count
     _ => 0
 ```
 

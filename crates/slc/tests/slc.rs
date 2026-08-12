@@ -15,7 +15,7 @@ fn slc_uses_std_prelude() {
     std::process::id()
   ));
 
-  std::fs::write(&input_path, "(fn main () ->Int (+ 1 2))").expect("write source");
+  std::fs::write(&input_path, "[fn main [] ->Int [+ 1 2]]").expect("write source");
   let input_arg = input_path.to_string_lossy().into_owned();
   let output_arg = output_path.to_string_lossy().into_owned();
   let compile = Command::new(env!("CARGO_BIN_EXE_slc"))

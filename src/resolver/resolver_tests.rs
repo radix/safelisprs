@@ -35,19 +35,19 @@ fn resolve_err(source: &str) -> String {
 
 #[test]
 fn let_cannot_rebind_an_in_scope_name() {
-  let err = resolve_err("(fn main () (let a 1) (let a 2))");
+  let err = resolve_err("[fn main [] [let a 1] [let a 2]]");
   assert!(err.contains("already in scope"), "got: {err}");
 }
 
 #[test]
 fn let_cannot_shadow_a_parameter() {
-  let err = resolve_err("(fn main (p:Int) (let p 1))");
+  let err = resolve_err("[fn main [p:Int] [let p 1]]");
   assert!(err.contains("already in scope"), "got: {err}");
 }
 
 #[test]
 fn assign_rejects_an_unbound_name() {
-  let err = resolve_err("(fn main () (= y 1))");
+  let err = resolve_err("[fn main [] [= y 1]]");
   assert!(err.contains("not bound in the local scope"), "got: {err}");
 }
 
@@ -55,12 +55,12 @@ fn assign_rejects_an_unbound_name() {
 fn shd_introduces_a_fresh_binding_for_an_unbound_name() {
   // `shd` is a shadowing form equivalent to `let`: it introduces a fresh
   // binding even when no existing binding is present.
-  resolve_with_bindings("(fn main () (shd y 1))");
+  resolve_with_bindings("[fn main [] [shd y 1]]");
 }
 
 #[test]
 fn assign_rejects_a_module_level_function() {
-  let err = resolve_err("(fn x () 1) (fn main () (= x 3))");
+  let err = resolve_err("[fn x [] 1] [fn main [] [= x 3]]");
   assert!(err.contains("not bound in the local scope"), "got: {err}");
 }
 
@@ -68,20 +68,20 @@ fn assign_rejects_a_module_level_function() {
 fn shd_shadows_a_module_level_function() {
   // `shd` may shadow a same-module top-level function name: it creates a
   // fresh binding rather than reusing the function binding.
-  resolve_with_bindings("(fn x () 1) (fn main () (shd x 3))");
+  resolve_with_bindings("[fn x [] 1] [fn main [] [shd x 3]]");
 }
 
 #[test]
 fn shd_shadows_a_local_nested_function_binding() {
   // A nested `fn` is a local binding, so `shd`-ing it introduces a fresh
   // binding that shadows it (even with a different type).
-  resolve_with_bindings("(fn main () (fn x () 1) (shd x 3))");
+  resolve_with_bindings("[fn main [] [fn x [] 1] [shd x 3]]");
 }
 
 #[test]
 fn shd_shadows_a_local_let_binding() {
   // `shd` introduces a fresh binding that shadows the existing `let`.
-  resolve_with_bindings("(fn main () (let x 1) (shd x 2))");
+  resolve_with_bindings("[fn main [] [let x 1] [shd x 2]]");
 }
 
 #[test]
@@ -89,14 +89,14 @@ fn let_in_nested_fn_shadows_enclosing_binding() {
   // A `let` inside a nested function may shadow a binding from an enclosing
   // function: it creates a fresh binding rather than reusing the outer one, so
   // the outer variable is not captured.
-  resolve_with_bindings("(fn outer () (let a 1) (fn inner () (let a 2) a))");
+  resolve_with_bindings("[fn outer [] [let a 1] [fn inner [] [let a 2] a]]");
 }
 
 #[test]
 fn assign_of_enclosing_binding_is_rejected() {
   // `=` may only assign current-function locals; assigning a binding from an
   // enclosing function would require a capture, which `=` never creates.
-  let err = resolve_err("(fn outer () (let a 1) (fn inner () (= a 2)))");
+  let err = resolve_err("[fn outer [] [let a 1] [fn inner [] [= a 2]]]");
   assert!(err.contains("not bound in the local scope"), "got: {err}");
 }
 
@@ -105,7 +105,7 @@ fn shd_shadows_an_enclosing_binding() {
   // `shd` is a shadowing form: inside a nested function it may shadow a
   // binding from an enclosing function by introducing a fresh binding rather
   // than reusing the outer one, so the outer variable is not captured.
-  resolve_with_bindings("(fn outer () (let a 1) (fn inner () (shd a 2) a))");
+  resolve_with_bindings("[fn outer [] [let a 1] [fn inner [] [shd a 2] a]]");
 }
 
 #[test]
@@ -114,15 +114,15 @@ fn let_shadows_a_module_level_function() {
   // binding is not a current-function local, so the `let` creates a fresh
   // binding instead of erroring.
   resolve_with_bindings(
-    "(fn transform (x:Int) ->Int (std::+ x x))
-     (fn main () ->Int (let transform identity) transform)",
+    "[fn transform [x:Int] ->Int [std::+ x x]]
+     [fn main [] ->Int [let transform identity] transform]",
   );
 }
 
 #[test]
 fn rewrites_bare_fixed_call_to_qualified_call() {
   assert_eq!(
-    resolve("(fn main () ->Int (+ 1 2))")[0],
+    resolve("[fn main [] ->Int [+ 1 2]]")[0],
     AST::DefineFn(Function {
       name: "main".into(),
       params: vec![],
@@ -139,7 +139,7 @@ fn rewrites_bare_fixed_call_to_qualified_call() {
 #[test]
 fn rewrites_bare_value_to_function_ref() {
   assert_eq!(
-    resolve("(fn main () (let add +) add)")[0],
+    resolve("[fn main [] [let add +] add]")[0],
     AST::DefineFn(Function {
       name: "main".into(),
       params: vec![],
@@ -159,7 +159,7 @@ fn rewrites_bare_value_to_function_ref() {
 #[test]
 fn local_name_shadows_prelude() {
   assert_eq!(
-    resolve("(fn main () (let + 1) +)")[0],
+    resolve("[fn main [] [let + 1] +]")[0],
     AST::DefineFn(Function {
       name: "main".into(),
       params: vec![],
@@ -176,7 +176,7 @@ fn local_name_shadows_prelude() {
 #[test]
 fn same_module_function_shadows_prelude() {
   assert_eq!(
-    resolve("(fn + () 1) (fn main () ->Int (+))")[1],
+    resolve("[fn + [] 1] [fn main [] ->Int [+]]")[1],
     AST::DefineFn(Function {
       name: "main".into(),
       params: vec![],
@@ -193,7 +193,7 @@ fn same_module_function_shadows_prelude() {
 #[test]
 fn binding_in_only_one_if_branch_does_not_shadow_after_if() {
   assert_eq!(
-    resolve("(fn main () ->Int (if true (let + 1) 0) (+ 1 2))")[0],
+    resolve("[fn main [] ->Int [if true [let + 1] 0] [+ 1 2]]")[0],
     AST::DefineFn(Function {
       name: "main".into(),
       params: vec![],
@@ -220,7 +220,7 @@ fn let_in_both_if_branches_does_not_escape_after_if() {
   // the same name, the binding does not escape the conditional. The trailing
   // `+` therefore resolves to the prelude, not to either branch binding.
   assert_eq!(
-    resolve("(fn main () (if true (let + 1) (let + 2)) +)")[0],
+    resolve("[fn main [] [if true [let + 1] [let + 2]] +]")[0],
     AST::DefineFn(Function {
       name: "main".into(),
       params: vec![],
@@ -241,10 +241,10 @@ fn let_in_both_if_branches_does_not_escape_after_if() {
 #[test]
 fn parameter_shadowing_uses_the_parameter_binding() {
   let asts = resolve_with_bindings(
-    "(fn outer ()
-         (fn a (b:Int) ->Int b)
-         (fn b (n:Int) ->Int n)
-         a)",
+    "[fn outer []
+         [fn a [b:Int] ->Int b]
+         [fn b [n:Int] ->Int n]
+         a]",
   );
   let ASTKind::DefineFn(outer) = &asts[0].kind else {
     panic!("expected outer function");
@@ -265,10 +265,10 @@ fn parameter_shadowing_uses_the_parameter_binding() {
 #[test]
 fn mutual_recursion_references_the_sibling_binding() {
   let asts = resolve_with_bindings(
-    "(fn outer ()
-         (fn even (n:Int) ->Bool (odd n))
-         (fn odd (n:Int) ->Bool (even n))
-         even)",
+    "[fn outer []
+         [fn even [n:Int] ->Bool [odd n]]
+         [fn odd [n:Int] ->Bool [even n]]
+         even]",
   );
   let ASTKind::DefineFn(outer) = &asts[0].kind else {
     panic!("expected outer function");
@@ -300,7 +300,7 @@ fn assign_in_if_branches_reuses_one_binding() {
   // `=` reuses the existing binding rather than introducing a fresh one, so an
   // `=` in each branch of an `if` shares a single binding identity with the
   // outer `let` and with the reference after the conditional.
-  let asts = resolve_with_bindings("(fn main () ->Int (let x 0) (if true (= x 1) (= x 2)) x)");
+  let asts = resolve_with_bindings("[fn main [] ->Int [let x 0] [if true [= x 1] [= x 2]] x]");
   let ASTKind::DefineFn(main) = &asts[0].kind else {
     panic!("expected main");
   };
@@ -332,7 +332,7 @@ fn shd_in_if_branches_introduces_fresh_bindings() {
   // `shd` introduces a fresh binding in each branch rather than reusing the
   // outer one, so each branch gets its own binding identity and the reference
   // after the conditional resolves to the outer `let`.
-  let asts = resolve_with_bindings("(fn main () ->Int (let x 0) (if true (shd x 1) (shd x 2)) x)");
+  let asts = resolve_with_bindings("[fn main [] ->Int [let x 0] [if true [shd x 1] [shd x 2]] x]");
   let ASTKind::DefineFn(main) = &asts[0].kind else {
     panic!("expected main");
   };
@@ -364,7 +364,7 @@ fn shd_in_if_branches_introduces_fresh_bindings() {
 fn assign_reuses_existing_binding() {
   // `=` reassigns the existing binding in place: the `let` and the `=` share
   // one binding identity, which is also what the later reference resolves to.
-  let asts = resolve_with_bindings("(fn main () ->Int (let x 1) (= x 2) x)");
+  let asts = resolve_with_bindings("[fn main [] ->Int [let x 1] [= x 2] x]");
   let ASTKind::DefineFn(main) = &asts[0].kind else {
     panic!("expected main");
   };
@@ -386,7 +386,7 @@ fn shd_introduces_a_fresh_binding() {
   // `shd` introduces a fresh binding: the `let` and the `shd` have distinct
   // binding identities, and the later reference resolves to the `shd` binding
   // (the one that shadows).
-  let asts = resolve_with_bindings("(fn main () ->Int (let x 1) (shd x 2) x)");
+  let asts = resolve_with_bindings("[fn main [] ->Int [let x 1] [shd x 2] x]");
   let ASTKind::DefineFn(main) = &asts[0].kind else {
     panic!("expected main");
   };
@@ -406,9 +406,9 @@ fn shd_introduces_a_fresh_binding() {
 #[test]
 fn resolved_local_call_is_dynamic() {
   let asts = resolve_with_bindings(
-    "(fn main () ->Int
-         (let f std::+)
-         (f 1 2))",
+    "[fn main [] ->Int
+         [let f std::+]
+         [f 1 2]]",
   );
   let ASTKind::DefineFn(main) = &asts[0].kind else {
     panic!("expected main");
@@ -428,8 +428,8 @@ fn resolved_local_call_is_dynamic() {
 #[test]
 fn resolved_top_level_call_is_qualified() {
   let asts = resolve_with_bindings(
-    "(fn helper () ->Int 1)
-       (fn main () ->Int (helper))",
+    "[fn helper [] ->Int 1]
+       [fn main [] ->Int [helper]]",
   );
   let ASTKind::DefineFn(main) = &asts[1].kind else {
     panic!("expected main");
@@ -444,8 +444,8 @@ fn resolved_top_level_call_is_qualified() {
 #[test]
 fn resolved_top_level_value_is_a_function_ref() {
   let asts = resolve_with_bindings(
-    "(fn helper () ->Int 1)
-       (fn main () ->(Fn () -> Int) helper)",
+    "[fn helper [] ->Int 1]
+       [fn main [] ->[Fn [] -> Int] helper]",
   );
   let ASTKind::DefineFn(main) = &asts[1].kind else {
     panic!("expected main");

@@ -30,7 +30,7 @@ fn dotted_symbol_in_value_position_is_field_access() {
 
 #[test]
 fn qualified_symbol_in_call_head_is_a_qualified_fixed_call() {
-  let result = read_multiple("(std::+ 1 2)").unwrap();
+  let result = read_multiple("[std::+ 1 2]").unwrap();
   assert_eq!(
     result,
     vec![AST::CallFixed(
@@ -42,7 +42,7 @@ fn qualified_symbol_in_call_head_is_a_qualified_fixed_call() {
 
 #[test]
 fn dotted_symbol_in_call_head_is_a_dynamic_field_call() {
-  let result = read_multiple("(foo.bar 3)").unwrap();
+  let result = read_multiple("[foo.bar 3]").unwrap();
   assert_eq!(
     result,
     vec![AST::synthetic(ASTKind::Call(
@@ -57,7 +57,7 @@ fn dotted_symbol_in_call_head_is_a_dynamic_field_call() {
 
 #[test]
 fn set_is_parsed_as_an_ordinary_call() {
-  let result = read_multiple("(set! x 2)").unwrap();
+  let result = read_multiple("[set! x 2]").unwrap();
   assert_eq!(
     result,
     vec![AST::CallFixed(
@@ -95,18 +95,18 @@ fn parses_boolean_literals() {
 
 #[test]
 fn parses_nested_functions() {
-  let result = read_multiple("(fn outer (x:Int) (fn inner (y:Int) ->Int (std::+ x y)) inner)");
+  let result = read_multiple("[fn outer [x:Int] [fn inner [y:Int] ->Int [std::+ x y]] inner]");
   assert!(result.is_ok(), "got: {result:?}");
 }
 
 #[test]
 fn parses_layout_function_like_parenthesized_function() {
   let layout = read_multiple(
-    "fn foo (x:Int) -> Int
-  (+ x 1)",
+    "fn foo [x:Int] -> Int
+  [+ x 1]",
   )
   .unwrap();
-  let parenthesized = read_multiple("(fn foo (x:Int) -> Int (+ x 1))").unwrap();
+  let parenthesized = read_multiple("[fn foo [x:Int] -> Int [+ x 1]]").unwrap();
 
   assert_eq!(layout, parenthesized);
 }
@@ -114,13 +114,13 @@ fn parses_layout_function_like_parenthesized_function() {
 #[test]
 fn parses_layout_if_like_parenthesized_if() {
   let layout = read_multiple(
-    "if (> x 0)
+    "if [> x 0]
   x
 else
-  (- 0 x)",
+  [- 0 x]",
   )
   .unwrap();
-  let parenthesized = read_multiple("(if (> x 0) x (- 0 x))").unwrap();
+  let parenthesized = read_multiple("[if [> x 0] x [- 0 x]]").unwrap();
 
   assert_eq!(layout, parenthesized);
 }
@@ -128,14 +128,14 @@ else
 #[test]
 fn parses_nested_layout_forms() {
   let layout = read_multiple(
-    "fn main () -> Int
+    "fn main [] -> Int
   if true
     1
   else
     2",
   )
   .unwrap();
-  let parenthesized = read_multiple("(fn main () -> Int (if true 1 2))").unwrap();
+  let parenthesized = read_multiple("[fn main [] -> Int [if true 1 2]]").unwrap();
 
   assert_eq!(layout, parenthesized);
 }
@@ -143,7 +143,7 @@ fn parses_nested_layout_forms() {
 #[test]
 fn layout_if_branches_with_multiple_expressions_are_implicit_blocks() {
   let layout = read_multiple(
-    "fn main () -> Int
+    "fn main [] -> Int
   if true
     let x 1
     x
@@ -151,7 +151,7 @@ fn layout_if_branches_with_multiple_expressions_are_implicit_blocks() {
     2",
   )
   .unwrap();
-  let parenthesized = read_multiple("(fn main () -> Int (if true (block (let x 1) x) 2))").unwrap();
+  let parenthesized = read_multiple("[fn main [] -> Int [if true [block [let x 1] x] 2]]").unwrap();
 
   assert_eq!(layout, parenthesized);
 }
@@ -167,7 +167,7 @@ else
   3",
   )
   .unwrap();
-  let parenthesized = read_multiple("(if a 1 (if b 2 3))").unwrap();
+  let parenthesized = read_multiple("[if a 1 [if b 2 3]]").unwrap();
 
   assert_eq!(layout, parenthesized);
 }
@@ -175,14 +175,14 @@ else
 #[test]
 fn parses_parenless_layout_let() {
   let layout = read_multiple("let x 3").unwrap();
-  let parenthesized = read_multiple("(let x 3)").unwrap();
+  let parenthesized = read_multiple("[let x 3]").unwrap();
 
   assert_eq!(layout, parenthesized);
 }
 
 #[test]
 fn parses_return_forms() {
-  let asts = read_multiple("(return) (return 3)").unwrap();
+  let asts = read_multiple("[return] [return 3]").unwrap();
   assert!(matches!(asts[0].kind, ASTKind::Return(None)));
   let ASTKind::Return(Some(value)) = &asts[1].kind else {
     panic!("expected valued return");
@@ -192,7 +192,7 @@ fn parses_return_forms() {
 
 #[test]
 fn parses_boolean_special_forms() {
-  let asts = read_multiple("(and true false true) (or false true)").unwrap();
+  let asts = read_multiple("[and true false true] [or false true]").unwrap();
   let ASTKind::And(operands) = &asts[0].kind else {
     panic!("expected and form");
   };
@@ -206,19 +206,19 @@ fn parses_boolean_special_forms() {
 #[test]
 fn boolean_special_forms_require_two_operands() {
   assert_eq!(
-    read_multiple("(and)").unwrap_err(),
+    read_multiple("[and]").unwrap_err(),
     "line 1, column 1: `and` requires at least two operands"
   );
   assert_eq!(
-    read_multiple("(or)").unwrap_err(),
+    read_multiple("[or]").unwrap_err(),
     "line 1, column 1: `or` requires at least two operands"
   );
   assert_eq!(
-    read_multiple("(and true)").unwrap_err(),
+    read_multiple("[and true]").unwrap_err(),
     "line 1, column 1: `and` requires at least two operands"
   );
   assert_eq!(
-    read_multiple("(or false)").unwrap_err(),
+    read_multiple("[or false]").unwrap_err(),
     "line 1, column 1: `or` requires at least two operands"
   );
 }
@@ -227,24 +227,24 @@ fn boolean_special_forms_require_two_operands() {
 fn parses_layout_boolean_forms() {
   assert_eq!(
     read_multiple("and true false true").unwrap(),
-    read_multiple("(and true false true)").unwrap()
+    read_multiple("[and true false true]").unwrap()
   );
   assert_eq!(
     read_multiple("or false true").unwrap(),
-    read_multiple("(or false true)").unwrap()
+    read_multiple("[or false true]").unwrap()
   );
 }
 
 #[test]
 fn parses_layout_for_like_parenthesized_for() {
   let layout = read_multiple(
-    "fn main ()
-  for x in (list 1 2 3)
-    (set! target x)",
+    "fn main []
+  for x in [list 1 2 3]
+    [set! target x]",
   )
   .unwrap();
   let parenthesized =
-    read_multiple("(fn main () (for x in (list 1 2 3) (set! target x)))").unwrap();
+    read_multiple("[fn main [] [for x in [list 1 2 3] [set! target x]]]").unwrap();
 
   assert_eq!(layout, parenthesized);
 }
@@ -252,9 +252,9 @@ fn parses_layout_for_like_parenthesized_for() {
 #[test]
 fn parses_layout_return_with_and_without_value() {
   let asts = read_multiple(
-    "fn valued () -> Int
+    "fn valued [] -> Int
   return 3
-fn empty ()
+fn empty []
   return",
   )
   .unwrap();
@@ -278,7 +278,7 @@ fn empty ()
   5
 )]
 #[case(
-  "fn new () -> Int 3",
+  "fn new [] -> Int 3",
   "new",
   Some("`fn` name must be a symbol"),
   "a symbol",
@@ -294,7 +294,7 @@ fn empty ()
   3
 )]
 #[case(
-  "enum Maybe\n  (Some else:Int)",
+  "enum Maybe\n  [Some else:Int]",
   "else",
   Some("enum variant field names must be symbols"),
   "a symbol",
@@ -302,7 +302,7 @@ fn empty ()
   9
 )]
 #[case(
-  "fn main () -> Int\n  let x 1\n  else",
+  "fn main [] -> Int\n  let x 1\n  else",
   "else",
   None,
   "an expression",
@@ -310,7 +310,7 @@ fn empty ()
   3
 )]
 #[case(
-  "fn main (where:Int) -> Int 1",
+  "fn main [where:Int] -> Int 1",
   "where",
   Some("Parameters must be symbols"),
   "a symbol",
@@ -378,7 +378,7 @@ fn syntax_tokens_cannot_be_used_as_names(
 #[test]
 fn parenless_ordinary_calls_are_not_layout_calls() {
   let error = read_multiple(
-    "fn main () -> Int
+    "fn main [] -> Int
   foo 1",
   )
   .unwrap_err();
@@ -391,7 +391,7 @@ fn parenless_ordinary_calls_are_not_layout_calls() {
 
 #[test]
 fn parses_mandatory_parameter_and_return_types_without_whitespace() {
-  let asts = read_multiple("(fn id (a:A xs:(List Int))->A where ((A Eq)) a)").unwrap();
+  let asts = read_multiple("[fn id [a:A xs:[List Int]]->A where [[A Eq]] a]").unwrap();
   let ASTKind::DefineFn(function) = &asts[0].kind else {
     panic!("expected function")
   };
@@ -420,7 +420,7 @@ fn parses_mandatory_parameter_and_return_types_without_whitespace() {
 
 #[test]
 fn parses_qualified_type_names() {
-  let asts = read_multiple("(fn use-box (box:left::Box) -> right::Box box)").unwrap();
+  let asts = read_multiple("[fn use-box [box:left::Box] -> right::Box box]").unwrap();
   let ASTKind::DefineFn(function) = &asts[0].kind else {
     panic!("expected function")
   };
@@ -437,8 +437,8 @@ fn parses_qualified_type_names() {
 #[test]
 fn parses_function_types_and_annotated_lets() {
   let asts = read_multiple(
-    "(fn apply (f:(Fn (Int) -> Int) x:Int) ->Int
-         (let result:Int (f x)))",
+    "[fn apply [f:[Fn [Int] -> Int] x:Int] ->Int
+         [let result:Int [f x]]]",
   )
   .unwrap();
   let ASTKind::DefineFn(function) = &asts[0].kind else {
@@ -457,7 +457,7 @@ fn parses_function_types_and_annotated_lets() {
 
 #[test]
 fn parses_variadic_function_type() {
-  let asts = read_multiple("(fn use-list (make:(Fn (...Int) -> (List Int))) ->Int 1)").unwrap();
+  let asts = read_multiple("[fn use-list [make:[Fn [...Int] -> [List Int]]] ->Int 1]").unwrap();
   let ASTKind::DefineFn(function) = &asts[0].kind else {
     panic!("expected function")
   };
@@ -477,11 +477,11 @@ fn parses_variadic_function_type() {
 #[test]
 fn parses_enum_definitions_and_construction() {
   let asts = read_multiple(
-    "(enum Foo
-       (Var1)
-       (Var2 x:Int)
-       (Var3 y:String z:(Cell Int)))
-     (fn main () ->Foo (new Foo::Var2 x:3))",
+    "[enum Foo
+       [Var1]
+       [Var2 x:Int]
+       [Var3 y:String z:[Cell Int]]]
+     [fn main [] ->Foo [new Foo::Var2 x:3]]",
   )
   .unwrap();
 
@@ -515,7 +515,7 @@ fn parses_enum_definitions_and_construction() {
 #[test]
 fn parses_qualified_library_enum_construction() {
   let asts =
-    read_multiple("(fn main () ->host::MaybeInt (new host::MaybeInt::Some value:3))").unwrap();
+    read_multiple("[fn main [] ->host::MaybeInt [new host::MaybeInt::Some value:3]]").unwrap();
   let ASTKind::DefineFn(main) = &asts[0].kind else {
     panic!("expected function");
   };
@@ -529,11 +529,11 @@ fn parses_qualified_library_enum_construction() {
 #[test]
 fn parses_match_with_variant_and_default_arms() {
   let asts = read_multiple(
-    "(fn main (foo:Foo) ->Int
-       (match foo
-         (Var1) => 1
-         (Var2 x) => x
-         _ => 5))",
+    "[fn main [foo:Foo] ->Int
+       [match foo
+         [Var1] => 1
+         [Var2 x] => x
+         _ => 5]]",
   )
   .unwrap();
 
@@ -566,14 +566,14 @@ fn parses_match_with_variant_and_default_arms() {
 fn layout_match_arm_bodies_with_multiple_expressions_are_implicit_blocks() {
   let layout = read_multiple(
     "match x
-  (Some value) =>
-    let next (+ value 1)
+  [Some value] =>
+    let next [+ value 1]
     next
-  (None) => 0",
+  [None] => 0",
   )
   .unwrap();
   let parenthesized =
-    read_multiple("(match x (Some value) => (block (let next (+ value 1)) next) (None) => 0)")
+    read_multiple("[match x [Some value] => [block [let next [+ value 1]] next] [None] => 0]")
       .unwrap();
 
   assert_eq!(layout, parenthesized);
@@ -590,7 +590,7 @@ fn ellipsis_is_syntax_not_a_symbol_expression() {
 
 #[test]
 fn rejects_unannotated_parameters() {
-  let error = read_multiple("(fn id (a) a)").unwrap_err();
+  let error = read_multiple("[fn id [a] a]").unwrap_err();
   assert!(error.contains("require a type annotation"), "{error}");
 }
 
@@ -622,7 +622,7 @@ fn hash_starts_a_comment_but_semicolon_does_not() {
 
 #[test]
 fn functions_require_a_body() {
-  let error = read_multiple("(fn main ())").unwrap_err();
+  let error = read_multiple("[fn main []]").unwrap_err();
   assert!(
     error.contains("`fn` must have at least one body expression"),
     "got: {error}"
@@ -682,14 +682,14 @@ fn backslashes_do_not_escape_symbol_delimiters() {
 
 #[test]
 fn special_form_arity_errors_are_positioned() {
-  let error = read_multiple("(if true 1 2 3)").unwrap_err();
+  let error = read_multiple("[if true 1 2 3]").unwrap_err();
   assert!(error.contains("line 1, column 14"), "got: {error}");
   assert!(error.contains("two or three arguments"), "got: {error}");
-  assert!(error.contains("expected `)`"), "got: {error}");
+  assert!(error.contains("expected `]`"), "got: {error}");
 
-  let error = read_multiple("(let x 1 2)").unwrap_err();
+  let error = read_multiple("[let x 1 2]").unwrap_err();
   assert!(error.contains("exactly two arguments"), "got: {error}");
-  assert!(error.contains("expected `)`"), "got: {error}");
+  assert!(error.contains("expected `]`"), "got: {error}");
 }
 
 #[test]
@@ -699,7 +699,7 @@ fn ast_nodes_keep_full_byte_spans() {
     .remove(0);
   assert_eq!(atom.span, 2..4);
 
-  let conditional = parse_internal("(if true (f 1) 2)", DEFAULT_MAX_PARSE_DEPTH)
+  let conditional = parse_internal("[if true [f 1] 2]", DEFAULT_MAX_PARSE_DEPTH)
     .unwrap()
     .remove(0);
   assert_eq!(conditional.span, 0..17);
@@ -721,7 +721,7 @@ fn ast_nodes_keep_full_byte_spans() {
 
 #[test]
 fn layout_preserves_real_token_spans() {
-  let source = "fn main () -> Int\n    (+ 1\n       \"bad\")";
+  let source = "fn main [] -> Int\n    [+ 1\n       \"bad\"]";
   let function = parse_internal(source, DEFAULT_MAX_PARSE_DEPTH)
     .unwrap()
     .remove(0);
@@ -738,7 +738,7 @@ fn layout_preserves_real_token_spans() {
 #[test]
 fn lexer_omits_newlines_next_to_indents_and_dedents() {
   let tokens = Lexer::new(
-    "fn main () -> Int
+    "fn main [] -> Int
   let x 1
   x
 let y 2",
@@ -765,7 +765,7 @@ let y 2",
 
 #[test]
 fn layout_requires_an_indented_body() {
-  let error = read_multiple("fn main () -> Int").unwrap_err();
+  let error = read_multiple("fn main [] -> Int").unwrap_err();
   assert!(
     error.contains("`fn` layout body must be indented"),
     "{error}"
@@ -782,7 +782,7 @@ fn semantic_equality_ignores_spans() {
 
 #[test]
 fn eof_errors_use_an_empty_span_at_source_end() {
-  let source = "(f 1";
+  let source = "[f 1";
   let error = parse_internal(source, DEFAULT_MAX_PARSE_DEPTH).unwrap_err();
   assert_eq!(error.span, source.len()..source.len());
 }
@@ -795,7 +795,7 @@ fn source_positions_count_characters_instead_of_utf8_bytes() {
 
 #[test]
 fn bare_tuple_head_parses_as_new_tuple() {
-  let result = read_multiple("(Tuple 3 \"foo\")").unwrap();
+  let result = read_multiple("[Tuple 3 \"foo\"]").unwrap();
   assert_eq!(
     result,
     vec![AST::NewTuple(vec![
@@ -808,7 +808,7 @@ fn bare_tuple_head_parses_as_new_tuple() {
 #[test]
 fn qualified_tuple_head_is_not_the_tuple_constructor() {
   // `module::Tuple` is an ordinary qualified call, not the tuple constructor.
-  let result = read_multiple("(std::Tuple 1 2)").unwrap();
+  let result = read_multiple("[std::Tuple 1 2]").unwrap();
   assert_eq!(
     result,
     vec![AST::CallFixed(
@@ -820,7 +820,7 @@ fn qualified_tuple_head_is_not_the_tuple_constructor() {
 
 #[test]
 fn bind_desugars_to_a_block_of_let_and_shd_field_accesses() {
-  let result = read_multiple("bind ((shd list) (let result)) (Tuple 1 2)").unwrap();
+  let result = read_multiple("bind [[shd list] [let result]] [Tuple 1 2]").unwrap();
   assert_eq!(result.len(), 1);
   let ASTKind::Block(body) = &result[0].kind else {
     panic!("`bind` should desugar to a block, got {:?}", result[0].kind);
@@ -868,9 +868,9 @@ fn bind_desugars_to_a_block_of_let_and_shd_field_accesses() {
 
 #[test]
 fn bind_requires_parenthesized_pattern_group() {
-  let err = parse_internal("bind (shd list) (Tuple 1 2)", DEFAULT_MAX_PARSE_DEPTH).unwrap_err();
+  let err = parse_internal("bind [shd list] [Tuple 1 2]", DEFAULT_MAX_PARSE_DEPTH).unwrap_err();
   assert!(
-    format!("{err:?}").contains("binding pattern must be parenthesized"),
+    format!("{err:?}").contains("binding pattern must be bracketed"),
     "{err:?}"
   );
 }
@@ -878,10 +878,10 @@ fn bind_requires_parenthesized_pattern_group() {
 /// Deep nesting well within the budget parses fine.
 #[test]
 fn nesting_at_max_parse_depth_succeeds() {
-  // Dynamic calls (`(((...)))`) consume a couple of depth frames per paren
+  // Dynamic calls (`[[[...]]]`) consume a couple of depth frames per bracket
   // level, so give a generous budget relative to the nesting.
   let depth = 32;
-  let source = "(".repeat(depth) + "0" + &")".repeat(depth);
+  let source = "[".repeat(depth) + "0" + &"]".repeat(depth);
   let asts = read_multiple_with_depth(&source, 512).unwrap();
   assert_eq!(asts.len(), 1);
 }
@@ -891,7 +891,7 @@ fn nesting_at_max_parse_depth_succeeds() {
 #[test]
 fn nesting_past_max_parse_depth_returns_a_clean_error() {
   let depth = 512;
-  let source = "(".repeat(depth) + "0" + &")".repeat(depth);
+  let source = "[".repeat(depth) + "0" + &"]".repeat(depth);
   let error = read_multiple_with_depth(&source, 8).unwrap_err();
   assert!(
     error.contains("nesting too deep"),
@@ -909,9 +909,9 @@ fn deeply_nested_types_are_bounded_by_the_depth_budget() {
   let depth = 64;
   let mut ty = String::from("Int");
   for _ in 0..depth {
-    ty = format!("(Wrap {ty})");
+    ty = format!("[Wrap {ty}]");
   }
-  let program = format!("(fn f (x: {ty}) -> Int 0)");
+  let program = format!("[fn f [x: {ty}] -> Int 0]");
   // Generous budget: parses.
   read_multiple_with_depth(&program, 512).unwrap();
   // Tiny budget: clean depth error.

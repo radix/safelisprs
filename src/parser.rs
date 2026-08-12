@@ -529,11 +529,11 @@ pub(crate) struct MatchArm {
 /// Which kind of binding a `bind` pattern introduces.
 #[derive(Debug, PartialEq, Clone, Copy)]
 enum BindKind {
-  /// `(let name)` — introduce a fresh binding.
+  /// `[let name]` — introduce a fresh binding.
   Let,
-  /// `(shd name)` — shadow an existing binding with a fresh one.
+  /// `[shd name]` — shadow an existing binding with a fresh one.
   Shd,
-  /// `(= name)` — assign to an existing binding (same type).
+  /// `[= name]` — assign to an existing binding (same type).
   Assign,
 }
 
@@ -606,8 +606,8 @@ pub(crate) struct Bound {
 
 #[derive(Debug, PartialEq, Clone)]
 enum TokenKind {
-  LParen,
-  RParen,
+  LBracket,
+  RBracket,
   Colon,
   DoubleColon,
   Arrow,
@@ -651,8 +651,8 @@ struct Token {
 impl fmt::Display for TokenKind {
   fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
     match self {
-      TokenKind::LParen => write!(formatter, "("),
-      TokenKind::RParen => write!(formatter, ")"),
+      TokenKind::LBracket => write!(formatter, "["),
+      TokenKind::RBracket => write!(formatter, "]"),
       TokenKind::Colon => write!(formatter, ":"),
       TokenKind::DoubleColon => write!(formatter, "::"),
       TokenKind::Arrow => write!(formatter, "->"),
@@ -763,7 +763,7 @@ struct Lexer<'a> {
   /// Final token stream consumed by the parser, including layout tokens.
   output: Vec<Token>,
   /// Number of unmatched open-parens. Newlines are only significant when this is 0.
-  paren_depth: usize,
+  bracket_depth: usize,
   /// Stack of active layout indentation columns.
   indent_stack: Vec<usize>,
   /// The layout-opening candidate currently being scanned.
@@ -787,7 +787,7 @@ impl<'a> Lexer<'a> {
       source,
       offset: 0,
       output: Vec::new(),
-      paren_depth: 0,
+      bracket_depth: 0,
       indent_stack: vec![0],
       layout_head: None,
       pending_line_end: None,
@@ -826,17 +826,17 @@ impl<'a> Lexer<'a> {
             span: start..self.offset,
           }
         }
-        '(' => {
+        '[' => {
           self.bump_char();
           Token {
-            kind: TokenKind::LParen,
+            kind: TokenKind::LBracket,
             span: start..self.offset,
           }
         }
-        ')' => {
+        ']' => {
           self.bump_char();
           Token {
-            kind: TokenKind::RParen,
+            kind: TokenKind::RBracket,
             span: start..self.offset,
           }
         }
@@ -885,15 +885,15 @@ impl<'a> Lexer<'a> {
       };
 
       match token.kind {
-        TokenKind::Newline if self.paren_depth == 0 => self.finish_line(Some(token.span)),
+        TokenKind::Newline if self.bracket_depth == 0 => self.finish_line(Some(token.span)),
         TokenKind::Newline => {}
-        TokenKind::LParen => {
+        TokenKind::LBracket => {
           self.push_line_token(token)?;
-          self.paren_depth += 1;
+          self.bracket_depth += 1;
         }
-        TokenKind::RParen => {
+        TokenKind::RBracket => {
           self.push_line_token(token)?;
-          self.paren_depth = self.paren_depth.saturating_sub(1);
+          self.bracket_depth = self.bracket_depth.saturating_sub(1);
         }
         _ => {
           self.push_line_token(token)?;
@@ -1155,7 +1155,7 @@ fn identifier_token_kind(text: &str) -> TokenKind {
 }
 
 fn is_delimiter(ch: char) -> bool {
-  ch.is_whitespace() || matches!(ch, '(' | ')' | '"' | '#' | ':')
+  ch.is_whitespace() || matches!(ch, '[' | ']' | '"' | '#' | ':')
 }
 
 fn is_numeric_candidate(text: &str) -> bool {
@@ -1206,13 +1206,13 @@ fn parse_number(text: &str, span: Span) -> Result<TokenKind, ParseError> {
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 enum FormMode {
-  Paren,
+  Bracket,
   Layout,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 enum FormEnd {
-  RParen,
+  RBracket,
   Dedent,
 }
 
@@ -1292,7 +1292,7 @@ impl Parser {
     let layout_line_start = self.at_layout_line_start();
     let token = self.advance();
     match token.kind {
-      TokenKind::LParen => self.parse_list(token.span.start, FormMode::Paren),
+      TokenKind::LBracket => self.parse_list(token.span.start, FormMode::Bracket),
       kind @ (TokenKind::Let
       | TokenKind::Shd
       | TokenKind::Assign
@@ -1343,14 +1343,14 @@ impl Parser {
   }
 
   fn parse_list(&mut self, start: usize, mode: FormMode) -> Result<AST, ParseError> {
-    if let Some(close) = self.check_token(TokenKind::RParen) {
+    if let Some(close) = self.check_token(TokenKind::RBracket) {
       return Err(ParseError::new(start..close.span.end, "Empty call"));
     }
     if matches!(self.peek().kind, TokenKind::Eof) {
       return Err(
         ParseError::new(self.peek().span.clone(), "unexpected end of input")
           .expected("an expression")
-          .expected("`)`"),
+          .expected("`]`"),
       );
     }
 
@@ -1402,8 +1402,8 @@ impl Parser {
     };
     let expression = self.parse_expr()?;
     let close = match mode {
-      FormMode::Paren => {
-        self.expect_form_end(FormEnd::RParen, "`let` must have exactly two arguments")?
+      FormMode::Bracket => {
+        self.expect_form_end(FormEnd::RBracket, "`let` must have exactly two arguments")?
       }
       FormMode::Layout => self.expect_layout_line_end("`let` must have exactly two arguments")?,
     };
@@ -1423,8 +1423,8 @@ impl Parser {
     };
     let expression = self.parse_expr()?;
     let close = match mode {
-      FormMode::Paren => {
-        self.expect_form_end(FormEnd::RParen, "`shd` must have exactly two arguments")?
+      FormMode::Bracket => {
+        self.expect_form_end(FormEnd::RBracket, "`shd` must have exactly two arguments")?
       }
       FormMode::Layout => self.expect_layout_line_end("`shd` must have exactly two arguments")?,
     };
@@ -1444,8 +1444,8 @@ impl Parser {
     };
     let expression = self.parse_expr()?;
     let close = match mode {
-      FormMode::Paren => {
-        self.expect_form_end(FormEnd::RParen, "`=` must have exactly two arguments")?
+      FormMode::Bracket => {
+        self.expect_form_end(FormEnd::RBracket, "`=` must have exactly two arguments")?
       }
       FormMode::Layout => self.expect_layout_line_end("`=` must have exactly two arguments")?,
     };
@@ -1478,15 +1478,15 @@ impl Parser {
 
   fn parse_fn_header(&mut self) -> Result<FnHeader, ParseError> {
     let name = self.expect_symbol("`fn` name must be a symbol")?;
-    self.expect(TokenKind::LParen, "`fn` requires a parameter list")?;
+    self.expect(TokenKind::LBracket, "`fn` requires a parameter list")?;
 
     let mut params = Vec::new();
-    while !matches!(self.peek().kind, TokenKind::RParen) {
+    while !matches!(self.peek().kind, TokenKind::RBracket) {
       if matches!(self.peek().kind, TokenKind::Eof) {
         return Err(
           ParseError::new(self.peek().span.clone(), "unterminated parameter list")
             .expected("a parameter name")
-            .expected("`)`"),
+            .expected("`]`"),
         );
       }
       let param = self.expect_symbol("Parameters must be symbols")?;
@@ -1507,14 +1507,14 @@ impl Parser {
     let mut bounds = Vec::new();
     if self.check_token(TokenKind::Where).is_some() {
       self.expect(
-        TokenKind::LParen,
-        "`where` requires a parenthesized bound list",
+        TokenKind::LBracket,
+        "`where` requires a bracketed bound list",
       )?;
-      while !matches!(self.peek().kind, TokenKind::RParen) {
-        self.expect(TokenKind::LParen, "each bound must be parenthesized")?;
+      while !matches!(self.peek().kind, TokenKind::RBracket) {
+        self.expect(TokenKind::LBracket, "each bound must be bracketed")?;
         let var = self.expect_symbol("a bound must name a type variable")?;
         let mut traits = Vec::new();
-        while !matches!(self.peek().kind, TokenKind::RParen) {
+        while !matches!(self.peek().kind, TokenKind::RBracket) {
           traits.push(self.expect_symbol("trait names must be symbols")?);
         }
         if traits.is_empty() {
@@ -1577,15 +1577,15 @@ impl Parser {
             .expected(form_end_expected(end)),
         );
       }
-      self.expect(TokenKind::LParen, "enum variants must be parenthesized")?;
+      self.expect(TokenKind::LBracket, "enum variants must be bracketed")?;
       let variant = self.expect_symbol("enum variant names must be symbols")?;
       let mut fields = Vec::new();
-      while !matches!(self.peek().kind, TokenKind::RParen) {
+      while !matches!(self.peek().kind, TokenKind::RBracket) {
         if matches!(self.peek().kind, TokenKind::Eof) {
           return Err(
             ParseError::new(self.peek().span.clone(), "unterminated enum variant")
               .expected("a field")
-              .expected("`)`"),
+              .expected("`]`"),
           );
         }
         let field = self.expect_symbol("enum variant field names must be symbols")?;
@@ -1683,15 +1683,15 @@ impl Parser {
   }
 
   fn parse_match_arm(&mut self, mode: FormMode) -> Result<MatchArm, ParseError> {
-    let pattern = if self.check_token(TokenKind::LParen).is_some() {
+    let pattern = if self.check_token(TokenKind::LBracket).is_some() {
       let variant = self.expect_symbol("match variant patterns must name a variant")?;
       let mut fields = Vec::new();
-      while !matches!(self.peek().kind, TokenKind::RParen) {
+      while !matches!(self.peek().kind, TokenKind::RBracket) {
         if matches!(self.peek().kind, TokenKind::Eof) {
           return Err(
             ParseError::new(self.peek().span.clone(), "unterminated match pattern")
               .expected("a binding name")
-              .expected("`)`"),
+              .expected("`]`"),
           );
         }
         fields.push(
@@ -1735,18 +1735,18 @@ impl Parser {
   fn parse_if(&mut self, start: usize, mode: FormMode) -> Result<AST, ParseError> {
     let condition = self.parse_expr()?;
     let (then_branch, else_branch, close) = match mode {
-      FormMode::Paren => {
+      FormMode::Bracket => {
         let then_branch = self.parse_expr()?;
-        if matches!(self.peek().kind, TokenKind::RParen) {
+        if matches!(self.peek().kind, TokenKind::RBracket) {
           let close = self.expect_form_end(
-            FormEnd::RParen,
+            FormEnd::RBracket,
             "`if` must have two or three arguments: cond, then, else",
           )?;
           (then_branch, None, close)
         } else {
           let else_branch = self.parse_expr()?;
           let close = self.expect_form_end(
-            FormEnd::RParen,
+            FormEnd::RBracket,
             "`if` must have two or three arguments: cond, then, else",
           )?;
           (then_branch, Some(Box::new(else_branch)), close)
@@ -1807,7 +1807,7 @@ impl Parser {
 
   fn parse_return(&mut self, start: usize, mode: FormMode) -> Result<AST, ParseError> {
     let value = match mode {
-      FormMode::Paren if matches!(self.peek().kind, TokenKind::RParen) => None,
+      FormMode::Bracket if matches!(self.peek().kind, TokenKind::RBracket) => None,
       FormMode::Layout
         if matches!(
           self.peek().kind,
@@ -1819,8 +1819,8 @@ impl Parser {
       _ => Some(Box::new(self.parse_expr()?)),
     };
     let close = match mode {
-      FormMode::Paren => {
-        self.expect_form_end(FormEnd::RParen, "`return` accepts at most one expression")?
+      FormMode::Bracket => {
+        self.expect_form_end(FormEnd::RBracket, "`return` accepts at most one expression")?
       }
       FormMode::Layout => self.expect_layout_line_end("`return` accepts at most one expression")?,
     };
@@ -1834,7 +1834,7 @@ impl Parser {
     is_and: bool,
   ) -> Result<AST, ParseError> {
     let (operands, close) = match mode {
-      FormMode::Paren => self.parse_call_args(mode)?,
+      FormMode::Bracket => self.parse_call_args(mode)?,
       FormMode::Layout => {
         let mut operands = Vec::new();
         while !matches!(
@@ -1875,26 +1875,26 @@ impl Parser {
 
   /// Parse a `bind` form, which destructures a tuple into positional bindings.
   ///
-  /// `bind ((shd list) (let result)) (mktup)` desugars to:
+  /// `bind [[shd list] [let result]] [mktup]` desugars to:
   ///
   /// ```text
-  /// (block
-  ///   (let __bind_tmp_N (mktup))
-  ///   (shd list __bind_tmp_N.0)
-  ///   (let result __bind_tmp_N.1))
+  /// [block
+  ///   [let __bind_tmp_N [mktup]]
+  ///   [shd list __bind_tmp_N.0]
+  ///   [let result __bind_tmp_N.1]]
   /// ```
   ///
-  /// Each pattern is `(let name)` (introduce a binding) or `(shd name)`
+  /// Each pattern is `[let name]` (introduce a binding) or `[shd name]`
   /// (reassign an existing binding). The `bind` expression evaluates to the
   /// value of the last binding, matching the tuple element accessed by the
   /// last pattern; in a `Void` function that value is discarded.
   fn parse_bind(&mut self, start: usize, mode: FormMode) -> Result<AST, ParseError> {
     self.expect(
-      TokenKind::LParen,
-      "`bind` requires a parenthesized pattern group",
+      TokenKind::LBracket,
+      "`bind` requires a bracketed pattern group",
     )?;
     let mut targets = Vec::new();
-    while !matches!(self.peek().kind, TokenKind::RParen) {
+    while !matches!(self.peek().kind, TokenKind::RBracket) {
       if matches!(self.peek().kind, TokenKind::Eof) {
         return Err(
           ParseError::new(
@@ -1902,7 +1902,7 @@ impl Parser {
             "unterminated `bind` pattern group",
           )
           .expected("a binding pattern")
-          .expected("`)`"),
+          .expected("`]`"),
         );
       }
       targets.push(self.parse_bind_target()?);
@@ -1916,8 +1916,8 @@ impl Parser {
     }
     let expression = self.parse_expr()?;
     let close = match mode {
-      FormMode::Paren => self.expect_form_end(
-        FormEnd::RParen,
+      FormMode::Bracket => self.expect_form_end(
+        FormEnd::RBracket,
         "`bind` must have a pattern group and an expression",
       )?,
       FormMode::Layout => {
@@ -1958,7 +1958,7 @@ impl Parser {
   }
 
   fn parse_bind_target(&mut self) -> Result<BindTarget, ParseError> {
-    let open = self.expect(TokenKind::LParen, "binding pattern must be parenthesized")?;
+    let open = self.expect(TokenKind::LBracket, "binding pattern must be bracketed")?;
     let head = self.advance();
     let kind = match head.kind {
       TokenKind::Let => BindKind::Let,
@@ -1970,14 +1970,14 @@ impl Parser {
             head.span,
             "binding pattern must start with `let`, `shd`, or `=`",
           )
-          .expected("`(let name)`")
-          .expected("`(shd name)`")
-          .expected("`(= name)`"),
+          .expected("`[let name]`")
+          .expected("`[shd name]`")
+          .expected("`[= name]`"),
         )
       }
     };
     let name = self.expect_symbol("binding pattern requires a name")?;
-    let close = self.expect(TokenKind::RParen, "binding pattern must end with `)`")?;
+    let close = self.expect(TokenKind::RBracket, "binding pattern must end with `]`")?;
     Ok(BindTarget {
       kind,
       name,
@@ -2017,7 +2017,7 @@ impl Parser {
 
   fn parse_dynamic_call(&mut self, start: usize) -> Result<AST, ParseError> {
     let callee = self.parse_expr()?;
-    let (args, close) = self.parse_call_args(FormMode::Paren)?;
+    let (args, close) = self.parse_call_args(FormMode::Bracket)?;
     let span = start..close.span.end;
     Ok(AST::new(ASTKind::Call(Box::new(callee), args), span))
   }
@@ -2040,7 +2040,7 @@ impl Parser {
 
   fn enter_form_body(&mut self, mode: FormMode, form: &'static str) -> Result<FormEnd, ParseError> {
     match mode {
-      FormMode::Paren => Ok(FormEnd::RParen),
+      FormMode::Bracket => Ok(FormEnd::RBracket),
       FormMode::Layout => self.enter_layout_body(form),
     }
   }
@@ -2101,7 +2101,7 @@ impl Parser {
 
   fn at_form_end(&self, end: FormEnd) -> bool {
     match end {
-      FormEnd::RParen => matches!(self.peek().kind, TokenKind::RParen),
+      FormEnd::RBracket => matches!(self.peek().kind, TokenKind::RBracket),
       FormEnd::Dedent => matches!(self.peek().kind, TokenKind::Dedent),
     }
   }
@@ -2109,7 +2109,7 @@ impl Parser {
   fn expect_form_end(&mut self, end: FormEnd, message: &'static str) -> Result<Token, ParseError> {
     let token = self.advance();
     let matches = match end {
-      FormEnd::RParen => matches!(token.kind, TokenKind::RParen),
+      FormEnd::RBracket => matches!(token.kind, TokenKind::RBracket),
       FormEnd::Dedent => matches!(token.kind, TokenKind::Dedent),
     };
     if matches {
@@ -2200,22 +2200,22 @@ impl Parser {
           Ok(TypeAst::Named(TypeNameAst::bare(name)))
         }
       }
-      TokenKind::LParen => {
+      TokenKind::LBracket => {
         let constructor = self.expect_symbol("type application requires a constructor name")?;
         if constructor == "Fn" {
           self.expect(
-            TokenKind::LParen,
-            "`Fn` requires a parenthesized parameter type list",
+            TokenKind::LBracket,
+            "`Fn` requires a bracketed parameter type list",
           )?;
           let (params, rest) = self.parse_fn_type_params()?;
           self.advance();
           self.expect(TokenKind::Arrow, "function type requires `->`")?;
           let ret = self.parse_type()?;
-          self.expect(TokenKind::RParen, "function type must end with `)`")?;
+          self.expect(TokenKind::RBracket, "function type must end with `]`")?;
           Ok(TypeAst::Fn(params, rest.map(Box::new), Box::new(ret)))
         } else {
           let mut args = Vec::new();
-          while !matches!(self.peek().kind, TokenKind::RParen) {
+          while !matches!(self.peek().kind, TokenKind::RBracket) {
             if matches!(self.peek().kind, TokenKind::Eof) {
               return Err(ParseError::new(
                 self.peek().span.clone(),
@@ -2235,7 +2235,7 @@ impl Parser {
   fn parse_fn_type_params(&mut self) -> Result<(Vec<TypeAst>, Option<TypeAst>), ParseError> {
     let mut params = Vec::new();
     let mut rest = None;
-    while !matches!(self.peek().kind, TokenKind::RParen) {
+    while !matches!(self.peek().kind, TokenKind::RBracket) {
       if matches!(self.peek().kind, TokenKind::Eof) {
         return Err(
           ParseError::new(
@@ -2243,7 +2243,7 @@ impl Parser {
             "unterminated function parameter type list",
           )
           .expected("a type")
-          .expected("`)`"),
+          .expected("`]`"),
         );
       }
       if let Some(ellipsis) = self.check_token(TokenKind::Ellipsis) {
@@ -2255,7 +2255,7 @@ impl Parser {
           ));
         }
         rest = Some(self.parse_type()?);
-        if !matches!(self.peek().kind, TokenKind::RParen) {
+        if !matches!(self.peek().kind, TokenKind::RBracket) {
           return Err(ParseError::new(
             self.peek().span.clone(),
             "function rest parameter type must be last",
@@ -2411,7 +2411,7 @@ fn layout_requires_indent_message(form: &'static str) -> &'static str {
 
 fn form_end_expected(end: FormEnd) -> &'static str {
   match end {
-    FormEnd::RParen => "`)`",
+    FormEnd::RBracket => "`]`",
     FormEnd::Dedent => "dedent",
   }
 }

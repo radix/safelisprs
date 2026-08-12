@@ -40,9 +40,9 @@ fn erased(ast: &AST) -> AST {
 #[test]
 fn transformed_closure() -> Result<(), String> {
   let source = "
-      (fn outer ()
-        (let a 1)
-        (fn inner () a))";
+      [fn outer []
+        [let a 1]
+        [fn inner [] a]]";
   let asts = read_multiple(source)?;
   let new_asts = transform_closures_in_module("main", &asts)?;
   let expected = vec![
@@ -83,9 +83,9 @@ fn captured_outer_parameters_are_plain_values() -> Result<(), String> {
   //! function, that parameter is passed through directly as a closure
   //! capture.
   let source = "
-      (fn outer (par:Int)
-        (let b (+ par 1))
-        (fn inner () par))";
+      [fn outer [par:Int]
+        [let b [+ par 1]]
+        [fn inner [] par]]";
   let asts = read_multiple(source)?;
   let new_asts = transform_closures_in_module("main", &asts)?;
   let expected = vec![
@@ -131,8 +131,8 @@ fn non_closure_inner_fn() -> Result<(), String> {
   //! If an inner function doesn't use any variables from the outer function's
   //! environment, then it is not PartialApply'd.
   let source = "
-      (fn outer ()
-        (fn inner () 1))";
+      [fn outer []
+        [fn inner [] 1]]";
   let asts = read_multiple(source)?;
   let new_asts = transform_closures_in_module("main", &asts)?;
   let expected = vec![
@@ -164,9 +164,9 @@ fn non_closure_inner_fn() -> Result<(), String> {
 #[test]
 fn nested_self_recursion_targets_lifted_function_with_captures() -> Result<(), String> {
   let source = "
-      (fn outer (base:Int)
-        (fn countdown (n:Int) ->Int
-          (if (std::== n 0) base (countdown (std::- n 1)))))";
+      [fn outer [base:Int]
+        [fn countdown [n:Int] ->Int
+          [if [std::== n 0] base [countdown [std::- n 1]]]]]";
   let asts = read_multiple(source)?;
   let new_asts = transform_closures_in_module("main", &asts)?;
 
@@ -218,12 +218,12 @@ fn nested_self_recursion_targets_lifted_function_with_captures() -> Result<(), S
 #[test]
 fn nested_mutual_recursion_propagates_group_captures() -> Result<(), String> {
   let source = "
-      (fn outer (even-result:Int odd-result:Int)
-        (fn even (n:Int) ->Int
-          (if (std::== n 0) even-result (odd (std::- n 1))))
-        (fn odd (n:Int) ->Int
-          (if (std::== n 0) odd-result (even (std::- n 1))))
-        even)";
+      [fn outer [even-result:Int odd-result:Int]
+        [fn even [n:Int] ->Int
+          [if [std::== n 0] even-result [odd [std::- n 1]]]]
+        [fn odd [n:Int] ->Int
+          [if [std::== n 0] odd-result [even [std::- n 1]]]]
+        even]";
   let asts = read_multiple(source)?;
   let transformed = transform_closures_in_module("main", &asts)?;
 
@@ -294,11 +294,11 @@ fn tricksy_inner_var_non_closure() -> Result<(), String> {
   //! name as a variable in an outer function will not bring that outer
   //! variable in as a capture.
   let source = "
-      (fn outer ()
-        (let a 1)
-        (fn inner ()
-          (let a 2)
-          a))";
+      [fn outer []
+        [let a 1]
+        [fn inner []
+          [let a 2]
+          a]]";
   let asts = read_multiple(source)?;
   let new_asts = transform_closures_in_module("main", &asts)?;
   let expected = vec![
@@ -339,11 +339,11 @@ fn tricksier_inner_var_closure() -> Result<(), String> {
   //! be treated as closures, but only the variable usages *before* the
   //! rebinding will be treated as captures.
   let source = "
-      (fn outer ()
-        (let a 1)
-        (fn inner ()
-          (let a (+ a 1))
-          a))";
+      [fn outer []
+        [let a 1]
+        [fn inner []
+          [let a [+ a 1]]
+          a]]";
   let asts = read_multiple(source)?;
   let new_asts = transform_closures_in_module("main", &asts)?;
   let expected = vec![
@@ -390,13 +390,13 @@ fn tricksier_inner_var_closure() -> Result<(), String> {
 #[test]
 fn nested_closures() -> Result<(), String> {
   let source = "
-      (fn outer ()
-        (let a 1)
-        (fn intermediate ()
-          (fn inner () a)
-        )
+      [fn outer []
+        [let a 1]
+        [fn intermediate []
+          [fn inner [] a]
+        ]
         intermediate
-      )
+      ]
     ";
   let asts = read_multiple(source)?;
   let new_asts = transform_closures_in_module("main", &asts)?;
@@ -452,7 +452,7 @@ fn nested_closures() -> Result<(), String> {
 
 #[test]
 fn closure_transforms_preserve_function_spans() -> Result<(), String> {
-  let source = "(fn outer () (fn inner () 1))";
+  let source = "[fn outer [] [fn inner [] 1]]";
   let asts = read_multiple(source)?;
   let outer_span = asts[0].span.clone();
   let ASTKind::DefineFn(outer) = &asts[0].kind else {

@@ -2089,22 +2089,22 @@ fn display_type(ty: &Type) -> String {
     Type::Diverges => "Never".to_string(),
     Type::Struct(name) => name.to_string(),
     Type::Enum(name) => name.to_string(),
-    Type::Cell(item) => format!("(Cell {})", display_type(&item)),
-    Type::List(item) => format!("(List {})", display_type(&item)),
+    Type::Cell(item) => format!("[Cell {}]", display_type(&item)),
+    Type::List(item) => format!("[List {}]", display_type(&item)),
     Type::Tuple(elements) => {
       let parts = elements
         .iter()
         .map(display_type)
         .collect::<Vec<_>>()
         .join(" ");
-      format!("(Tuple {parts})")
+      format!("[Tuple {parts}]")
     }
     Type::Fn { params, rest, ret } => {
       let mut params = params.iter().map(display_type).collect::<Vec<_>>();
       if let Some(rest) = rest {
         params.push(format!("...{}", display_type(&rest)));
       }
-      format!("(Fn ({}) -> {})", params.join(" "), display_type(&ret))
+      format!("[Fn [{}] -> {}]", params.join(" "), display_type(&ret))
     }
     Type::Var(var) => match &*var.borrow() {
       TypeVar::Unbound { id, .. } => format!("?{id}"),
