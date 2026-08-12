@@ -342,6 +342,17 @@ impl AST {
   pub(crate) fn Int(value: i64) -> Self {
     Self::synthetic(ASTKind::Int(value))
   }
+  pub(crate) fn Bool(value: bool) -> Self {
+    Self::synthetic(ASTKind::Bool(value))
+  }
+
+  pub(crate) fn And(operands: Vec<AST>) -> Self {
+    Self::synthetic(ASTKind::And(operands))
+  }
+
+  pub(crate) fn Or(operands: Vec<AST>) -> Self {
+    Self::synthetic(ASTKind::Or(operands))
+  }
 
   fn Float(value: f64) -> Self {
     Self::synthetic(ASTKind::Float(value))
@@ -1387,9 +1398,9 @@ impl Parser {
     let mut left = self.parse_expr()?;
     // A lower-precedence operator belongs to an enclosing call, so we must
     // leave it in the token stream.
-    while let TokenKind::Sym(name) = &self.peek().kind {
-      let op = name.clone();
-      let Some(prec) = infix_precedence(&op) else {
+    loop {
+      let token = self.peek().kind.clone();
+      let Some(prec) = infix_precedence(&token) else {
         break;
       };
       if prec < min_prec {
@@ -1398,10 +1409,18 @@ impl Parser {
       self.advance();
       let right = self.parse_infix_climb(prec + 1)?;
       let span = left.span.start..right.span.end;
-      left = AST::new(
-        ASTKind::CallFixed(Identifier::Bare(op.into()), vec![left, right]),
-        span,
-      );
+      // `and` and `or` are keywords (not bare `Sym`s) but are also accepted
+      // as infix operators inside parentheses, where they desugar to the
+      // short-circuiting `And`/`Or` forms rather than ordinary calls.
+      left = match token {
+        TokenKind::And => AST::new(ASTKind::And(vec![left, right]), span),
+        TokenKind::Or => AST::new(ASTKind::Or(vec![left, right]), span),
+        TokenKind::Sym(op) => AST::new(
+          ASTKind::CallFixed(Identifier::Bare(op.into()), vec![left, right]),
+          span,
+        ),
+        _ => break,
+      };
     }
     Ok(left)
   }
@@ -2457,11 +2476,16 @@ fn is_form_head_token(kind: &TokenKind) -> bool {
 
 /// The fixed set of infix operators accepted inside parentheses, paired with
 /// their binding precedence. Higher numbers bind tighter.
-fn infix_precedence(op: &str) -> Option<u8> {
+fn infix_precedence(op: &TokenKind) -> Option<u8> {
   match op {
-    "*" | "/" => Some(3),
-    "+" | "-" => Some(2),
-    "==" | "<" | ">" | "<=" | ">=" => Some(1),
+    TokenKind::Sym(s) => match s.as_str() {
+      "*" | "/" => Some(4),
+      "+" | "-" => Some(3),
+      "==" | "<" | ">" | "<=" | ">=" => Some(2),
+      _ => None,
+    },
+    TokenKind::And => Some(1),
+    TokenKind::Or => Some(0),
     _ => None,
   }
 }

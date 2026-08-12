@@ -223,6 +223,26 @@ fn main [] -> Int
 #[case::infix_greater_or_equal_true("[fn main [] ->Bool (2 >= 2)]", SLValue::Bool(true))]
 #[case::infix_greater_or_equal_false("[fn main [] ->Bool (1 >= 2)]", SLValue::Bool(false))]
 #[case::infix_comparison_looser_than_arith("[fn main [] ->Bool (1 + 1 < 3)]", SLValue::Bool(true))]
+#[case::infix_and_true("[fn main [] ->Bool (true and false)]", SLValue::Bool(false))]
+#[case::infix_and_both_true("[fn main [] ->Bool (true and true)]", SLValue::Bool(true))]
+#[case::infix_or_true("[fn main [] ->Bool (false or true)]", SLValue::Bool(true))]
+#[case::infix_or_both_false("[fn main [] ->Bool (false or false)]", SLValue::Bool(false))]
+#[case::infix_and_short_circuits(
+  "[fn main [] ->Bool (false and [return true])]",
+  SLValue::Bool(false)
+)]
+#[case::infix_or_short_circuits(
+  "[fn main [] ->Bool (true or [return false])]",
+  SLValue::Bool(true)
+)]
+#[case::infix_and_binds_tighter_than_or(
+  "[fn main [] ->Bool (false or true and false)]",
+  SLValue::Bool(false)
+)]
+#[case::infix_and_looser_than_comparison(
+  "[fn main [] ->Bool (1 < 2 and 3 < 4)]",
+  SLValue::Bool(true)
+)]
 #[case::infix_as_argument(
   "[fn id [n:Int] ->Int n] [fn main [] ->Int [id (3 + 3)]]",
   SLValue::Int(6)

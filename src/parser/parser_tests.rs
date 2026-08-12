@@ -1036,6 +1036,69 @@ fn infix_is_left_associative() {
 }
 
 #[test]
+fn infix_and_desugars_to_short_circuit_form() {
+  let result = read_multiple("(true and false)").unwrap();
+  assert_eq!(
+    result,
+    vec![AST::And(vec![AST::Bool(true), AST::Bool(false)])]
+  );
+}
+
+#[test]
+fn infix_or_desugars_to_short_circuit_form() {
+  let result = read_multiple("(false or true)").unwrap();
+  assert_eq!(
+    result,
+    vec![AST::Or(vec![AST::Bool(false), AST::Bool(true)])]
+  );
+}
+
+#[test]
+fn infix_and_binds_tighter_than_or() {
+  // (a or b and c) == [or a [and b c]]
+  let result = read_multiple("(a or b and c)").unwrap();
+  assert_eq!(
+    result,
+    vec![AST::Or(vec![
+      AST::Variable("a".to_string()),
+      AST::And(vec![
+        AST::Variable("b".to_string()),
+        AST::Variable("c".to_string())
+      ]),
+    ])]
+  );
+}
+
+#[test]
+fn infix_and_or_are_looser_than_comparison() {
+  // (1 < 2 and 3 < 4) == [and [< 1 2] [< 3 4]]
+  let result = read_multiple("(1 < 2 and 3 < 4)").unwrap();
+  assert_eq!(
+    result,
+    vec![AST::And(vec![
+      AST::CallFixed(Identifier::Bare("<".into()), vec![AST::Int(1), AST::Int(2)]),
+      AST::CallFixed(Identifier::Bare("<".into()), vec![AST::Int(3), AST::Int(4)]),
+    ])]
+  );
+}
+
+#[test]
+fn infix_and_is_left_associative() {
+  // (a and b and c) == [and [and a b] c]
+  let result = read_multiple("(a and b and c)").unwrap();
+  assert_eq!(
+    result,
+    vec![AST::And(vec![
+      AST::And(vec![
+        AST::Variable("a".to_string()),
+        AST::Variable("b".to_string())
+      ]),
+      AST::Variable("c".to_string()),
+    ])]
+  );
+}
+
+#[test]
 fn parens_group_a_single_atom() {
   assert_eq!(read_multiple("(3)").unwrap(), vec![AST::Int(3)]);
   assert_eq!(

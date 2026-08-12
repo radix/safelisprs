@@ -80,7 +80,7 @@ fn grow [s: String n: Int] -> String
   if [== n 0]
     s
   else
-    [grow [concat s s] [- n 1]]
+    [grow [concat s s] (n - 1)]
 
 fn main [] -> String
   [grow "x" 20]
@@ -129,13 +129,13 @@ return value.
 
 ```lisp
 fn double [x: Int] -> Int
-  [+ x x]
+  (x + x)
 
 fn sum-to [n: Int] -> Int
-  if [== n 0]
+  if (n == 0)
     0
   else
-    [+ n [sum-to [- n 1]]]
+    (n + [sum-to (n - 1)])
 
 fn main [] -> Int
   let x 21
@@ -164,9 +164,10 @@ fn bump-if-zero [x: Int] -> Int
 
 ### Infix notation
 
-Arithmetic and comparison operators may also be written with parentheses in
-infix notation. A parenthesized infix expression desugars to exactly the same
-call form, so the two are interchangeable:
+Arithmetic, comparison, and boolean operators may be written with as normal
+calls using brackets, or as infix notation in parentheses. A parenthesized infix
+expression desugars to exactly the same call form, so the two are
+interchangeable:
 
 ```lisp
 fn main [] -> Int
@@ -174,7 +175,9 @@ fn main [] -> Int
 ```
 
 Operators follow PEMDAS, with `*` and `/` binding tighter than `+` and `-`, and
-comparisons binding looser than all arithmetic.
+comparisons binding looser than all arithmetic. `and` binds looser than
+comparisons and `or` binds looser than `and`, so `(1 < 2 and 3 < 4 or false)`
+desugars to `[or [and [< 1 2] [< 3 4]] false]`.
 
 ```lisp
 fn main [] -> Int
@@ -202,7 +205,7 @@ two operands.
 
 ```lisp
 fn should-send [enabled: Bool has-recipient: Bool] -> Bool
-  [and enabled has-recipient]
+  (enabled and has-recipient)
 ```
 
 ### List iteration
@@ -224,7 +227,7 @@ higher-order functions:
 
 ```lisp
 fn inc [x: Int] -> Int
-  [+ x 1]
+  (x + 1)
 
 fn main [] -> [List Int]
   [map [list 1 2 3] inc]
@@ -240,7 +243,7 @@ struct Point
   y: Int
 
 fn length-ish [pt: Point] -> Int
-  [+ pt.x pt.y]
+  (pt.x + pt.y)
 
 fn origin [] -> Point
   new Point
@@ -262,7 +265,7 @@ enum MaybeInt
 fn get-or-zero [maybe: MaybeInt] -> Int
   match maybe
     [Some value] => # this has to be `value`, not some other name
-      let bumped [+ value 1]
+      let bumped (value + 1)
       bumped
     [None] => 0
 
@@ -302,8 +305,8 @@ the only mutation primitive is `Cell`: create one with `cell`, read it with
 ```lisp
 fn main [] -> Int
   let counter [cell 0]
-  [set! counter [+ [get counter] 1]]
-  [set! counter [+ [get counter] 41]]
+  [set! counter ([get counter] + 1)]
+  [set! counter ([get counter] + 41)]
   [get counter]
 ```
 
@@ -316,7 +319,7 @@ needs mutable state captures a `Cell`.
 fn counter [] -> [Fn [] -> Int]
   let count [cell 0]
   fn inc [] -> Int
-    [set! count [+ 1 [get count]]]
+    [set! count (1 + [get count])]
     [get count]
   inc
 
