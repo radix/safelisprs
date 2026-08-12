@@ -133,6 +133,19 @@ fn main [] -> Int
 #[case::std_eq_float_false("[fn main [] ->Bool [std::== 1.5 2.5]]", SLValue::Bool(false))]
 #[case::std_eq_bool_true("[fn main [] ->Bool [std::== true true]]", SLValue::Bool(true))]
 #[case::std_eq_bool_false("[fn main [] ->Bool [std::== true false]]", SLValue::Bool(false))]
+#[case::std_lt_int_true("[fn main [] ->Bool [std::< 3 4]]", SLValue::Bool(true))]
+#[case::std_lt_int_false("[fn main [] ->Bool [std::< 4 4]]", SLValue::Bool(false))]
+#[case::std_gt_int_true("[fn main [] ->Bool [std::> 4 3]]", SLValue::Bool(true))]
+#[case::std_gt_int_false("[fn main [] ->Bool [std::> 4 4]]", SLValue::Bool(false))]
+#[case::std_le_int_true("[fn main [] ->Bool [std::<= 4 4]]", SLValue::Bool(true))]
+#[case::std_le_int_false("[fn main [] ->Bool [std::<= 5 4]]", SLValue::Bool(false))]
+#[case::std_ge_int_true("[fn main [] ->Bool [std::>= 4 4]]", SLValue::Bool(true))]
+#[case::std_ge_int_false("[fn main [] ->Bool [std::>= 3 4]]", SLValue::Bool(false))]
+#[case::std_lt_float_true("[fn main [] ->Bool [std::< 1.5 2.5]]", SLValue::Bool(true))]
+#[case::std_gt_float_false("[fn main [] ->Bool [std::> 1.5 1.5]]", SLValue::Bool(false))]
+#[case::std_lt_string_true("[fn main [] ->Bool [std::< \"abc\" \"abd\"]]", SLValue::Bool(true))]
+#[case::std_gt_string_false("[fn main [] ->Bool [std::> \"abc\" \"abc\"]]", SLValue::Bool(false))]
+#[case::prelude_std_lt("[fn main [] ->Bool [< 3 4]]", SLValue::Bool(true))]
 #[case::void_functions_discard_body_values(
   "[fn one [] 1] [fn two [] 2] [fn main [] ->Bool [std::== [one] [two]]]",
   SLValue::Bool(true)
@@ -201,6 +214,15 @@ fn main [] -> Int
   "[fn main [] ->Int [let x 2] [let y 1] [if (x == 1 + y) 0 1]]",
   SLValue::Int(0)
 )]
+#[case::infix_less_than_true("[fn main [] ->Bool (1 < 2)]", SLValue::Bool(true))]
+#[case::infix_less_than_false("[fn main [] ->Bool (2 < 1)]", SLValue::Bool(false))]
+#[case::infix_greater_than_true("[fn main [] ->Bool (2 > 1)]", SLValue::Bool(true))]
+#[case::infix_greater_than_false("[fn main [] ->Bool (1 > 2)]", SLValue::Bool(false))]
+#[case::infix_less_or_equal_true("[fn main [] ->Bool (2 <= 2)]", SLValue::Bool(true))]
+#[case::infix_less_or_equal_false("[fn main [] ->Bool (3 <= 2)]", SLValue::Bool(false))]
+#[case::infix_greater_or_equal_true("[fn main [] ->Bool (2 >= 2)]", SLValue::Bool(true))]
+#[case::infix_greater_or_equal_false("[fn main [] ->Bool (1 >= 2)]", SLValue::Bool(false))]
+#[case::infix_comparison_looser_than_arith("[fn main [] ->Bool (1 + 1 < 3)]", SLValue::Bool(true))]
 #[case::infix_as_argument(
   "[fn id [n:Int] ->Int n] [fn main [] ->Int [id (3 + 3)]]",
   SLValue::Int(6)

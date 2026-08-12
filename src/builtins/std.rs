@@ -65,6 +65,50 @@ pub fn library() -> Library {
       ),
       equal,
     ))
+    .with_builtin(Builtin::binary(
+      "std",
+      "<",
+      sig(
+        &[("A", &[Trait::Ord])],
+        vec![Signature::var("A"), Signature::var("A")],
+        None,
+        Signature::Bool,
+      ),
+      less_than,
+    ))
+    .with_builtin(Builtin::binary(
+      "std",
+      ">",
+      sig(
+        &[("A", &[Trait::Ord])],
+        vec![Signature::var("A"), Signature::var("A")],
+        None,
+        Signature::Bool,
+      ),
+      greater_than,
+    ))
+    .with_builtin(Builtin::binary(
+      "std",
+      "<=",
+      sig(
+        &[("A", &[Trait::Ord])],
+        vec![Signature::var("A"), Signature::var("A")],
+        None,
+        Signature::Bool,
+      ),
+      less_or_equal,
+    ))
+    .with_builtin(Builtin::binary(
+      "std",
+      ">=",
+      sig(
+        &[("A", &[Trait::Ord])],
+        vec![Signature::var("A"), Signature::var("A")],
+        None,
+        Signature::Bool,
+      ),
+      greater_or_equal,
+    ))
     .with_builtin(Builtin::contextual(
       "std",
       "concat",
@@ -398,6 +442,50 @@ fn divide<'gc>(a: Value<'gc>, b: Value<'gc>) -> Result<Value<'gc>, String> {
 
 fn equal<'gc>(a: Value<'gc>, b: Value<'gc>) -> Result<Value<'gc>, String> {
   Ok(Value::Bool(a == b))
+}
+
+/// Compare two orderable values, returning the [`std::cmp::Ordering`]. Ints
+/// compare with ints, floats with floats, and strings with strings; any other
+/// pairing (including mixed numeric kinds) is a runtime type error. `op`
+/// labels the operation for error messages.
+fn compare<'gc>(a: Value<'gc>, b: Value<'gc>, op: &str) -> Result<::std::cmp::Ordering, String> {
+  if let (Ok(x), Ok(y)) = (a.as_int(), b.as_int()) {
+    Ok(x.cmp(&y))
+  } else if let (Ok(x), Ok(y)) = (a.as_float(), b.as_float()) {
+    Ok(x.partial_cmp(&y).unwrap_or(::std::cmp::Ordering::Equal))
+  } else if let (Ok(x), Ok(y)) = (a.as_string(), b.as_string()) {
+    Ok(x.cmp(y))
+  } else {
+    Err(format!(
+      "Couldn't {op} {} and {}",
+      a.type_name(),
+      b.type_name()
+    ))
+  }
+}
+
+fn less_than<'gc>(a: Value<'gc>, b: Value<'gc>) -> Result<Value<'gc>, String> {
+  Ok(Value::Bool(
+    compare(a, b, "compare")? == ::std::cmp::Ordering::Less,
+  ))
+}
+
+fn greater_than<'gc>(a: Value<'gc>, b: Value<'gc>) -> Result<Value<'gc>, String> {
+  Ok(Value::Bool(
+    compare(a, b, "compare")? == ::std::cmp::Ordering::Greater,
+  ))
+}
+
+fn less_or_equal<'gc>(a: Value<'gc>, b: Value<'gc>) -> Result<Value<'gc>, String> {
+  Ok(Value::Bool(
+    compare(a, b, "compare")? != ::std::cmp::Ordering::Greater,
+  ))
+}
+
+fn greater_or_equal<'gc>(a: Value<'gc>, b: Value<'gc>) -> Result<Value<'gc>, String> {
+  Ok(Value::Bool(
+    compare(a, b, "compare")? != ::std::cmp::Ordering::Less,
+  ))
 }
 
 fn concat<'gc, 'call>(

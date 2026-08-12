@@ -23,6 +23,8 @@ pub enum Trait {
   Div,
   /// Values support equality comparison.
   Eq,
+  /// Values support ordering comparison through the `<`, `>`, `<=`, and `>=` builtins.
+  Ord,
   /// Values support concatenation.
   Concat,
   /// Values support indexed slicing.

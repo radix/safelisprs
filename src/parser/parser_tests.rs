@@ -979,6 +979,47 @@ fn infix_equality_is_lower_precedence_than_arithmetic() {
 }
 
 #[test]
+fn infix_less_than_desugars_to_prefix_call() {
+  let result = read_multiple("(1 < 2)").unwrap();
+  assert_eq!(
+    result,
+    vec![AST::CallFixed(
+      Identifier::Bare("<".into()),
+      vec![AST::Int(1), AST::Int(2)],
+    )]
+  );
+}
+
+#[test]
+fn infix_greater_or_equal_desugars_to_prefix_call() {
+  let result = read_multiple("(2 >= 1)").unwrap();
+  assert_eq!(
+    result,
+    vec![AST::CallFixed(
+      Identifier::Bare(">=".into()),
+      vec![AST::Int(2), AST::Int(1)],
+    )]
+  );
+}
+
+#[test]
+fn infix_comparisons_share_the_lowest_precedence() {
+  // Comparisons all bind at the same (lowest) precedence, so they are
+  // left-associative: (1 < 2) parses as (< 1 2), and arithmetic binds tighter.
+  let result = read_multiple("(1 + 1 < 3)").unwrap();
+  assert_eq!(
+    result,
+    vec![AST::CallFixed(
+      Identifier::Bare("<".into()),
+      vec![
+        AST::CallFixed(Identifier::Bare("+".into()), vec![AST::Int(1), AST::Int(1)]),
+        AST::Int(3),
+      ],
+    )]
+  );
+}
+
+#[test]
 fn infix_is_left_associative() {
   // (1 - 2 - 3) == (- (- 1 2) 3)
   let result = read_multiple("(1 - 2 - 3)").unwrap();

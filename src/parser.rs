@@ -2461,7 +2461,7 @@ fn infix_precedence(op: &str) -> Option<u8> {
   match op {
     "*" | "/" => Some(3),
     "+" | "-" => Some(2),
-    "==" => Some(1),
+    "==" | "<" | ">" | "<=" | ">=" => Some(1),
     _ => None,
   }
 }
