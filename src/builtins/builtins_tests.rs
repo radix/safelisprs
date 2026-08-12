@@ -752,7 +752,7 @@ fn string_slicing_uses_character_indices() {
   );
 }
 
-/// End-to-end: the surface `(rand::rng seed "name")` returns an `Rng`
+/// End-to-end: the surface `[rand::rng seed "name"]` returns an `Rng`
 /// wrapping a `Cell[Int]` whose contents match the seed derivation directly.
 #[rstest]
 #[case::alpha(0, "alpha", -1438303955140652998)]
@@ -818,7 +818,7 @@ fn host_builtins_can_construct_rng_values() {
   );
 }
 
-/// End-to-end: `(rand::roll! rng sides)` mutates the Cell<Int> `rng` in place
+/// End-to-end: `[rand::roll! rng sides]` mutates the Cell<Int> `rng` in place
 /// and returns the roll as an Int. Calling it 10 times against the same cell
 /// reproduces the expected 10-roll chain.
 #[rstest]
@@ -835,7 +835,7 @@ fn host_builtins_can_construct_rng_values() {
 fn rand_roll_surface_chain(#[case] seed: i64, #[case] name: &str, #[case] expected: [i64; 10]) {
   // [std::map [std::range 0 10] [fn roll [_idx:Int] ->Int [rand::roll! rng 20]]]
   //
-  // `std::map` applies `roll` to each element of `(std::range 0 10)` and
+  // `std::map` applies `roll` to each element of `[std::range 0 10]` and
   // collects the rolls. `roll` ignores its argument (the index) and captures
   // the explicit `rng` cell, which `rand::roll!` mutates.
   let src = format!(

@@ -236,7 +236,7 @@ pub fn library() -> Library {
       ),
       push,
     ))
-    // (std::range start stop) -> List<Int>
+    // [std::range start stop] -> List<Int>
     //   Like Python's `list(range(start, stop))`: half-open, `[start, stop)`.
     //   `start >= stop` yields the empty list.
     .with_builtin(Builtin::contextual(
@@ -251,7 +251,7 @@ pub fn library() -> Library {
       ),
       range,
     ))
-    // (std::map list fn) -> List
+    // [std::map list fn] -> List
     //   Applies `fn` (a callable value: FunctionRef or Partial) to each element
     //   of `list` and collects the results into a new list. Implemented as a
     //   builtin with [`HostCtx`] access so callback execution is scheduled
@@ -272,7 +272,7 @@ pub fn library() -> Library {
       map_start,
       map_resume,
     ))
-    // (std::filter list pred) -> List
+    // [std::filter list pred] -> List
     //   Calls `pred` (a callable value: FunctionRef or Partial) with each
     //   element of `list` and collects the elements for which it returned
     //   `true`, preserving their original order. Like [`map`], it is a

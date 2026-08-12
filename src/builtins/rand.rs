@@ -18,7 +18,7 @@ pub fn library() -> Library {
       "Rng",
       vec![("state", Signature::cell(Signature::Int))],
     ))
-    // (rand::rng seed "name") -> Rng
+    // [rand::rng seed "name"] -> Rng
     //   Deterministically derives a new 64-bit seed from `seed` (Int) and
     //   `name` (String) using BLAKE3, and wraps it in a Cell so that
     //   `rand::roll!` can mutate it in place. Same inputs always produce the
@@ -36,7 +36,7 @@ pub fn library() -> Library {
       ),
       rng,
     ))
-    // (rand::roll! rng sides) -> Int
+    // [rand::roll! rng sides] -> Int
     //   Mutates the `rng` in place, advancing it to the next seed,
     //   and returns the roll (in `1..=sides`). The Cell is both the RNG state
     //   and (after the call) the advanced state, so callers don't need to
@@ -53,7 +53,7 @@ pub fn library() -> Library {
       ),
       roll,
     ))
-    // (rand::choice! rng list) -> element
+    // [rand::choice! rng list] -> element
     //   Advances `rng` and returns an item selected from `list`.
     //   Choosing from an empty list is an error and does not advance the RNG.
     .with_builtin(Builtin::contextual_value(

@@ -902,7 +902,7 @@ fn run_pauses_and_resumes() {
 
 #[test]
 fn run_hits_limit_exactly() {
-  // (std::+ 1 2) is 4 bytecodes: PushInt(1), PushInt(2), Call(std::+), Return.
+  // [std::+ 1 2] is 4 bytecodes: PushInt(1), PushInt(2), Call(std::+), Return.
   let source = "[fn main [] ->Int [std::+ 1 2]]";
   let pkg = compile_executable_from_source(source, ("main", "main"), &Library::default()).unwrap();
   let interp = Interpreter::new(pkg);
@@ -1940,7 +1940,7 @@ fn slice_string() {
 #[test]
 fn recursive_sum_of_list() {
   // Recursion over a list using `len` for the base case, `idx` for the head,
-  // and `slice` for the tail. `(std::slice l 1 (std::len l))` yields everything
+  // and `slice` for the tail. `[std::slice l 1 [std::len l]]` yields everything
   // from index 1 to the end.
   let source = "
       [fn sum [l:[List Int]] ->Int
